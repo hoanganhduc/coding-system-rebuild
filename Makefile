@@ -51,9 +51,12 @@ restore-secrets: ## extract SECRETS=zip into $$HOME + perm fixups
 leak-scan: ## scan the repo working tree for secrets/personal IDs
 	@bash bin/leak-scan.sh
 
-leak-scan-history: ## scan full git history (mandatory before first push)
-	@t=$$(mktemp -d); git log --all -p > $$t/history.txt 2>/dev/null; \
-	  bash bin/leak-scan.sh $$t; rc=$$?; rm -rf $$t; exit $$rc
+leak-scan-history: ## scan every commit's full tree (mandatory before first push)
+	@rc=0; for sha in $$(git rev-list --all); do \
+	  t=$$(mktemp -d); git archive $$sha | tar -x -C $$t; \
+	  bash bin/leak-scan.sh $$t >/dev/null 2>&1 || { echo "findings in commit $$sha:"; bash bin/leak-scan.sh $$t | head -20; rc=2; }; \
+	  rm -rf $$t; done; \
+	  [ $$rc -eq 0 ] && echo "history scan: clean ($$(git rev-list --all --count) commits)"; exit $$rc
 
 push: ## leak-scan, then git push (manual publish step)
 	@bash bin/leak-scan.sh

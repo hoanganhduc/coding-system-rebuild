@@ -30,7 +30,7 @@ fi
 export PATH="$PATH:{{ HOME }}/.local/bin"
 
 export PATH="$HOME/.elan/bin:$PATH"
-. "$HOME/.cargo/env"
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
 
 # Added by Antigravity CLI installer
