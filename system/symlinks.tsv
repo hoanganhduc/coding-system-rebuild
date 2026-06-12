@@ -1,0 +1,16 @@
+# Symlink topology — recreated by bin/render-install.sh (ln -sfn, parents created first).
+# Format: link<TAB>target. {{ HOME }} is substituted at install time.
+# Lines starting with # are comments. pipx/npm-managed links (aider) are recreated by
+# their own installers and listed here only for verification.
+{{ HOME }}/.claude/.local	{{ HOME }}/.openclaw/workspace/.local
+{{ HOME }}/.claude/data/research/research	{{ HOME }}/.openclaw/workspace/data/research
+{{ HOME }}/.claude/data/runs/runs	{{ HOME }}/.openclaw/workspace/data/runs
+{{ HOME }}/.claude/data/job-queue/job-queue	{{ HOME }}/.openclaw/workspace/data/job-queue
+{{ HOME }}/.local/bin/zot	{{ HOME }}/.openclaw/workspace/skills/zotero/zot.py
+{{ HOME }}/.openclaw/plugin-skills/prose	{{ HOME }}/.npm-global/lib/node_modules/openclaw/dist/extensions/open-prose/skills/prose
+{{ HOME }}/.openclaw/plugin-skills/browser-automation	{{ HOME }}/.npm-global/lib/node_modules/openclaw/dist/extensions/browser/skills/browser-automation
+{{ HOME }}/.openclaw/agents/sandbox	{{ HOME }}/.openclaw/agents/main
+{{ HOME }}/.openclaw/workspace/.research-skills-venv	{{ HOME }}/.venvs
+{{ HOME }}/.codex/runtime/workspace/.research-skills-venv	{{ HOME }}/.venvs
+# verification-only (recreated by pipx install aider-chat):
+{{ HOME }}/.local/bin/aider	{{ HOME }}/.local/share/pipx/venvs/aider-chat/bin/aider

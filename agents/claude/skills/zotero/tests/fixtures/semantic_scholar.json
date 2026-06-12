@@ -1,0 +1,12 @@
+{
+  "paperId": "abc123def456",
+  "openAccessPdf": {
+    "url": "https://arxiv.org/pdf/2301.12345.pdf",
+    "status": "GREEN"
+  },
+  "externalIds": {
+    "DOI": "10.1093/jcr/ucw010",
+    "ArXiv": "2301.12345",
+    "DBLP": "journals/jcr/ParkerS16"
+  }
+}

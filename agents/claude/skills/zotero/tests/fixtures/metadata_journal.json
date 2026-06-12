@@ -1,0 +1,23 @@
+[
+  {
+    "itemType": "journalArticle",
+    "title": "Decision Comfort",
+    "creators": [
+      {"creatorType": "author", "firstName": "Jeffrey", "lastName": "Parker"},
+      {"creatorType": "author", "firstName": "Rom", "lastName": "Schrift"}
+    ],
+    "date": "2016",
+    "DOI": "10.1093/jcr/ucw010",
+    "publicationTitle": "Journal of Consumer Research",
+    "volume": "43",
+    "issue": "1",
+    "pages": "113-133",
+    "ISSN": "0093-5301",
+    "url": "https://doi.org/10.1093/jcr/ucw010",
+    "abstractNote": "This article introduces the concept of decision comfort.",
+    "language": "en",
+    "tags": [],
+    "collections": [],
+    "relations": {}
+  }
+]

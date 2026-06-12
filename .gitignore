@@ -1,0 +1,15 @@
+# Pinned component clones (never committed here)
+external/
+# Sync dry-run staging output
+.staging/
+# Secrets artifacts must never enter the repo
+*.zip
+secrets-out/
+.secrets.env
+leak-denylist.txt
+# Temp / caches
+*.tmp
+*.log
+__pycache__/
+.pytest_cache/
+.DS_Store

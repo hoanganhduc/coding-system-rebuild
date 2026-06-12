@@ -1,0 +1,9 @@
+{
+  "gdrive_folder_id": "{{ GDRIVE_FOLDER_ID }}",
+  "gdrive_credentials_file": "",
+  "cache_max_age_hours": 24,
+  "default_send_channel": "telegram",
+  "isbn_lookup_url": "https://openlibrary.org/api/books",
+  "preferred_format": "epub",
+  "max_search_results": 25
+}

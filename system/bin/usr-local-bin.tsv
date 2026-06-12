@@ -1,0 +1,5 @@
+# System-wide symlinks under /usr/local/bin — require sudo at install time.
+# Format: link<TAB>target ({{ HOME }} substituted at install).
+/usr/local/bin/codex	{{ HOME }}/.npm-global/bin/codex
+# live system had this pointing at a removed venv (dangling); corrected to the pip --user entrypoint:
+/usr/local/bin/getscipapers	{{ HOME }}/.local/bin/getscipapers

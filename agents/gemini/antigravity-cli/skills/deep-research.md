@@ -1,0 +1,14 @@
+---
+name: "deep-research"
+description: "Start source-preserving phased research."
+---
+
+<!-- Managed by ai-agents-skills. Generated target: antigravity. Source: entrypoint-alias:deep-research.md. -->
+
+# Deep Research Entrypoint
+
+Route the request to `deep-research-workflow` when the user needs
+source-preserving search, analysis, and report writing. Start by defining
+scope, source strategy, date sensitivity, and delivery format.
+
+Backing skill: `deep-research-workflow`

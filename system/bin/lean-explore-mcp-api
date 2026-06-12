@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LEAN_EXPLORE_BIN="{{ HOME }}/.codex/runtime/workspace/.venvs/lean-explore/bin/lean-explore"
+
+if [[ -z "${LEANEXPLORE_API_KEY:-}" ]]; then
+  bashrc="${HOME}/.bashrc"
+  if [[ -f "$bashrc" ]]; then
+    key_line="$(grep -E '^[[:space:]]*export[[:space:]]+LEANEXPLORE_API_KEY=' "$bashrc" | tail -n 1 || true)"
+    if [[ -n "$key_line" ]]; then
+      eval "${key_line#export }"
+      export LEANEXPLORE_API_KEY
+    fi
+  fi
+fi
+
+if [[ -z "${LEANEXPLORE_API_KEY:-}" ]]; then
+  printf '%s\n' "LEANEXPLORE_API_KEY is required for LeanExplore MCP API backend." >&2
+  exit 1
+fi
+
+exec "$LEAN_EXPLORE_BIN" mcp serve --backend api --api-key "$LEANEXPLORE_API_KEY"

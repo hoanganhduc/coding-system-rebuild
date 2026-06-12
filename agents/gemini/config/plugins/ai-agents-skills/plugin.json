@@ -1,0 +1,15 @@
+{
+  "author": "ai-agents-skills",
+  "components": [
+    "skills",
+    "agents",
+    "rules",
+    "templates",
+    "tools",
+    "mcp",
+    "hooks"
+  ],
+  "description": "Managed ai-agents-skills plugin payload for Antigravity CLI.",
+  "name": "ai-agents-skills",
+  "version": "0.1.0"
+}

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="{{ HOME }}/.openclaw/workspace/skills/research-digest-wrapper"
+if [[ -x "{{ HOME }}/.venvs/bin/python" ]]; then
+  exec "{{ HOME }}/.venvs/bin/python" "$SCRIPT_DIR/research_digest.py" "$@"
+elif [[ -x "{{ HOME }}/.openclaw/workspace/research/alerts/.research-skills-venv/bin/python" ]]; then
+  exec "{{ HOME }}/.openclaw/workspace/research/alerts/.research-skills-venv/bin/python" "$SCRIPT_DIR/research_digest.py" "$@"
+fi
+exec python3 "$SCRIPT_DIR/research_digest.py" "$@"

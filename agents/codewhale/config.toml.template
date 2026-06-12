@@ -1,0 +1,101 @@
+allow_shell = true
+api_key = "{{ API_KEY }}"
+approval_policy = "on-request"
+base_url = "https://api.deepseek.com"
+default_text_model = "deepseek-v4-pro"
+max_subagents = 5
+mcp_config_path = "{{ HOME }}/.deepseek/mcp.json"
+memory_path = "~/.deepseek/memory.md"
+notes_path = "~/.deepseek/notes.txt"
+provider = "deepseek"
+reasoning_effort = "max"
+sandbox_mode = "workspace-write"
+skills_dir = "~/.deepseek/skills"
+
+[capacity]
+deepseek_v3_2_chat_prior = 3.9
+deepseek_v3_2_reasoner_prior = 4.1
+enabled = true
+fallback_default_prior = 3.8
+low_risk_max = 0.34
+max_replay_per_turn = 1
+medium_risk_max = 0.62
+min_turns_before_guardrail = 2
+profile_window = 8
+refresh_cooldown_turns = 2
+replan_cooldown_turns = 5
+severe_min_slack = -0.25
+severe_violation_ratio = 0.4
+
+[context]
+cycle_threshold = 768000
+enabled = true
+l1_threshold = 192000
+l2_threshold = 384000
+l3_threshold = 576000
+seam_model = "deepseek-v4-flash"
+verbatim_window_turns = 16
+
+[features]
+apply_patch = true
+exec_policy = true
+mcp = true
+shell_tool = true
+subagents = true
+web_search = true
+
+[lsp]
+enabled = true
+include_warnings = false
+max_diagnostics_per_file = 20
+poll_after_edit_ms = 5000
+
+[network]
+allow = [
+    "api.deepseek.com",
+    "github.com",
+    ".githubusercontent.com",
+]
+audit = true
+default = "prompt"
+deny = []
+
+[notifications]
+include_summary = false
+method = "auto"
+threshold_secs = 30
+
+[projects."{{ HOME }}/PrivateResearchRepo"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/ai-agents-skills"]
+trust_level = "trusted"
+
+[providers.deepseek]
+
+[providers.fireworks]
+
+[providers.novita]
+
+[providers.nvidia_nim]
+
+[providers.openrouter]
+
+[providers.sglang]
+
+[retry]
+enabled = true
+exponential_base = 2.0
+initial_delay = 1.0
+max_delay = 60.0
+max_retries = 3
+
+[skills]
+
+[snapshots]
+enabled = true
+max_age_days = 7
+
+[tui]
+alternate_screen = "auto"
+mouse_capture = true

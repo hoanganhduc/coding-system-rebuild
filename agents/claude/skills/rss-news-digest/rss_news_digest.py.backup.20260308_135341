@@ -1,0 +1,93 @@
+import hashlib
+import json
+from pathlib import Path
+
+import feedparser
+
+FEEDS_FILE = Path.home() / ".openclaw/workspace/research/rss/feeds.txt"
+STATE_FILE = Path.home() / ".openclaw/workspace/research/rss/state.json"
+OUT_FILE = Path("/tmp/rss-news-digest.md")
+
+MAX_ITEMS = 20
+
+def load_feeds():
+    if not FEEDS_FILE.exists():
+        return []
+    return [
+        line.strip()
+        for line in FEEDS_FILE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+
+def load_state():
+    if not STATE_FILE.exists():
+        return {"seen": []}
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"seen": []}
+
+def save_state(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+def item_key(entry):
+    raw = (entry.get("id") or entry.get("link") or entry.get("title", "")).strip()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def summarize_text(text, n=280):
+    text = " ".join((text or "").split())
+    return text[:n] + ("..." if len(text) > n else "")
+
+def main():
+    feeds = load_feeds()
+    state = load_state()
+    seen = set(state.get("seen", []))
+
+    items = []
+    for url in feeds:
+        feed = feedparser.parse(url)
+        title = feed.feed.get("title", url)
+        for entry in feed.entries[:10]:
+            k = item_key(entry)
+            if k in seen:
+                continue
+            items.append({
+                "key": k,
+                "feed": title,
+                "title": entry.get("title", "(untitled)"),
+                "link": entry.get("link", ""),
+                "summary": summarize_text(entry.get("summary", "") or entry.get("description", "")),
+                "published": entry.get("published", "") or entry.get("updated", ""),
+            })
+
+    items = items[:MAX_ITEMS]
+
+    lines = ["# RSS News Digest", ""]
+    if not items:
+        lines.append("No new items found.")
+    else:
+        for i, item in enumerate(items, 1):
+            lines.append(f"## {i}. {item['title']}")
+            lines.append(f"- Feed: {item['feed']}")
+            if item["published"]:
+                lines.append(f"- Published: {item['published']}")
+            if item["link"]:
+                lines.append(f"- Link: {item['link']}")
+            lines.append("")
+            lines.append(item["summary"] or "No summary available.")
+            lines.append("")
+
+    OUT_FILE.write_text("\n".join(lines), encoding="utf-8")
+
+    new_seen = list(seen.union({item["key"] for item in items}))
+    save_state({"seen": new_seen[-1000:]})
+
+    print(json.dumps({
+        "status": "ok",
+        "count": len(items),
+        "output": str(OUT_FILE),
+    }, indent=2))
+
+if __name__ == "__main__":
+    main()

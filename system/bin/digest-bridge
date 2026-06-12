@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="{{ HOME }}/.openclaw/workspace/skills/digest-bridge"
+if [[ -x "$SCRIPT_DIR/../rss-news-digest/.venv/bin/python" ]]; then
+  exec "$SCRIPT_DIR/../rss-news-digest/.venv/bin/python" "$SCRIPT_DIR/digest_bridge.py" "$@"
+elif [[ -x "{{ HOME }}/.venvs/bin/python" ]]; then
+  exec "{{ HOME }}/.venvs/bin/python" "$SCRIPT_DIR/digest_bridge.py" "$@"
+fi
+exec python3 "$SCRIPT_DIR/digest_bridge.py" "$@"

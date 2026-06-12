@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "0",
+    "CLAUDE_CODE_EFFORT_LEVEL": "ultracode",
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+    "MAX_THINKING_TOKENS": "63999",
+    "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
+    "DISABLE_TELEMETRY": "1"
+  },
+  "includeGitInstructions": false,
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf ~/)",
+      "Bash(rm -rf /home)",
+      "Bash(rm -rf /home/)",
+      "Bash(rm -rf $HOME)",
+      "Bash(rm -rf $HOME/)",
+      "Bash(rm -rf .)",
+      "Bash(rm -rf ./)",
+      "Bash(rm -rf ..)",
+      "Bash(rm -rf ../)",
+      "Bash(rm --recursive --force /)",
+      "Bash(rm -r -f /)",
+      "Bash(mkfs*)",
+      "Bash(dd if=* of=/dev/*)",
+      "Bash(git push --force origin main)",
+      "Bash(git push --force origin master)",
+      "Bash(git push --force-with-lease origin main)",
+      "Bash(git push --force-with-lease origin master)",
+      "Bash(git reset --hard*)",
+      "Edit({{ HOME }}/.claude/secrets.json)",
+      "Write({{ HOME }}/.claude/secrets.json)",
+      "Edit({{ HOME }}/.claude/.credentials.json)",
+      "Write({{ HOME }}/.claude/.credentials.json)",
+      "Edit(/**/.env)",
+      "Write(/**/.env)"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "model": "claude-fable-5[1m]",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/self-improvement/activator.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/safety-check.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/prompt-guard.js",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/self-improvement/error-detector.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/context-monitor.js",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/post-compact-context.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.openclaw/workspace/scripts/check-rebuild-plan.sh",
+            "timeout": 10
+          },
+          {
+            "type": "agent",
+            "prompt": "Briefly review all file changes made in this session. Flag any obvious bugs, security issues, or incomplete implementations. If no files were changed, say nothing.",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/pre-compact-guard.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "find /tmp -maxdepth 1 \\( -name .claude-session-titled-\\* -o -name claude-ctx-\\*.json -o -name claude-ctx-alert-\\*.json -o -name claude-statusline-debug-\\*.jsonl -o -name claude-sess-\\*-git-baseline.txt \\) -mtime +1 -delete 2>/dev/null; tail -100 /tmp/claude-compact.log > /tmp/claude-compact.log.tmp 2>/dev/null && mv /tmp/claude-compact.log.tmp /tmp/claude-compact.log 2>/dev/null; true",
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "bash ~/.openclaw/workspace/scripts/capture-session-git.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "disableSkillShellExecution": true,
+  "statusLine": {
+    "type": "command",
+    "command": "node ~/.claude/hooks/statusline.js",
+    "refreshInterval": 10
+  },
+  "feedbackSurveyRate": 0,
+  "alwaysThinkingEnabled": true,
+  "effortLevel": "xhigh",
+  "tui": "fullscreen",
+  "showThinkingSummaries": true,
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark"
+}

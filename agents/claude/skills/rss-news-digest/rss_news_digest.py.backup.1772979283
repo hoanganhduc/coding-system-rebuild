@@ -1,0 +1,324 @@
+import os
+import json
+import hashlib
+import feedparser
+import requests
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
+CACHE_FILE="rss_cache.json"
+CONFIG_FILE="rss_config.json"
+
+MAX_WORKERS=10
+MAX_ITEMS_PER_FEED=10
+
+TELEGRAM_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT=os.getenv("TELEGRAM_CHAT_ID")
+
+FEEDS={
+
+"arxiv":[
+"http://arxiv.org/rss/cs.CC",
+"http://export.arxiv.org/rss/cs.DS",
+"http://export.arxiv.org/rss/cs.DM",
+"http://export.arxiv.org/rss/math.HO",
+"http://export.arxiv.org/rss/math.CO"
+],
+
+"blogs":[
+"http://petr-mitrichev.blogspot.com/feeds/posts/default",
+"https://11011110.github.io/blog/feed.xml",
+"http://windowsontheory.org/feed/",
+"http://gilkalai.wordpress.com/feed/",
+"http://math.andrej.com/feed/",
+"http://blog.computationalcomplexity.org/feeds/posts/default",
+"http://rjlipton.wordpress.com/feed/",
+"https://theorydish.blog/feed/",
+"https://tcsplus.wordpress.com/feed/"
+],
+
+"community":[
+"http://cstheory-feed.org/atom.xml",
+"https://cstheoryevents.wordpress.com/feed/",
+"http://www.openproblemgarden.org/category/graph_theory_0/feed"
+],
+
+"jobs":[
+"https://www.mathjobs.org/jobs?joblist-0-0----rss--",
+"http://cstheory-jobs.org/feed/"
+],
+
+"news":[
+"http://www.quantamagazine.org/feed/",
+"http://blog.acolyer.org/feed/"
+],
+
+"tech":[
+"https://news.ycombinator.com/rss"
+],
+
+"youtube":[
+"https://www.youtube.com/feeds/videos.xml?channel_id=UCe3HfH-xCEDGU-XrOhMzgkA",
+"https://www.youtube.com/feeds/videos.xml?channel_id=UCyGLYDvZ5BD5oYCIVv995HA",
+"https://www.youtube.com/feeds/videos.xml?channel_id=UCW1C2xOfXsIzPgjXyuhkw9g"
+]
+
+}
+
+def send(msg):
+
+    if not TELEGRAM_TOKEN:
+        return
+
+    url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    requests.post(url,json={
+        "chat_id":TELEGRAM_CHAT,
+        "text":msg,
+        "disable_web_page_preview":True
+    })
+
+
+def load_json(path,default):
+
+    if not os.path.exists(path):
+        return default
+
+    with open(path) as f:
+        return json.load(f)
+
+
+def save_json(path,data):
+
+    with open(path,"w") as f:
+        json.dump(data,f,indent=2)
+
+
+def get_active_categories():
+
+    cfg=load_json(CONFIG_FILE,{"categories":["arxiv","blogs"]})
+
+    return cfg["categories"]
+
+
+def set_categories(cats):
+
+    save_json(CONFIG_FILE,{"categories":cats})
+
+
+def hash_item(title,link):
+
+    h=hashlib.sha256()
+    h.update((title+link).encode())
+    return h.hexdigest()
+
+
+def normalize_link(link):
+
+    if "arxiv.org/abs/" in link:
+        return link.split("?")[0]
+
+    return link
+
+
+def summarize(text):
+
+    if not text:
+        return ""
+
+    return text.replace("\n"," ")[:300]+"..."
+
+
+def fetch_feed(url):
+
+    items=[]
+
+    try:
+
+        feed=feedparser.parse(url)
+
+        for e in feed.entries[:MAX_ITEMS_PER_FEED]:
+
+            summary=e.get("summary","")
+
+            items.append({
+
+                "title":e.title,
+                "link":normalize_link(e.link),
+                "summary":summarize(summary),
+                "authors":", ".join(a.name for a in e.get("authors",[]))
+            })
+
+    except:
+        pass
+
+    return items
+
+
+def fetch_all():
+
+    cache=load_json(CACHE_FILE,{"items":{}})
+
+    seen=set(cache["items"].keys())
+
+    categories=get_active_categories()
+
+    urls=[]
+
+    for c in categories:
+        urls+=FEEDS[c]
+
+    new_items=[]
+
+    with ThreadPoolExecutor(MAX_WORKERS) as ex:
+
+        results=list(ex.map(fetch_feed,urls))
+
+    for feed_items in results:
+
+        for item in feed_items:
+
+            h=hash_item(item["title"],item["link"])
+
+            if h in seen:
+                continue
+
+            cache["items"][h]={
+
+                "title":item["title"],
+                "link":item["link"],
+                "summary":item["summary"],
+                "authors":item["authors"],
+                "time":datetime.utcnow().isoformat()
+
+            }
+
+            new_items.append(cache["items"][h])
+
+    save_json(CACHE_FILE,cache)
+
+    return new_items
+
+
+def format_item(item):
+
+    msg=""
+
+    if item["authors"]:
+
+        msg+="📄 arXiv Paper\n\n"
+        msg+=f"{item['title']}\n"
+        msg+=f"Authors: {item['authors']}\n\n"
+        msg+=item["summary"]+"\n\n"
+        msg+=item["link"]
+
+    else:
+
+        msg+="• "+item["title"]+"\n"+item["link"]
+
+    return msg
+
+
+def digest():
+
+    items=fetch_all()
+
+    if not items:
+        return "No new items."
+
+    msg="📚 Research Digest\n\n"
+
+    for i in items[:10]:
+
+        msg+=format_item(i)
+        msg+="\n\n"
+
+    send(msg)
+
+    return msg
+
+
+def latest():
+
+    cache=load_json(CACHE_FILE,{"items":{}})
+
+    items=list(cache["items"].values())[-10:]
+
+    msg="Latest items\n\n"
+
+    for i in items:
+
+        msg+=format_item(i)+"\n\n"
+
+    return msg
+
+
+def top_papers():
+
+    items=fetch_all()
+
+    arxiv=[i for i in items if "arxiv" in i["link"]]
+
+    msg="Top theory papers today\n\n"
+
+    for p in arxiv[:10]:
+
+        msg+=format_item(p)+"\n\n"
+
+    send(msg)
+
+    return msg
+
+
+def list_feeds():
+
+    msg="Available feed categories\n\n"
+
+    for k in FEEDS:
+        msg+=k+"\n"
+
+    return msg
+
+
+def select_categories(text):
+
+    parts=text.split()
+
+    cats=[p for p in parts if p in FEEDS]
+
+    if not cats:
+        cats=list(FEEDS.keys())
+
+    set_categories(cats)
+
+    return "Enabled feeds: "+",".join(cats)
+
+
+def run(command):
+
+    if command.startswith("/feeds"):
+        return select_categories(command)
+
+    if command=="/digest":
+        return digest()
+
+    if command=="/latest":
+        return latest()
+
+    if command=="/top":
+        return top_papers()
+
+    if command=="/feeds":
+        return list_feeds()
+
+    return "Unknown command"
+
+if __name__ == "__main__":
+    import sys
+
+    cmd = "/digest"
+
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+
+    print(run(cmd))

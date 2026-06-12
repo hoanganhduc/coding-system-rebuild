@@ -1,0 +1,139 @@
+{
+  "locations": {
+    "{{ HOME }}/ai-agents-skills": {
+      "tool_approvals": [
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "printf",
+            "git symbolic-ref"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "git rev-list"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "git push"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "git fetch"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "git rebase"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "python"
+          ]
+        },
+        {
+          "kind": "write"
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "python3"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "make"
+          ]
+        },
+        {
+          "kind": "memory"
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "git add",
+            "git commit"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "./installer/bootstrap.sh",
+            "sed"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "git checkout",
+            "git merge"
+          ]
+        }
+      ]
+    },
+    "{{ HOME }}/PrivateResearchRepo": {
+      "tool_approvals": [
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "printf"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "mkdir"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "sed"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "awk"
+          ]
+        },
+        {
+          "kind": "write"
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "python"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "python3"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "git for-each-ref"
+          ]
+        },
+        {
+          "kind": "commands",
+          "commandIdentifiers": [
+            "git fetch"
+          ]
+        }
+      ]
+    }
+  }
+}

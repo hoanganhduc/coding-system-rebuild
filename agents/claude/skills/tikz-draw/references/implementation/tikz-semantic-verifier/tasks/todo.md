@@ -1,0 +1,90 @@
+# Tasks
+
+- [x] Task: Lock the follow-on graph direction to Sage-assisted on-demand mode.
+  - Acceptance:
+    - the spec and plan explicitly say future graph growth should prefer a Sage-assisted on-demand backend mode
+    - the updated direction does not rewrite the completed Phase 6 slice as something else
+    - the updated direction does not imply unrestricted arbitrary Sage execution
+  - Verify:
+    - re-read the updated spec and plan and confirm the same follow-on direction appears in both
+  - Files:
+    - `/home/<user>/tasks/tikz-semantic-verifier/SPEC.md`
+    - `/home/<user>/tasks/tikz-semantic-verifier/tasks/plan.md`
+    - `/home/<user>/tasks/tikz-semantic-verifier/tasks/todo.md`
+
+- [x] Task: Lock the Phase 6 graph-family contract.
+  - Acceptance:
+    - the spec and task files describe a Sage-backed generic graph family instead of graph-by-graph TikZ families
+    - the initial scope and boundaries are explicit
+  - Verify:
+    - re-read the updated spec and task files and confirm the same scope appears everywhere
+  - Files:
+    - `/home/<user>/tasks/tikz-semantic-verifier/SPEC.md`
+    - `/home/<user>/tasks/tikz-semantic-verifier/tasks/plan.md`
+    - `/home/<user>/tasks/tikz-semantic-verifier/tasks/todo.md`
+
+- [x] Task: Add the Sage graph backend.
+  - Acceptance:
+    - graph requests can be parsed into a Sage constructor or supported shorthand
+    - the backend returns vertices, edges, and coordinates suitable for graph specs
+  - Verify:
+    - run one Petersen and one Johnson graph query through the backend and inspect the parsed result
+  - Files:
+    - `~/.codex/runtime/workspace/skills/tikz-draw/`
+    - `~/.claude/skills/tikz-draw/`
+
+- [x] Task: Add graph rendering and semantic verification.
+  - Acceptance:
+    - `graph` is a supported family
+    - graph render output compiles and passes visual review
+    - semantic verification compares rendered undirected graph structure against the target graph
+  - Verify:
+    - run one graph good case through `review-visual`, `verify-semantic`, and `review --semantic`
+  - Files:
+    - `~/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py`
+    - `~/.codex/runtime/workspace/skills/tikz-draw/family_verifiers.py`
+    - `~/.claude/skills/tikz-draw/tikz_draw.py`
+    - `~/.claude/skills/tikz-draw/family_verifiers.py`
+
+- [x] Task: Promote Petersen and Johnson fixtures into the regression suite.
+  - Acceptance:
+    - the suite contains Petersen and Johnson base cases
+    - the suite contains graph mutation cases for missing or extra adjacency
+    - the regression runner supports the mutation operations those cases need
+  - Verify:
+    - run the targeted Petersen and Johnson fixtures and inspect the summary JSON
+  - Files:
+    - `~/.codex/runtime/workspace/skills/tikz-draw/assets/examples/semantic-regression/`
+    - `~/.claude/skills/tikz-draw/assets/examples/semantic-regression/`
+    - `~/.codex/runtime/workspace/skills/tikz-draw/semantic_regression_runner.py`
+    - `~/.claude/skills/tikz-draw/semantic_regression_runner.py`
+
+- [x] Task: Update schemas, parity, and docs for graph support.
+  - Acceptance:
+    - the schemas include `graph`
+    - parity passes with graph-family support
+    - thin docs mention Sage-backed graph support accurately
+  - Verify:
+    - run parity and re-read the updated docs
+  - Files:
+    - `~/.codex/runtime/workspace/skills/tikz-draw/assets/spec-schema/`
+    - `~/.codex/runtime/workspace/skills/tikz-draw/semantic_parity_check.py`
+    - `~/.codex/skills/tikz-draw/SKILL.md`
+    - `~/.claude/skills/tikz-draw/SKILL.md`
+    - `~/.claude/commands/tikz.md`
+
+- [x] Task: Verify the Phase 6 slice end to end.
+  - Acceptance:
+    - syntax checks pass
+    - parity passes
+    - Petersen and Johnson targeted passes succeed
+    - the full regression suite still passes on Codex and Claude
+  - Verify:
+    - `bash -n` on both runner shells
+    - non-writing `ast.parse` checks on changed Python files
+    - `python3 ~/.codex/runtime/workspace/skills/tikz-draw/semantic_parity_check.py`
+    - `python3 ~/.codex/runtime/workspace/skills/tikz-draw/semantic_regression_runner.py --platform codex --fixture petersen_graph`
+    - `python3 ~/.codex/runtime/workspace/skills/tikz-draw/semantic_regression_runner.py --platform codex --fixture johnson_5_3`
+    - `python3 ~/.codex/runtime/workspace/skills/tikz-draw/semantic_regression_runner.py --platform both`
+  - Files:
+    - all touched helper, backend, runner, suite, task, schema, and doc files

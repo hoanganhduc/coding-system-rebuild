@@ -1,0 +1,88 @@
+personality = "pragmatic"
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+approvals_reviewer = "user"
+plan_mode_reasoning_effort = "xhigh"
+
+[features]
+hooks = true
+multi_agent = true
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+
+[mcp_servers.sequentialThinking]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+startup_timeout_sec = 20.0
+
+[mcp_servers.lean-explore]
+command = "{{ HOME }}/.local/bin/lean-explore-mcp-api"
+
+[projects."{{ HOME }}"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/.openclaw/workspace/data/projects"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/.openclaw/workspace/data/projects/REDACTED"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/ai-agents-skills"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/deepseek-tui"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/PrivateResearchRepo"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/PrivateResearchRepo"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/.openclaw/workspace/data/projects/PrivateResearchRepo"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/.openclaw/workspace/data/projects/REDACTED-SUBMISSION-ID-Review"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/.openclaw/workspace"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/.openclaw/workspace/data/projects/PrivateResearchRepo"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/PrivateResearchRepo"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/PrivateResearchRepo"]
+trust_level = "trusted"
+
+[projects."{{ HOME }}/PrivateResearchRepo"]
+trust_level = "trusted"
+
+[notice]
+hide_rate_limit_model_nudge = true
+
+[notice.model_migrations]
+"gpt-5.2-codex" = "gpt-5.3-codex"
+"gpt-5.3-codex" = "gpt-5.4"
+
+[plugins."github@openai-curated"]
+enabled = true
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4
+
+[hooks.state]
+
+[hooks.state."{{ HOME }}/.codex/hooks.json:post_tool_use:0:0"]
+enabled = true
+trusted_hash = "sha256:ea399a66184069a4b5315617da698c510fe6ec063d9f0e04034644ae26a43ab6"
+
+[hooks.state."{{ HOME }}/.codex/hooks.json:pre_tool_use:0:0"]
+enabled = true
+trusted_hash = "sha256:8d3bbaffa8119245977c06e97ee1e16f90ae231d2d011726957cd502c4d1b62a"
+
+[hooks.state."{{ HOME }}/.codex/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:fc1a3b314c3dc932573255044c39517870179235292ce895f0281b3433c87e06"

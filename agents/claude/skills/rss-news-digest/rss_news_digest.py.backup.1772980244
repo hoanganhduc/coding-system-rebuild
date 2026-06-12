@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+
+import os
+import json
+import asyncio
+import hashlib
+import feedparser
+import aiohttp
+import requests
+from datetime import datetime
+
+# Simple RSS news digest: tolerant to network failures and writes /tmp/rss-news-digest.md
+
+FEEDS_FILE=os.path.expanduser("~/.openclaw/workspace/research/rss/feeds.txt")
+OUT_FILE="/tmp/rss-news-digest.md"
+CACHE_FILE="rss_cache.json"
+MEMORY_FILE="research_memory.json"
+
+TOP_N_PER_FEED=3
+
+async def fetch_feed(session, url):
+    items=[]
+    try:
+        async with session.get(url, timeout=10) as resp:
+            text = await resp.text()
+            feed = feedparser.parse(text)
+            for e in feed.entries[:TOP_N_PER_FEED]:
+                title = getattr(e, 'title', '')
+                link = getattr(e, 'link', '')
+                summary = getattr(e, 'summary', '')
+                items.append({
+                    'feed': url,
+                    'title': title,
+                    'link': link,
+                    'summary': summary
+                })
+    except Exception as exc:
+        # Return empty list on failure, but log the error entry
+        items.append({'feed': url, 'error': str(exc)})
+    return items
+
+async def gather_feeds(urls):
+    results=[]
+    timeout = aiohttp.ClientTimeout(total=15)
+    connector = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        tasks = [fetch_feed(session, u.strip()) for u in urls if u.strip()]
+        for coro in asyncio.as_completed(tasks):
+            try:
+                res = await coro
+                results.extend(res)
+            except Exception as e:
+                # shouldn't happen because fetch_feed handles exceptions, but be safe
+                results.append({'error': str(e)})
+    return results
+
+def load_feeds(path):
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+
+def write_output(items):
+    # Produce a concise markdown-style digest
+    now = datetime.utcnow().isoformat() + 'Z'
+    lines = [f"# RSS News Digest ({now})\n\n"]
+
+    good = [it for it in items if 'title' in it and it.get('title')]
+    errors = [it for it in items if 'error' in it]
+
+    if good:
+        lines.append('## Items\n')
+        for it in good:
+            lines.append(f"- **{it.get('title','(no title)')}**  \n  {it.get('link','')}  \n  Source: {it.get('feed','')}\n")
+    else:
+        lines.append('No items fetched from feeds.\n')
+
+    if errors:
+        lines.append('\n## Errors\n')
+        for e in errors:
+            feed = e.get('feed','(unknown)')
+            lines.append(f"- {feed}: {e.get('error')}\n")
+
+    with open(OUT_FILE, 'w') as f:
+        f.write('\n'.join(lines))
+
+    return OUT_FILE
+
+def main():
+    urls = load_feeds(FEEDS_FILE)
+    if not urls:
+        print('No feeds configured in', FEEDS_FILE)
+        return
+    items = asyncio.run(gather_feeds(urls))
+    out = write_output(items)
+    print('Wrote digest to', out)
+
+if __name__=='__main__':
+    main()

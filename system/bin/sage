@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+image="${SAGE_DOCKER_IMAGE:-ghcr.io/hoanganhduc/sagemath:10.8}"
+workdir="${SAGE_DOCKER_WORKDIR:-$PWD}"
+
+exec docker run \
+  --rm \
+  --network none \
+  -v "$workdir:/work" \
+  -w /work \
+  "$image" \
+  sage "$@"

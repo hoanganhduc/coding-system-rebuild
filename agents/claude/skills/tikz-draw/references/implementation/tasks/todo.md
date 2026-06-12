@@ -1,0 +1,131 @@
+# Tasks
+
+- [x] Task: Finalize the stable helper API and path contract.
+  - Acceptance:
+    - the plan uses one verb set only: `doctor/spec/render/check/compile/review/extract`
+    - direct-use and deep-research run roots are explicitly defined for both platforms
+    - absolute host path handling is mandatory and documented
+  - Verify:
+    - re-read the revised plan and confirm no residual `new --spec` wording remains
+  - Files:
+    - `/home/<user>/tikz-draw-skill-implementation-plan.md`
+    - `/home/<user>/tasks/tikz-draw-skill/SPEC.md`
+    - `/home/<user>/tasks/tikz-draw-skill/tasks/plan.md`
+
+- [x] Task: Define the canonical shared source tree and sync/install policy.
+  - Acceptance:
+    - `shared/` is the single source of truth
+    - install targets in Codex and Claude are documented as copies of shared assets
+  - Verify:
+    - the plan and spec name the same canonical source tree
+  - Files:
+    - `/home/<user>/tikz-draw-skill-implementation-plan.md`
+    - `/home/<user>/tasks/tikz-draw-skill/SPEC.md`
+
+- [x] Task: Define `diagram.schema.json` and `figure-brief.schema.json`.
+  - Acceptance:
+    - both schemas exist under `shared/spec-schema/`
+    - `figure-brief` includes `figure_id`, `source_ids`, `diagram_family`, and `output_dir`
+  - Verify:
+    - validate example payloads against both schemas
+  - Files:
+    - `/home/<user>/tasks/tikz-draw-skill/shared/spec-schema/diagram.schema.json`
+    - `/home/<user>/tasks/tikz-draw-skill/shared/spec-schema/figure-brief.schema.json`
+
+- [x] Task: Build the shared snippet, style, and review-rule assets.
+  - Acceptance:
+    - shared snippets exist for at least flowchart, tree, and commutative diagram
+    - shared style files exist
+    - prevention/review rules are captured as reusable assets
+    - shared rendering guidance includes the required `adjustbox{max width=\\textwidth}` wrapper pattern
+  - Verify:
+    - spot-check asset paths and content against the plan
+  - Files:
+    - `/home/<user>/tasks/tikz-draw-skill/shared/snippets/`
+    - `/home/<user>/tasks/tikz-draw-skill/shared/styles/`
+    - `/home/<user>/tasks/tikz-draw-skill/shared/checks/`
+
+- [x] Task: Implement the Codex `tikz-draw` root skill and runtime helper.
+  - Acceptance:
+    - Codex root skill exists with strong frontmatter description
+    - runtime helper exists and exposes the stable API
+    - no hardcoded `/workspace` assumptions remain
+    - rendered document-facing output wraps `tikzpicture` in `adjustbox{max width=\\textwidth}`
+  - Verify:
+    - `python3 /home/<user>/.codex/skills/.system/skill-creator/scripts/quick_validate.py /home/<user>/.codex/skills/tikz-draw`
+    - `bash ~/.codex/runtime/run_skill.sh skills/tikz-draw/run_tikz_draw.sh doctor`
+    - inspect one rendered `.tex` output for the required wrapper
+  - Files:
+    - `~/.codex/skills/tikz-draw/SKILL.md`
+    - `~/.codex/skills/tikz-draw/references/`
+    - `~/.codex/runtime/workspace/skills/tikz-draw/run_tikz_draw.sh`
+
+- [x] Task: Add Codex routing and deep-research handoff integration.
+  - Acceptance:
+    - Codex quick-map and research routing mention `tikz-draw`
+    - deep-research templates and reference docs include figure-brief and artifact sections
+    - the handoff is post-analysis, not a broad research-router replacement
+  - Verify:
+    - re-read updated docs and confirm routing language is narrow and consistent
+  - Files:
+    - `~/.codex/AGENTS.md`
+    - `~/.codex/instructions/research-quick-actions.md`
+    - `~/.codex/skills/openclaw-research/SKILL.md`
+    - `~/.codex/skills/deep-research-workflow/SKILL.md`
+    - `~/.codex/templates/deep-research-analysis.md`
+    - `~/.codex/templates/deep-research-report.md`
+    - `~/.codex/skills/deep-research-workflow/references/source-handoff.md`
+    - `~/.codex/skills/deep-research-workflow/references/output-structure.md`
+
+- [x] Task: Implement the Claude private skill and public `/tikz` command.
+  - Acceptance:
+    - private skill exists with explicit frontmatter
+    - `/tikz` command exists with `Runner:` and command matrix
+    - command uses the stable API and wrapper path
+    - rendered document-facing output wraps `tikzpicture` in `adjustbox{max width=\\textwidth}`
+  - Verify:
+    - `bash ~/.claude/skills/_run.sh skills/tikz-draw/run_tikz_draw.sh doctor`
+    - inspect frontmatter for `user-invocable: false`
+    - inspect one rendered `.tex` output for the required wrapper
+  - Files:
+    - `~/.claude/skills/tikz-draw/SKILL.md`
+    - `~/.claude/skills/tikz-draw/references/`
+    - `~/.claude/skills/tikz-draw/run_tikz_draw.sh`
+    - `~/.claude/commands/tikz.md`
+
+- [x] Task: Add Claude routing and deep-research handoff integration.
+  - Acceptance:
+    - `/tikz` appears in the slash-command table and automatic routing block
+    - deep-research wording is updated to include the optional figure phase
+    - analysis/report templates include figure-brief and artifact tracking
+  - Verify:
+    - inspect updated routing/docs for consistency
+    - verify there is no public duplication between command and skill
+  - Files:
+    - `~/.claude/CLAUDE.md`
+    - `~/.claude/commands/deep-research.md`
+    - `~/.claude/skills/deep-research/SKILL.md`
+    - `~/.claude/skills/deep-research/templates/analysis.md`
+    - `~/.claude/skills/deep-research/templates/report.md`
+
+- [x] Task: Run platform wiring checks.
+  - Acceptance:
+    - Codex and Claude entrypoints both resolve correctly
+    - no missing files or broken runner paths remain
+  - Verify:
+    - use the local verification checklist for `Exists`, `Substantive`, `Wired`, `Functional`
+  - Files:
+    - all installed skill and command files
+
+- [x] Task: Run end-to-end smoke tests and one research-to-TikZ scenario per platform.
+  - Acceptance:
+    - both platforms pass `doctor`
+    - both platforms render at least one good diagram and reject one bad diagram
+    - both platforms complete one source-linked research-to-TikZ flow with `S*` and `F*`
+    - both standalone and embeddable outputs include the required `adjustbox` wrapper
+  - Verify:
+    - wrapper-based smoke tests
+    - manual artifact inspection for `.tex`, `.pdf`, `.svg`, review verdict output, and `adjustbox` wrapping
+  - Files:
+    - platform run directories
+    - deep-research output directories

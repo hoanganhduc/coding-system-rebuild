@@ -1,0 +1,35 @@
+# Codex Language and Domain Style Rules
+
+These are Codex-native reference rules adapted from the useful parts of the
+local Claude configuration. They are defaults, not overrides of project-local
+style guides.
+
+## Python
+
+- Use type hints on function signatures and return types where practical.
+- Prefer `dataclass` or `NamedTuple` over ad hoc dicts for stable structured data.
+- Prefer f-strings over `%` formatting or `.format()`.
+- Group imports as stdlib, third-party, then local, with blank lines between groups.
+- Prefer `pathlib.Path` over `os.path` for new file-path code.
+- Use an `if __name__ == "__main__":` guard in standalone scripts.
+
+## LaTeX source
+
+- Do not wrap mid-sentence just to hit a column width; prefer sentence-boundary wrapping.
+- Prefer `\cref{}` over bare `\ref{}` when `cleveref` is available.
+- Prefer BibTeX keys like `AuthorYear` unless the project already uses a different scheme.
+- In LaTeX source, prefer `\(...\)` and `\[...\]` to raw `$...$` and `$$...$$`.
+- Prefer `\textbf{}` and `\textit{}` over legacy `\bf` and `\it`.
+- Preserve existing field order and local formatting conventions when editing `.bib` files.
+
+## SageMath
+
+- Prefer Sage-native types such as `Integer`, `Rational`, and `Graph` when they matter.
+- Prefer named graph constructors like `graphs.PetersenGraph()` when available.
+- Use `show()` for interactive output and `save()` for file output.
+- Prefer Sage-native parallel patterns such as `@parallel` over ad hoc multiprocessing when staying inside Sage.
+
+## Reminder about math formatting in assistant responses
+
+These rules are for source files. For assistant markdown output in Codex, the
+global math-formatting rule in `~/.codex/AGENTS.md` still applies.

@@ -1,0 +1,96 @@
+# Tasks
+
+- [x] Task: Create a separate planning slice for Sage-assisted on-demand graph mode.
+  - Acceptance:
+    - the new slice lives outside the completed Phase 6 workspace
+    - the new slice is framed as a follow-on direction, not a rewrite of completed work
+  - Verify:
+    - re-open the new `SPEC.md`, `tasks/plan.md`, and `tasks/todo.md`
+  - Files:
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/todo.md`
+
+- [x] Task: Define trigger rules for `baseline` vs `sage-assisted` routing.
+  - Acceptance:
+    - the planning slice states when the graph request stays on the baseline path
+    - the planning slice states when the graph request must route to Sage-assisted handling
+    - the planning slice states when the request should be rejected or escalated
+  - Verify:
+    - re-read the `Trigger Rules` section in `SPEC.md`
+  - Files:
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+
+- [x] Task: Define the Sage-assisted contract.
+  - Acceptance:
+    - allowed input forms are explicit
+    - normalized output fields are explicit
+    - routing/report status fields are explicit
+    - the contract says Sage returns normalized graph semantics rather than final TeX
+  - Verify:
+    - re-read the `Sage-Assisted Contract` section in `SPEC.md`
+  - Files:
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+
+- [x] Task: Define boundaries and implementation touchpoints.
+  - Acceptance:
+    - the planning slice explicitly excludes unrestricted arbitrary Sage execution
+    - the planning slice explicitly keeps the current Phase 6 baseline path
+    - likely Codex and Claude touchpoints are listed
+  - Verify:
+    - re-read the `Project Structure` and `Boundaries` sections in `SPEC.md`
+  - Files:
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
+
+- [x] Task: Define verification expectations for a future implementation slice.
+  - Acceptance:
+    - the plan includes verification checkpoints
+    - the spec includes routing and review-oriented testing expectations
+  - Verify:
+    - re-read `Testing Strategy` in `SPEC.md`
+    - re-read `Verification checkpoints` in `tasks/plan.md`
+  - Files:
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
+
+- [x] Task: Turn the Sage-assisted contract into concrete code-touch implementation tasks.
+  - Acceptance:
+    - the planning slice names the exact first-slice code touchpoints
+    - the planning slice states what changes belong in `tikz_draw.py`
+    - the planning slice states what changes belong in `sage_graph_backend.py`
+    - the planning slice states what parity and doc surfaces must be updated
+    - the planning slice stays honest that both baseline and Sage-assisted paths may still use Sage for graph realization initially
+  - Verify:
+    - re-read the `First Implementation Slice` section in `SPEC.md`
+    - re-read the `First code-touch slice` section in `tasks/plan.md`
+  - Files:
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
+    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/todo.md`
+
+- [x] Task: Implement the first Sage-assisted graph routing/report slice.
+  - Acceptance:
+    - `tikz_draw.py` records graph routing metadata in the brief/spec/manifest/report flow
+    - `sage_graph_backend.py` distinguishes baseline vs Sage-assisted request handling
+    - Codex and Claude stay in parity on the new routing/report surface
+    - thin docs mention baseline vs Sage-assisted graph routing accurately
+  - Verify:
+    - `python3 -c "import ast, pathlib; ast.parse(pathlib.Path('/home/<user>/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py').read_text())"`
+    - `python3 -c "import ast, pathlib; ast.parse(pathlib.Path('/home/<user>/.codex/runtime/workspace/skills/tikz-draw/sage_graph_backend.py').read_text())"`
+    - `python3 /home/<user>/.codex/runtime/workspace/skills/tikz-draw/semantic_parity_check.py`
+    - `bash ~/.codex/runtime/run_skill.sh skills/tikz-draw/run_tikz_draw.sh doctor`
+    - baseline graph render smoke, Sage-assisted render smoke, and one negative routing smoke
+  - Files:
+    - `~/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py`
+    - `~/.codex/runtime/workspace/skills/tikz-draw/sage_graph_backend.py`
+    - `~/.codex/runtime/workspace/skills/tikz-draw/assets/spec-schema/figure-brief.schema.json`
+    - `~/.codex/runtime/workspace/skills/tikz-draw/assets/spec-schema/diagram.schema.json`
+    - `~/.codex/runtime/workspace/skills/tikz-draw/semantic_parity_check.py`
+    - `~/.codex/skills/tikz-draw/SKILL.md`
+    - `~/.claude/skills/tikz-draw/tikz_draw.py`
+    - `~/.claude/skills/tikz-draw/sage_graph_backend.py`
+    - `~/.claude/skills/tikz-draw/assets/spec-schema/figure-brief.schema.json`
+    - `~/.claude/skills/tikz-draw/assets/spec-schema/diagram.schema.json`
+    - `~/.claude/skills/tikz-draw/SKILL.md`
+    - `~/.claude/commands/tikz.md`

@@ -1,0 +1,40 @@
+{
+  "timeouts": {
+    "connect_timeout": 10,
+    "execute_timeout": 60,
+    "read_timeout": 120
+  },
+  "servers": {
+    "deepseek": {
+      "command": "{{ HOME }}/.cargo/bin/deepseek-tui",
+      "args": [
+        "serve",
+        "--mcp"
+      ],
+      "env": {},
+      "url": null,
+      "connect_timeout": null,
+      "execute_timeout": null,
+      "read_timeout": null,
+      "disabled": false,
+      "enabled": true,
+      "required": false,
+      "enabled_tools": [],
+      "disabled_tools": []
+    },
+    "lean-explore": {
+      "command": "{{ HOME }}/.local/bin/lean-explore-mcp-api",
+      "args": [],
+      "env": {},
+      "url": null,
+      "connect_timeout": null,
+      "execute_timeout": null,
+      "read_timeout": null,
+      "disabled": false,
+      "enabled": true,
+      "required": false,
+      "enabled_tools": [],
+      "disabled_tools": []
+    }
+  }
+}

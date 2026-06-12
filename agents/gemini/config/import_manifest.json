@@ -1,0 +1,12 @@
+{
+  "imports": [
+    {
+      "name": "ai-agents-skills",
+      "source": "local-install",
+      "importedAt": "2026-06-08T14:14:36Z",
+      "components": [
+        "installed"
+      ]
+    }
+  ]
+}

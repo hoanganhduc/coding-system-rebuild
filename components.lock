@@ -1,0 +1,7 @@
+# Pinned components: name=url@ref
+# - HTTPS URLs so public repos clone without SSH keys; SSH fallback documented in docs/INSTALL.md.
+# - "ref" is a commit SHA once the component is published; "LOCAL" means the component is
+#   not yet published and must be used from its live checkout path (LOCAL=1 mode).
+#   P1 replaces LOCAL with real SHAs after openclaw-bot is populated and published.
+openclaw-bot=https://github.com/hoanganhduc/openclaw-bot.git@LOCAL:~/openclaw-bot
+ai-agents-skills=https://github.com/hoanganhduc/ai-agents-skills.git@LOCAL:~/ai-agents-skills
