@@ -27,7 +27,7 @@ import sys
 
 import yaml
 
-HOME = os.path.expanduser("~")
+HOME = os.environ.get("CSR_HOME_OVERRIDE") or os.path.expanduser("~")
 MARK_BEGIN = "# >>> coding-system secrets >>>"
 MARK_END = "# <<< coding-system secrets <<<"
 SECRET_NAME_RE = re.compile(

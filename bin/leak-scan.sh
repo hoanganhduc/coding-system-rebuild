@@ -56,7 +56,8 @@ scan_pattern "slack token"                'xox[bpas]-[A-Za-z0-9-]{10,}'
 scan_pattern "jwt"                        'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
 scan_pattern "private key block"          '-----BEGIN [A-Z ]*PRIVATE KEY-----'
 scan_pattern "telegram bot token"         '[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}'
-scan_pattern "hardcoded home path"        '/home/ubuntu'   # LEAKSCAN-EXEMPT (the pattern itself)
+# REBUILD-MANIFEST.json carries this string in its own forbidden-pattern list
+scan_pattern "hardcoded home path"        '/home/ubuntu' 'REBUILD-MANIFEST\.json$'   # LEAKSCAN-EXEMPT (the pattern itself)
 # 40-hex: skip lock/pin files entirely; skip lines whose context shows a public hash
 # (git SHAs, S2 paper IDs, npm integrity) rather than a credential
 scan_pattern "40-hex secret"              '\b[0-9a-f]{40}\b' \

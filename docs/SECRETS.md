@@ -1,0 +1,78 @@
+# SECRETS — what's in the zip, where to obtain each key, what breaks without it
+
+The single AES-256 zip (`make backup` regenerates it) holds **every** credential
+plus small personal state, with `$HOME`-relative paths. Authoritative inventory:
+[`secrets/secrets-manifest.yaml`](../secrets/secrets-manifest.yaml).
+`make verify-secrets` prints a live OK/MISSING table;
+`make verify-secrets SECRETS=<zip>` checks an archive;
+`bin/secrets-verify.sh --degraded` prints the missing → broken-feature table.
+
+**Password policy:** the zip password exists nowhere on disk except (optionally)
+`~/.config/coding-system/zip-password.txt` on the source machine. Keep it in a
+password manager. Losing it makes the archive unrecoverable — there is no reset.
+
+## Key-by-key: `~/.claude/secrets.json` (16 keys, shared design with `~/.openclaw/secrets.json`)
+
+| Key | Used by | Obtain |
+|---|---|---|
+| `TAPHOAAPI_API_KEY` | primary Claude-model reseller provider | taphoaapi.com account |
+| `LAOZHANG_API_KEY` | fallback Claude-model reseller | laozhang.ai account |
+| `GROQ_API_KEY` | Groq fallback models | console.groq.com |
+| `PERPLEXITY_API_KEY` | (currently unreferenced — legacy) | perplexity.ai |
+| `ZOTERO_API_KEY` | Zotero library skill (`/zotero`) | zotero.org/settings/keys |
+| `WEBDAV_PASSWORD` | Zotero attachment WebDAV sync | your WebDAV provider |
+| `GDRIVE_CREDENTIALS` | Calibre/Drive skills (JSON-in-JSON service account) | GCP console → service account key |
+| `TELEGRAM_BOT_TOKEN` | file delivery, digests, notifications | @BotFather |
+| `ZALO_BOT_TOKEN` | Zalo channel | Zalo OA console |
+| `ZULIP_API_KEY` / `ZULIP_EMAIL` / `ZULIP_ORG_URL` | Zulip channel + send_file | your Zulip org settings |
+| `GATEWAY_AUTH_TOKEN` | OpenClaw gateway auth | generate any strong token |
+| `MOLTBOOK_API_KEY` | moltbook agent | moltbook account |
+| `VNU_EOFFICE_USERNAME` / `VNU_EOFFICE_PASSWORD` | VNU eOffice skill | VNU account |
+
+## Shell env file `~/.secrets.env` (sourced by the managed bashrc block)
+
+| Var | Feature |
+|---|---|
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | shell-side Telegram delivery |
+| `OCRSPACE_API_KEY` | OCR fallback (ocr.space) |
+| `LEANEXPLORE_API_KEY` | lean-explore MCP (leanexplore.com) |
+| `MOLTBOOK_*`, `MOLBOOK_AGENT_ID` | moltbook agent configuration (personal) |
+
+## Per-agent auth files
+
+| File | Agent | Re-auth alternative |
+|---|---|---|
+| `.claude/.credentials.json` | Claude Code OAuth | `claude login` |
+| `.codex/auth.json` (`OPENAI_API_KEY`, tokens) | Codex | `codex login` |
+| `.copilot/mcp-config.json` | Copilot MCP servers | re-create MCP config |
+| `.codewhale/config.toml` + `.codewhale/secrets/` | CodeWhale (DeepSeek key inline) | platform.deepseek.com |
+| `.deepseek/config.toml` + `.deepseek/secrets/` | DeepSeek CLI | platform.deepseek.com |
+| `.gemini/antigravity-cli/antigravity-oauth-token` | Gemini/AntiGravity | its login flow |
+| `.openclaw/secrets.json`, `credentials/`, `identity/`, `agents/*/agent/auth-profiles.json`, `moltbook.env`, `workspace/.secrets.json` | OpenClaw gateway/channels/providers | re-pair channels, re-enter keys |
+| `.config/openclaw/google-chat/*.json` | Google Chat service account | GCP console |
+
+## Infrastructure
+
+| File | Feature | Obtain |
+|---|---|---|
+| `.ssh/*` | git push, host identities | existing keys / `ssh-keygen` + GitHub |
+| `.gitconfig`, `.config/gh/hosts.yml` | git identity, gh auth | `gh auth login` |
+| `.docker/config.json` | private registry pulls (absent on source machine — optional) | `docker login ghcr.io` |
+| `.config/rclone/rclone.conf` | rclone remotes | `rclone config` |
+| `.modal.toml` | modal research compute | `modal token new` |
+| `.config/coding-system/tailscale.env` (`TS_AUTHKEY=`) | unattended `tailscale up` | tailscale admin → auth keys |
+| `.config/getscipapers/<service>/credentials.json` (8 services) | paper retrieval — each degrades individually | per-service account |
+| `.config/moltbook/credentials.json`, `.config/course/mat1204/credentials.json`, `.config/deepseek/settings.toml` | tool-specific | respective platforms |
+
+## Personal state (not credentials, still private)
+
+`.claude/projects/-home-ubuntu/memory/` (agent memory),
+`.claude/learnings/`, `.deepseek/memory/`, `.deepseek/.learnings/`,
+`.openclaw/workspace/data/writing-style.md`,
+skill `config.json` files with personal IDs (zotero/calibre, both homes),
+`.config/coding-system/leak-denylist.txt` (the leak scanner's personal-ID list).
+
+## Rotation
+
+Rotate a key → update the live file → `make backup` (new zip). Old zips remain
+valid for their snapshot date; prune them manually from `~/secrets-out/`.

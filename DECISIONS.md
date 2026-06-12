@@ -19,4 +19,9 @@ OpenClaw-slice decisions continue in the OpenClaw rebuild plan §6, not here.
 2026-06-12  Tailscale TLS pair in ~/openclaw-src NOT archived — referenced by no config (only funnel URLs in openclaw.json); tailscale cert regenerates on demand
 2026-06-12  Manifest fail-closed roots include .gemini and .ai-agents-skills state home — adversarial review found both unclassified; .claude/skills NOT blanket-delegated (_run.sh + skill scripts are user-owned)
 2026-06-12  ELF binaries never public-copied (sync refuses by magic bytes); reinstalled per-arch — agy/deepseek/deepseek-tui are aarch64-only
+2026-06-12  openclaw-bot populated (336 sanitized artifacts) + git-initialized at commit e084fb6 — install.sh npm typo fixed, fail-loudly on unpopulated repo, openclaw-json-sanitize deepseek strip implemented, redaction extended (tailnet URLs, allowFrom/chat ids, denylist literals), REBUILD-MANIFEST refreshed (2026.6.1, npm/projects) — its push to GitHub pending owner review
+2026-06-12  Leak-scan exemptions (documented, narrow): 40-hex skips lock/pin files + public-hash contexts (git/github/paperId/integrity); named-key rule skips /tests|fixtures/ paths (fake values verified); REBUILD-MANIFEST.json skipped for the home-path rule (carries the pattern in its own forbidden list); plugins/marketplaces not captured (vendor content, refetched from known_marketplaces.json)
+2026-06-12  Git identity for both repos set to public email (<owner-public-email>) — default author email embedded the tailnet hostname into commit metadata
+2026-06-12  /usr/local/bin/getscipapers recorded pointing at ~/.local/bin/getscipapers — live symlink was dangling (target venv removed); replicate the fix, not the breakage
+2026-06-12  Zip password bootstrap: random password generated to ~/.config/coding-system/zip-password.txt (0600, outside zip and repo) — OWNER ACTION: replace with your own and store in a password manager
 ```
