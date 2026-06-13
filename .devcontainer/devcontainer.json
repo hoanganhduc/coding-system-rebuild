@@ -1,0 +1,39 @@
+// GitHub Codespaces / Dev Container for a LIVE, interactive replica of the system.
+//
+// At create time it builds the same DEGRADED (no-secrets) replica the GitHub Actions
+// `install-degraded` job builds — but interactive, so you can test skills/configs live.
+// Uploading the encrypted secrets zip is OPTIONAL: open the forwarded "Secret upload
+// form" (port 8099) to complete the full secret-backed replica. The zip is never stored
+// on GitHub — it is uploaded straight into this running container and scrubbed after use.
+//
+// NOTE: Codespaces are amd64. This is a functional replica (configs/skills/settings/
+// software + multi-arch images), not bit-identical to the arm64 source. SageMath uses
+// the official amd64 image here (arch-aware); openclaw-sandbox is multi-arch.
+{
+  "name": "coding-system-rebuild (live replica)",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" },
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.12" }
+  },
+
+  // Full replica (esp. pulling the multi-GB images) wants room. A larger machine
+  // type is recommended; degraded-only fits the default. Adjust in the Codespaces UI.
+  "hostRequirements": { "cpus": 4, "memory": "16gb", "storage": "64gb" },
+
+  "forwardPorts": [8099, 18789],
+  "portsAttributes": {
+    "8099": { "label": "Secret upload form", "onAutoForward": "openPreview" },
+    "18789": { "label": "OpenClaw gateway", "onAutoForward": "silent" }
+  },
+
+  // create-time: build the degraded replica (software + components + render + verify)
+  "onCreateCommand": "bash .devcontainer/bootstrap.sh",
+  // each start: (re)launch the optional secret-upload web form
+  "postStartCommand": "nohup python3 .devcontainer/upload-server.py >/tmp/upload-server.log 2>&1 &",
+
+  "remoteUser": "vscode"
+}

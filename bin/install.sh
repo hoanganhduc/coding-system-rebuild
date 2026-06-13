@@ -173,7 +173,9 @@ if (( START <= 11 )); then
     echo "WARN: no user systemd session — units rendered to ~/.config/systemd/user but not registered"
   fi
   sudo loginctl enable-linger "$USER" 2>/dev/null || true
-  if [[ $DEGRADED_MODE -eq 0 ]]; then
+  if [[ "${CSR_NO_GATEWAY:-0}" == "1" ]]; then
+    echo "(CSR_NO_GATEWAY=1: services rendered, gateway NOT started — start it manually for a live demo)"
+  elif [[ $DEGRADED_MODE -eq 0 ]]; then
     systemctl --user start openclaw-gateway 2>/dev/null || echo "WARN: gateway did not start (check journalctl --user -u openclaw-gateway)"
   else
     echo "(degraded: services rendered + enable-states applied, nothing started)"
