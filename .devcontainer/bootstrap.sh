@@ -23,9 +23,16 @@ python3 -m pip install --quiet flask 2>/dev/null \
   || echo "WARN: could not install flask — the upload form may not start"
 
 # Degraded install: software + components (public) + render + python + systemd-render +
-# verify. texlive (5.5GB) and the multi-GB docker images are deferred to keep create
-# fast; they are pulled when you upload secrets (finish-setup) or run prepare manually.
-SKIP_LATEX=1 SKIP_DOCKER_IMAGES=1 bash bin/install.sh || true
+# verify. Keep create FAST and resilient: besides texlive (5.5GB) and the multi-GB docker
+# images, also defer the heavy / network-fragile installers an interactive degraded replica
+# does not need at create time — chromium + calibre (xtradeb PPA), tailscale, rust, bun,
+# elan/Lean. prepare.sh runs under `set -e`, so any one of these failing would otherwise
+# abort the whole build. Install them later if a skill needs them, e.g.:
+#   SKIP_APT=1 SKIP_NODE=1 SKIP_NPM_GLOBALS=1 SKIP_PIPX=1 SKIP_MODAL=1 SKIP_DOCKER=1 \
+#   SKIP_DOCKER_IMAGES=1 bash bin/prepare.sh        # (unset the SKIP_* you want)
+SKIP_LATEX=1 SKIP_DOCKER_IMAGES=1 \
+  SKIP_CHROMIUM=1 SKIP_CALIBRE=1 SKIP_TAILSCALE=1 SKIP_RUST=1 SKIP_BUN=1 SKIP_LEAN=1 \
+  bash bin/install.sh || true
 
 cat <<'EOF'
 
