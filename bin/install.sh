@@ -80,9 +80,14 @@ if (( START <= 7 )); then
   if [[ -x "$REPO/external/openclaw-bot/install.sh" ]]; then
     SHA_BEFORE=$(sha256sum "$HOME/.openclaw/secrets.json" 2>/dev/null | cut -d' ' -f1 || true)
     bash "$REPO/external/openclaw-bot/install.sh" --prefix "$HOME/.openclaw" --skip-docker --skip-services
-    gate "restored secrets untouched"
-    SHA_AFTER=$(sha256sum "$HOME/.openclaw/secrets.json" 2>/dev/null | cut -d' ' -f1 || true)
-    [[ "$SHA_BEFORE" == "$SHA_AFTER" ]] || { echo "FAIL: openclaw-bot install clobbered restored secrets.json"; exit 2; }
+    # the "don't clobber restored secrets" gate only applies when secrets were
+    # actually restored (non-degraded); in degraded mode there is no live
+    # secrets.json to protect and the component renders one from its template.
+    if [[ $DEGRADED_MODE -eq 0 ]]; then
+      gate "restored secrets untouched"
+      SHA_AFTER=$(sha256sum "$HOME/.openclaw/secrets.json" 2>/dev/null | cut -d' ' -f1 || true)
+      [[ "$SHA_BEFORE" == "$SHA_AFTER" ]] || { echo "FAIL: openclaw-bot install clobbered restored secrets.json"; exit 2; }
+    fi
     if [[ -d "$HOME/.openclaw/npm/projects" ]]; then
       for p in "$HOME/.openclaw/npm/projects"/*/; do
         [[ -f "$p/package.json" ]] && (cd "$p" && npm install --silent || echo "WARN: npm install failed in $p")
