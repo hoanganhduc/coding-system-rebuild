@@ -176,7 +176,7 @@ if (( START <= 11 )); then
   # crontab inside a marker block, preserving any user lines outside it
   if command -v crontab >/dev/null; then
     TMP=$(mktemp)
-    { crontab -l 2>/dev/null | sed '/# >>> coding-system >>>/,/# <<< coding-system <<</d'
+    { { crontab -l 2>/dev/null || true; } | sed '/# >>> coding-system >>>/,/# <<< coding-system <<</d'
       echo "# >>> coding-system >>>"
       grep -v '^#' "$REPO/system/cron/crontab.template" | sed "s|{{ HOME }}|$HOME|g"
       echo "# <<< coding-system <<<"
