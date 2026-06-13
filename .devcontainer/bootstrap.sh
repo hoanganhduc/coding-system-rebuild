@@ -10,6 +10,13 @@ echo "=================================================================="
 echo " coding-system-rebuild — Codespaces degraded build (no secrets)"
 echo "=================================================================="
 
+# install.sh's phase-1 doctor hard-fails (exit 1) without these, aborting the whole
+# build before apt even runs. The CI 'install-degraded' job installs them first
+# (.github/workflows/rehearsal.yml); the devcontainers base image + node/python/gh
+# features ship none of them, so the Codespace bootstrap must match CI to reach parity.
+sudo apt-get update -qq
+sudo apt-get install -y -qq make 7zip python3-yaml
+
 # the optional upload form needs Flask
 python3 -m pip install --quiet flask 2>/dev/null \
   || python3 -m pip install --quiet --break-system-packages flask 2>/dev/null \
