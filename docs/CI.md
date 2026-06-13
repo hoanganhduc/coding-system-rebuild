@@ -7,12 +7,27 @@ the rehearsal VM. Two jobs:
 |---|---|---|---|
 | `rehearsal-core` | none | every push/PR + weekly | doctor, leak-scan (tree + full history), canary + field-set guards, rotation unit tests, full roundtrip — on a clean machine |
 | `verify-keys` | individual repo secrets | push + manual (not fork PRs) | each configured key actually works (live API call) |
+| `install-degraded` | none (no zip) | manual + weekly | the whole `make install` machinery on a fresh VM: prepare (real software), render configs, python envs, systemd unit render, verify |
 
 ## POLICY: the secrets zip is NEVER uploaded to GitHub
 
 The encrypted `coding-system-secrets-*.zip` stays off GitHub entirely. CI tests
 **only** with individual key secrets set via `gh secret set` (or repo Settings →
 Secrets and variables → Actions). No Release asset, no base64 blob, no zip.
+
+## What CI can and cannot verify about installation
+
+`install-degraded` runs the **entire `make install` in degraded mode (no zip)** on a
+fresh runner and asserts the key phases complete: software install (`prepare`), config
+render, Python env rebuild, systemd unit render, and `verify`. It proves the install
+*machinery* works end-to-end on a clean Ubuntu box.
+
+It does **not** verify the live OpenClaw gateway starting, channel round-trips, or full
+secret restore — those need the complete encrypted archive **and** a real systemd/DBUS
+session, neither of which exists on a hosted runner (and the zip is never uploaded). That
+remains the manual VM rehearsal (docs/BACKUP-RESTORE.md). To also clone the private
+`openclaw-bot` / `ai-agents-skills` components in CI, add a `COMPONENTS_TOKEN` repo secret
+(a fine-grained PAT with read access to those repos); without it those phases are skipped.
 
 ## Setting the key secrets
 

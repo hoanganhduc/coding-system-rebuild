@@ -154,14 +154,19 @@ if (( START <= 11 )); then
         for g in "$f"/*; do sed "s|{{ HOME }}|$HOME|g" "$g" > "$HOME/.config/systemd/user/$(basename "$f")/$(basename "$g")"; done; }; continue; }
     sed "s|{{ HOME }}|$HOME|g" "$f" > "$HOME/.config/systemd/user/$(basename "$f")"
   done
-  systemctl --user daemon-reload
-  while IFS=$'\t' read -r unit want; do
-    [[ -z "$unit" ]] && continue
-    case "$want" in
-      enabled)  systemctl --user enable "$unit" >/dev/null 2>&1 || true ;;
-      disabled) systemctl --user disable "$unit" >/dev/null 2>&1 || true ;;
-    esac
-  done < "$REPO/system/systemd/units.state"
+  # tolerate the absence of a user systemd/DBUS session (CI runners, containers):
+  # units are still rendered to disk; only the live registration is skipped.
+  if systemctl --user daemon-reload 2>/dev/null; then
+    while IFS=$'\t' read -r unit want; do
+      [[ -z "$unit" ]] && continue
+      case "$want" in
+        enabled)  systemctl --user enable "$unit" >/dev/null 2>&1 || true ;;
+        disabled) systemctl --user disable "$unit" >/dev/null 2>&1 || true ;;
+      esac
+    done < "$REPO/system/systemd/units.state"
+  else
+    echo "WARN: no user systemd session — units rendered to ~/.config/systemd/user but not registered"
+  fi
   sudo loginctl enable-linger "$USER" 2>/dev/null || true
   if [[ $DEGRADED_MODE -eq 0 ]]; then
     systemctl --user start openclaw-gateway 2>/dev/null || echo "WARN: gateway did not start (check journalctl --user -u openclaw-gateway)"
@@ -169,13 +174,18 @@ if (( START <= 11 )); then
     echo "(degraded: services rendered + enable-states applied, nothing started)"
   fi
   # crontab inside a marker block, preserving any user lines outside it
-  TMP=$(mktemp)
-  { crontab -l 2>/dev/null | sed '/# >>> coding-system >>>/,/# <<< coding-system <<</d'
-    echo "# >>> coding-system >>>"
-    grep -v '^#' "$REPO/system/cron/crontab.template" | sed "s|{{ HOME }}|$HOME|g"
-    echo "# <<< coding-system <<<"
-  } > "$TMP"
-  crontab "$TMP" && rm -f "$TMP"
+  if command -v crontab >/dev/null; then
+    TMP=$(mktemp)
+    { crontab -l 2>/dev/null | sed '/# >>> coding-system >>>/,/# <<< coding-system <<</d'
+      echo "# >>> coding-system >>>"
+      grep -v '^#' "$REPO/system/cron/crontab.template" | sed "s|{{ HOME }}|$HOME|g"
+      echo "# <<< coding-system <<<"
+    } > "$TMP"
+    crontab "$TMP" 2>/dev/null || echo "WARN: could not install crontab (no cron daemon?)"
+    rm -f "$TMP"
+  else
+    echo "WARN: crontab not available — skipping host cron install"
+  fi
 fi
 
 # 12 ─ verification

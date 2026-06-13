@@ -104,3 +104,59 @@ jobs:
           curl -s -m 20 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${msg}" -o /dev/null || true
+
+  # ------------------------------------- full install machinery (no secrets/zip)
+  # Runs the whole `make install` in DEGRADED mode on a fresh runner: real
+  # software install, config render, python env rebuild, systemd unit render,
+  # verify. The zip is NEVER used. Heavy -> manual dispatch + weekly only.
+  # Components (private openclaw-bot / ai-agents-skills) clone only if a
+  # COMPONENTS_TOKEN secret (PAT with repo:read) is set; otherwise those phases
+  # are skipped with a notice. Gateway start / channels are NOT verifiable here
+  # (need the full encrypted archive + a real systemd session) — that's the VM rehearsal.
+  install-degraded:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Reclaim disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h / | tail -1
+      - name: Bootstrap deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml
+      - name: Allow private component clones (only if token provided)
+        env:
+          COMPONENTS_TOKEN: ${{ secrets.COMPONENTS_TOKEN }}
+        run: |
+          if [ -n "$COMPONENTS_TOKEN" ]; then
+            git config --global url."https://x-access-token:${COMPONENTS_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "private component cloning enabled"
+          else
+            echo "no COMPONENTS_TOKEN — OpenClaw/skills component phases will be skipped (degraded)"
+          fi
+      - name: make install (DEGRADED, no secrets/zip; texlive+images skipped to fit runner)
+        env:
+          SKIP_LATEX: '1'
+          SKIP_DOCKER_IMAGES: '1'
+        run: |
+          set -o pipefail
+          bash bin/install.sh 2>&1 | tee install.log || true
+      - name: Assert key phases succeeded
+        run: |
+          ok=1
+          grep -q "PHASE 2"  install.log || { echo "::error::prepare phase missing"; ok=0; }
+          grep -q "render-install:" install.log || { echo "::error::render-install did not run"; ok=0; }
+          grep -q "PHASE 9"  install.log || { echo "::error::python env phase missing"; ok=0; }
+          grep -q "PHASE 12" install.log || { echo "::error::verify phase missing"; ok=0; }
+          # no unresolved placeholders should remain in rendered files
+          ! grep -q "unresolved placeholder" install.log || { echo "::error::unresolved placeholders"; ok=0; }
+          [ $ok -eq 1 ] && echo "full-install machinery (degraded) OK"
+          exit $((1-ok))
+      - name: Summary
+        if: always()
+        run: |
+          { echo "## install-degraded — ${{ job.status }}"; echo '```'; tail -n 50 install.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: install-degraded-log, path: install.log }
