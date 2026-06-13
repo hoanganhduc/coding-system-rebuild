@@ -20,6 +20,9 @@ init-private: ## one-time source-machine setup (7zip, bashrc split, denylist, un
 setup-tailscale: ## prompt for a tailscale auth key, write tailscale.env, re-pack zip, sync offsite
 	@bash bin/setup-tailscale-key.sh
 
+rotate-keys: ## rotate provider API keys across all agents (default: google + zai). e.g. make rotate-keys P=google
+	@bash bin/rotate-keys.sh $(P)
+
 sync: ## dry-run capture into .staging/ (fail-closed; no repo changes)
 	@bash bin/sync.sh --dry-run
 
