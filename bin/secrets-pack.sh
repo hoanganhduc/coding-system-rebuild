@@ -43,4 +43,8 @@ if [[ -n "$MISS" ]]; then
   echo "ERROR: files missing from archive:" >&2; echo "$MISS" >&2; exit 2
 fi
 echo "packed $N files -> $ZIP"
+
+# upload off-machine (Dropbox by default); set CSR_NO_OFFSITE=1 to skip
+bash "$REPO/bin/offsite-sync.sh" "$ZIP" || echo "WARN: offsite sync failed — zip is local-only at $ZIP"
+
 echo "REMINDER: store the password in your password manager; loss = unrecoverable."

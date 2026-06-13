@@ -56,8 +56,11 @@ backup: backup-public ## backup-public + regenerate the secrets zip
 	@bash bin/secrets-pack.sh
 	@echo "backup complete — review with 'git show', publish with 'make push'"
 
-secrets-pack: ## regenerate the AES-256 secrets zip only
+secrets-pack: ## regenerate the AES-256 secrets zip (and upload offsite; CSR_NO_OFFSITE=1 to skip)
 	@bash bin/secrets-pack.sh
+
+offsite: ## upload the newest secrets zip offsite (rclone). CSR_RCLONE_DEST overrides dest
+	@bash bin/offsite-sync.sh
 
 verify-secrets: ## verify secrets vs manifest (live $$HOME, or SECRETS=zip)
 	@bash bin/secrets-verify.sh $(SECRETS)
