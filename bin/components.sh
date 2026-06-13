@@ -10,7 +10,10 @@ RC=0
 while IFS='=' read -r name rest; do
   [[ -z "$name" || "$name" == \#* ]] && continue
   url="${rest%@*}"; ref="${rest##*@}"
-  dest="$REPO/external/$name"
+  # ai-agents-skills is the single source of truth for all skills: clone it to the
+  # home path the installed skill SKILL.md symlinks resolve against, and install
+  # from there (install.sh Phase 8). Other components stay vendored under external/.
+  if [[ "$name" == "ai-agents-skills" ]]; then dest="$HOME/$name"; else dest="$REPO/external/$name"; fi
   if [[ "$ref" == LOCAL:* || "${LOCAL:-0}" == "1" ]]; then
     path="${ref#LOCAL:}"; path="${path/#\~/$HOME}"
     if [[ -d "$path" ]]; then

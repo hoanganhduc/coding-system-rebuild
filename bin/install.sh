@@ -103,20 +103,23 @@ fi
 # 8 ─ skills via ai-agents-skills
 if (( START <= 8 )); then
   phase 8 "skills via ai-agents-skills installer"
-  if [[ -d "$REPO/external/ai-agents-skills" ]]; then
-    # Apply the research_compute broker to each detected target's runtime root so
-    # the installer is the propagation path (update the repo -> reinstall). This is
-    # broker-scoped for now; other skills still come from the rendered home. `--apply`
-    # needs a confirmation phrase, piped here for a non-interactive restore, and
-    # real-home writes also need `--real-system`. A plain `make install` (no --apply)
-    # is only a dry-run.
+  AAS_HOME="$HOME/ai-agents-skills"
+  if [[ -x "$AAS_HOME/installer/bootstrap.sh" ]]; then
+    # ai-agents-skills is the single source of truth, cloned to ~/ai-agents-skills by
+    # components.sh; install from there so the installer-created SKILL.md symlinks
+    # resolve against the same source. Apply the research_compute broker to each
+    # target's runtime root so the installer is the propagation path (update the repo
+    # -> reinstall). `--apply` needs a confirmation phrase (piped for a non-interactive
+    # restore); real-home writes need `--real-system`; `--backup-replace` updates any
+    # pre-existing runtime files. Broker-scoped for now; other skills still come from
+    # the rendered home until their run-model is migrated.
     AAS_PHRASE="I understand the installation and uninstall process"
-    AAS_ARGS="--skills modal-research-compute --runtime-profile auto --apply --real-system"
-    printf '%s\n' "$AAS_PHRASE" | make -C "$REPO/external/ai-agents-skills" install ARGS="$AAS_ARGS" \
+    printf '%s\n' "$AAS_PHRASE" | bash "$AAS_HOME/installer/bootstrap.sh" install \
+      --skills modal-research-compute --runtime-profile auto --apply --real-system --backup-replace \
       || echo "WARN: ai-agents-skills broker install reported issues"
-    make -C "$REPO/external/ai-agents-skills" verify || echo "WARN: ai-agents-skills verify reported issues"
+    bash "$AAS_HOME/installer/bootstrap.sh" verify || echo "WARN: ai-agents-skills verify reported issues"
   else
-    echo "WARN: ai-agents-skills component unavailable — skills installer skipped"
+    echo "WARN: ~/ai-agents-skills installer unavailable — skills installer skipped"
   fi
   phase 8b "re-overlay zip secrets (idempotent re-extract) + clobber checks"
   if [[ $DEGRADED_MODE -eq 0 ]]; then
