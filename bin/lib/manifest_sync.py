@@ -95,31 +95,41 @@ def split_bashrc(text, errors):
             begin = i
         elif line.strip() == MARK_END:
             end = i
+    def find_strays(scan_lines, skip_lo=None, skip_hi=None):
+        out = []
+        for i, line in enumerate(scan_lines):
+            if skip_lo is not None and skip_lo <= i <= skip_hi:
+                continue
+            m = EXPORT_RE.match(line)
+            if not m:
+                continue
+            name, value = m.group(1), m.group(2).strip().strip('"').strip("'")
+            if not value or value.startswith("$") or value.startswith("~"):
+                continue
+            if PERSONAL_PREFIX_RE.match(name) or (
+                    SECRET_NAME_RE.search(name) and len(value) >= 8
+                    and "/" not in value):
+                out.append("line %d: export %s=..." % (i + 1, name))
+        return out
+
     if begin is None or end is None or end < begin:
-        errors.append(
-            "bashrc managed-secret markers missing or malformed; "
-            "run bin/init-private.sh first")
-        return None
+        # markers absent: only an error if the file actually holds secrets to
+        # protect. A clean bashrc (e.g. a fresh machine / CI runner) has nothing
+        # to split — emit it unchanged so capture/roundtrip still work anywhere.
+        strays = find_strays(lines)
+        if strays:
+            errors.append(
+                "bashrc has secret/personal exports but no managed markers; "
+                "run bin/init-private.sh first:\n    " + "\n    ".join(strays))
+            return None
+        return "".join(lines)
     sanitized = lines[:begin] + [
         "# coding-system: personal/secret exports live in ~/.secrets.env "
         "(restored from the encrypted archive)\n",
         '[ -f ~/.secrets.env ] && . ~/.secrets.env\n',
     ] + lines[end + 1:]
     # scan OUTSIDE the managed block for secret-shaped or personal exports
-    strays = []
-    for i, line in enumerate(lines):
-        if begin <= i <= end:
-            continue
-        m = EXPORT_RE.match(line)
-        if not m:
-            continue
-        name, value = m.group(1), m.group(2).strip().strip('"').strip("'")
-        if not value or value.startswith("$") or value.startswith("~"):
-            continue
-        if PERSONAL_PREFIX_RE.match(name) or (
-                SECRET_NAME_RE.search(name) and len(value) >= 8
-                and "/" not in value):
-            strays.append("line %d: export %s=..." % (i + 1, name))
+    strays = find_strays(lines, begin, end)
     if strays:
         errors.append(
             "secret/personal exports found OUTSIDE the bashrc managed block "
