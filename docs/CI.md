@@ -32,7 +32,7 @@ repository secret**:
 | `ZOTERO_API_KEY` | `ZOTERO_API_KEY` | api.zotero.org/keys/current |
 | `TELEGRAM_BOT_TOKEN` | `TELEGRAM_BOT_TOKEN` | api.telegram.org getMe |
 | `TELEGRAM_CHAT_ID` | (optional) | enables the Telegram result message |
-| `GROQ_KEY` | provider `groq` | groq /models |
+| `GROQ_KEY` | provider `groq` (soft*) | groq /models |
 | `ZAI_KEY` | provider `zai` | z.ai /models |
 | `GOOGLE_KEY` | provider `google` | gemini /models |
 | `DEEPSEEK_KEY` | `DEEPSEEK_API_KEY` | deepseek /models |
@@ -49,5 +49,8 @@ case in `bin/lib/verify_secret.py`.
   secrets there). This repo is private with no external forks; the guard stays.
 - A `FAIL` from `verify-keys` can mean a wrong key **or** a rate-limited/exhausted
   provider — re-check before assuming the key is bad.
+- *Soft providers (e.g. `groq`) block GitHub's datacenter IPs, so a 403 in CI is a
+  false negative; their FAIL is reported but does not fail the job. Verify them
+  locally with `make verify-secret PROVIDER=groq`.
 - arm64: add `ubuntu-24.04-arm` as a matrix `runs-on` to also rehearse arm64
   (may incur cost on private repos).

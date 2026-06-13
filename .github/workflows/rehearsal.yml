@@ -69,18 +69,22 @@ jobs:
         run: |
           set -u
           fail=0; report=""
-          # id<TAB>env-var-name  (add rows as you add repo secrets)
+          # probe <id> <env-var> [soft]
+          #   soft = provider known to block datacenter/CI IPs (e.g. groq); its
+          #   FAIL is reported but does NOT fail the job (would be a false negative).
           probe() {
-            local id="$1" var="$2" val="${!2:-}"
-            if [ -z "$val" ]; then echo "SKIP  $id (secret $var not set)"; return; fi
+            local id="$1" var="$2" soft="${3:-}" val="${!2:-}"
+            if [ -z "$val" ]; then echo "SKIP  $id (secret $var not set)"; report="${report}- \`${id}\`: SKIP (not set)\n"; return; fi
             res=$(VERIFY_VALUE="$val" python3 bin/lib/verify_secret.py "$id" 2>/dev/null || true)
+            case "$res" in
+              FAIL*) if [ -n "$soft" ]; then res="$res [soft: provider may block CI IPs]"; else fail=1; fi ;;
+            esac
             echo "$res $id"
-            case "$res" in FAIL*) fail=1;; esac
             report="${report}- \`${id}\`: ${res}\n"
           }
           probe ZOTERO_API_KEY     ZOTERO_API_KEY
           probe TELEGRAM_BOT_TOKEN TELEGRAM_BOT_TOKEN
-          probe groq               GROQ_KEY
+          probe groq               GROQ_KEY            soft
           probe zai                ZAI_KEY
           probe google             GOOGLE_KEY
           probe DEEPSEEK_API_KEY   DEEPSEEK_KEY
