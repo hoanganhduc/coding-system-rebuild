@@ -104,7 +104,17 @@ fi
 if (( START <= 8 )); then
   phase 8 "skills via ai-agents-skills installer"
   if [[ -d "$REPO/external/ai-agents-skills" ]]; then
-    make -C "$REPO/external/ai-agents-skills" install && make -C "$REPO/external/ai-agents-skills" verify || echo "WARN: ai-agents-skills verify reported issues"
+    # Apply the research_compute broker to each detected target's runtime root so
+    # the installer is the propagation path (update the repo -> reinstall). This is
+    # broker-scoped for now; other skills still come from the rendered home. `--apply`
+    # needs a confirmation phrase, piped here for a non-interactive restore, and
+    # real-home writes also need `--real-system`. A plain `make install` (no --apply)
+    # is only a dry-run.
+    AAS_PHRASE="I understand the installation and uninstall process"
+    AAS_ARGS="--skills modal-research-compute --runtime-profile auto --apply --real-system"
+    printf '%s\n' "$AAS_PHRASE" | make -C "$REPO/external/ai-agents-skills" install ARGS="$AAS_ARGS" \
+      || echo "WARN: ai-agents-skills broker install reported issues"
+    make -C "$REPO/external/ai-agents-skills" verify || echo "WARN: ai-agents-skills verify reported issues"
   else
     echo "WARN: ai-agents-skills component unavailable — skills installer skipped"
   fi
