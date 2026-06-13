@@ -43,7 +43,10 @@ if (( START <= 3 )); then
     if [[ -f "$HOME/.config/coding-system/tailscale.env" ]]; then
       # shellcheck disable=SC1091
       . "$HOME/.config/coding-system/tailscale.env"
-      [[ -n "${TS_AUTHKEY:-}" ]] && sudo tailscale up --authkey "$TS_AUTHKEY" || true
+      # TS_HOSTNAME keeps the funnel URLs (https://<name>.<tailnet>.ts.net/...)
+      # working after restore — the webhook channels depend on the node name
+      [[ -n "${TS_AUTHKEY:-}" ]] && \
+        sudo tailscale up --authkey "$TS_AUTHKEY" ${TS_HOSTNAME:+--hostname "$TS_HOSTNAME"} || true
     fi
   else
     phase 3 "restore secrets — SKIPPED (degraded)"
