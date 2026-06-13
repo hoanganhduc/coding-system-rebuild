@@ -22,6 +22,8 @@ Ten fail-closed manifest roots (every top-level entry must be classified or
 `openclaw-bot` component (REBUILD-MANIFEST.json). Its SECRET files are still
 owned by this repo's secrets manifest (single-zip principle).
 Skill SKILL.md symlinks are **delegated** to the `ai-agents-skills` installer.
+The `research_compute` GHA/Modal broker is **delegated** too — its code installs to the
+runtime root (not captured); only its per-install `research-compute.toml` rides the zip.
 
 ## Manifest semantics (`MANIFEST.yaml`)
 
@@ -51,7 +53,10 @@ token-shaped is ever committed.
 
 `name=https-url@ref`; `ref` is a commit SHA after publish, or
 `LOCAL:~/path` before publish (then `external/<name>` symlinks the live
-checkout). `make components LOCAL=1` forces live mode. The umbrella owns
+checkout). `make components LOCAL=1` forces live mode. **ai-agents-skills is the single
+source of truth, cloned to `~/ai-agents-skills`** (the path the installed skill SKILL.md
+symlinks resolve against, and the source Phase 8 installs the broker from); other components
+live under `external/`. The umbrella owns
 docker images and systemd rendering; openclaw-bot's `install.sh` is invoked
 with `--skip-docker --skip-services` so there is exactly one writer per surface.
 

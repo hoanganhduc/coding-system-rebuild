@@ -6,6 +6,26 @@ GitHub Actions is added as a **niche, ToS‑compliant** compute lane for the `re
 broker — alongside (not replacing) Modal and local. The "free public‑repo compute pool" idea is
 **rejected** as a ToS violation.
 
+## Implementation outcome (2026-06-13)
+
+Built and verified live. Key deviations from this plan, found during implementation:
+- **Single source of truth**: ai-agents-skills is cloned to `~/ai-agents-skills` (the `external/`
+  vendoring is dropped for it); the installer creates the skill `SKILL.md` symlinks pointing
+  back at it, so the install source and the symlinks always agree.
+- **Run model**: the broker installs to each target's **runtime root** and runs via
+  `run_skill.sh`; the documented `~/.claude/skills/_run.sh skills/modal-research-compute/…` call
+  is forwarded there by a **broker-scoped `_run.sh` shim**. Migrating the *other* skills to this
+  model is deferred (it would relocate their config/secrets).
+- **`bootstrap`**: a broker subcommand generates `research-compute.toml`, authenticates `gh`,
+  checks deps, and runs `doctor` — one command to set up a host.
+- **Phase 8 applies**: the restore installs the broker with
+  `install --apply --real-system --backup-replace` from `~/ai-agents-skills` (a plain
+  `make install` is only a dry-run); the per-install config rides the secrets zip and the legacy
+  in-`~/.claude` snapshot is delegated/removed.
+- **Verified live**: an end-to-end `submit --wait` of `my_sweep` on `hoanganhduc/PrivateResearchRepo`
+  dispatched a GitHub Actions run, budget-gated and reconciled, and fetched the result back
+  (`total_violations: 0`). Runbook: [github-actions-offload-routing.md](github-actions-offload-routing.md).
+
 **Changelog**
 - **v2** (adversarial review): replaced the English‑only budget guard with a concrete
   **two‑layer budget guarantee** (§3), a **limits table** (§2), worst‑case reservation,

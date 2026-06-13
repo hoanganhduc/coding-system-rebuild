@@ -38,6 +38,16 @@ make test
   `{{ HOME }}`).
 - **Services only**: `PHASE=11 bash bin/install.sh`.
 
+## research_compute broker (installer-owned)
+
+The `research_compute` GHA/Modal compute broker is **not** captured by the backup — it's
+delegated to the ai-agents-skills installer (phase 8 installs it from `~/ai-agents-skills` to
+the runtime root; the `_run.sh` shim forwards the documented call to it). Only its
+**per-install config** (`research-compute.toml`, with the `[gha]` repo targets — no tokens)
+rides the secrets zip. After a restore without the zip, run the broker's `bootstrap` once to
+regenerate config and authenticate `gh`. See
+[github-actions-offload-routing.md](github-actions-offload-routing.md).
+
 ## OpenClaw data backup (separate concern)
 
 This repo's zip carries OpenClaw **secrets/config only**. Research data,

@@ -13,6 +13,23 @@ local and Modal. Full design + rationale: [github-actions-experiment-runner-plan
 > local and Modal). It is never a general compute pool — heavy compute goes to Modal/local.
 > Source: GitHub *Terms for Additional Products and Features → GitHub Actions*.
 
+## Setup & invocation
+The broker is delivered by the ai-agents-skills installer — the single source of truth is
+`~/ai-agents-skills` (cloned + pinned by coding-system-rebuild) — to each target's runtime
+root, and the documented Claude call is forwarded there by the `_run.sh` shim. One-time per
+machine, run `bootstrap` (generates `research-compute.toml` if absent, authenticates `gh` —
+needs the `user` scope for Actions billing — checks deps, runs `doctor`):
+
+```bash
+run() { bash ~/.claude/skills/_run.sh skills/modal-research-compute/run_modal_research_compute.sh "$@"; }
+run bootstrap
+run doctor                      # routing_order + gha readiness
+run submit job.json --wait      # {"gha_target":"…","policy":{"backend":"gha"},"payload":{"parameters":{…}}}
+run fetch <job_id> --dest ./out
+```
+On non-Claude targets, call `run_skill.sh` at that agent's runtime root directly (each
+`SKILL.md` documents the agent-relative path).
+
 ## Routing
 Automatic order is **`local → Modal → GitHub Actions`** (`routing_order`): the planner takes
 the first backend that is feasible and within budget. Naming a backend (`policy.backend =
@@ -55,3 +72,8 @@ The broker dispatches → correlates by `run-name` → `gh run download`s the re
 **Python** (`my_sweep`, the TS_k theorem check), **C++** (`my_search`, 100 M trees in 50 s),
 **SageMath** (`my_enum`, cross‑checks Python), and a **`runner_limits`** probe (reached
 n=19 in a 120 s budget). Confirmed private‑repo runner = **2 CPU / 7.75 GB / 15 GB disk**.
+
+End‑to‑end through the broker (verified 2026‑06‑13): `submit --wait` of `my_experiments`
+(`my_sweep`) dispatched a GitHub Actions run, budget‑gated (reserved a worst-case slice of the‑min
+per‑repo cap, reconciled to ~0.3 min actual), correlated by `run‑name`, waited, and fetched
+the result back here — `total_violations: 0`.

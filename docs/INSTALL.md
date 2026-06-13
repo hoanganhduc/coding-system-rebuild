@@ -35,10 +35,10 @@ Phases (each gated; resume after a failure with `PHASE=<n> bin/install.sh`):
 | 1 | doctor + dirs | doctor exit 0 |
 | 2 | prepare: apt, xtradeb PPA (chromium/calibre), texlive-full, tailscale, NodeSource node 22, npm prefix, npm globals (pinned), pipx, rustup, bun, elan, modal, docker, images | binaries respond |
 | 3 | restore secrets + chmod fixups (+ `tailscale up --authkey` if provided) | required entries present |
-| 5 | components: clone openclaw-bot + ai-agents-skills at locked SHAs (HTTPS) | HEAD == lock |
+| 5 | components: clone openclaw-bot → `external/`, ai-agents-skills → `~/ai-agents-skills` (single source of truth), at locked SHAs | HEAD == lock |
 | 6 | render configs/scripts/symlinks into $HOME | no unresolved `{{ HOME }}` |
 | 7 | OpenClaw slice via openclaw-bot (`--skip-docker --skip-services`); npm install channel plugins | secrets untouched; no dangling refs |
-| 8 | skills via ai-agents-skills (`make install` + `verify`) | `_run.sh` + SKILL.md links resolve |
+| 8 | `research_compute` broker installed from `~/ai-agents-skills` (`install --apply --real-system --backup-replace --skills modal-research-compute`) + `verify` | broker runs via the `_run.sh` shim |
 | 8b| re-overlay zip secrets; `_run.sh` sha check | verify-secrets OK |
 | 9 | python envs from pip freezes (workspace-local target dir, ~/.venvs, docling-venv, lean-explore) | import smokes |
 | 10| docker images re-check (arch-conditional) | images present |
@@ -75,6 +75,13 @@ Example minimal try-out: `SKIP_LATEX=1 SKIP_DOCKER_IMAGES=1 make install`
 - **Ollama** is intentionally NOT installed (verified unused on the source
   system). If ever wanted: `curl -fsSL https://ollama.com/install.sh | sh &&
   ollama pull qwen2.5:7b` — the OpenClaw provider entries for it are inert.
+- **GHA compute broker**: `~/ai-agents-skills` is the single source for skills;
+  phase 8 installs the `research_compute` broker (the local→Modal→GitHub Actions
+  compute router) from there to the runtime root, and the documented
+  `~/.claude/skills/_run.sh skills/modal-research-compute/…` call is forwarded to
+  it. One-time per machine, run the broker's `bootstrap` (generates config,
+  authenticates `gh`, runs `doctor`); the per-install `[gha]` config rides the
+  secrets zip. See [github-actions-offload-routing.md](github-actions-offload-routing.md).
 
 ## 3. Verify
 
