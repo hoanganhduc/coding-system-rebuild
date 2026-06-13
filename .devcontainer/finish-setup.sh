@@ -37,10 +37,14 @@ if [[ "${START_GATEWAY:-0}" == "1" && $rc -eq 0 ]]; then
   echo " WhatsApp/...) with the SAME bot tokens and may conflict with"
   echo " your primary instance (e.g. Telegram getUpdates conflicts)."
   echo "============================================================"
+  # resolve openclaw by full path: this runs in a non-login shell where the npm global
+  # bin (~/.npm-global/bin) is NOT on PATH, so a bare `openclaw` fails with
+  # "No such file or directory" and the gateway never starts. setsid so it survives.
+  OPENCLAW="$(command -v openclaw || echo "$HOME/.npm-global/bin/openclaw")"
   pkill -f 'openclaw gateway' 2>/dev/null || true
-  nohup openclaw gateway --port 18789 >/tmp/openclaw-gateway.log 2>&1 &
+  nohup setsid "$OPENCLAW" gateway --port 18789 >/tmp/openclaw-gateway.log 2>&1 </dev/null &
   sleep 3
-  echo "gateway launched (log: /tmp/openclaw-gateway.log; port 18789 forwarded)"
+  echo "gateway launched via $OPENCLAW (log: /tmp/openclaw-gateway.log; port 18789 forwarded)"
 fi
 
 echo "== finish-setup done (exit $rc). =="
