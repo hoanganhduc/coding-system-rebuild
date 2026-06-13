@@ -26,3 +26,4 @@
 17 2 * * 0 python3 {{ HOME }}/.openclaw/workspace-sanitizer/scripts/update_patterns.py >> {{ HOME }}/.openclaw/workspace-sanitizer/scripts/update.log 2>&1
 # Moltbook → Sanitizer relay (every 5 min)
 */5 * * * * bash -c 'for f in {{ HOME }}/.openclaw/workspace-moltbook/staging/*.md; do [ -f "$f" ] && mv "$f" {{ HOME }}/.openclaw/workspace-sanitizer/input/; done'
+26 5 * * 1 {{ HOME }}/coding-system-rebuild/bin/auto-backup.sh

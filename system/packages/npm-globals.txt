@@ -1,4 +1,4 @@
-@anthropic-ai/claude-code@2.1.175
+@anthropic-ai/claude-code@2.1.176
 @github/copilot@1.0.32
 @openai/codex@0.139.0
 clawhub@0.7.0

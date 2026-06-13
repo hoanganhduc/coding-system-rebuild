@@ -28,7 +28,7 @@ define BACKUP_GATES
 	@test -s system/systemd/units.state || { echo "GATE FAIL: units.state missing — run make init-private"; exit 2; }
 endef
 
-backup: ## refresh state + sync --apply + leak-scan + local commit + secrets zip
+backup-public: ## refresh state + sync --apply + leak-scan + local commit (no zip)
 	$(BACKUP_GATES)
 	@bash bin/refresh-state.sh
 	@bash bin/sync.sh --apply
@@ -36,6 +36,8 @@ backup: ## refresh state + sync --apply + leak-scan + local commit + secrets zip
 	@git add -A && { git diff --cached --quiet && echo "backup: no changes to commit" || \
 	  { git commit -q -m "backup: $$(date -u +%F) — $$(git diff --cached --numstat | wc -l) files" && \
 	    echo "committed:" && git show --stat --oneline -s HEAD; }; }
+
+backup: backup-public ## backup-public + regenerate the secrets zip
 	@bash bin/secrets-pack.sh
 	@echo "backup complete — review with 'git show', publish with 'make push'"
 
