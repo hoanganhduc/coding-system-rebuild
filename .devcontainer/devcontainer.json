@@ -38,8 +38,10 @@
 
   // create-time: build the degraded replica (software + components + render + verify)
   "onCreateCommand": "bash .devcontainer/bootstrap.sh",
-  // each start: (re)launch the optional secret-upload web form
-  "postStartCommand": "nohup python3 .devcontainer/upload-server.py >/tmp/upload-server.log 2>&1 &",
+  // each start: (re)launch the optional secret-upload web form. setsid detaches it into
+  // its own session so it survives the devcontainer CLI tearing down the lifecycle
+  // command's process group — a plain `nohup … &` here is killed and port 8099 stays down.
+  "postStartCommand": "nohup setsid python3 .devcontainer/upload-server.py >/tmp/upload-server.log 2>&1 </dev/null &",
 
   "remoteUser": "vscode"
 }
