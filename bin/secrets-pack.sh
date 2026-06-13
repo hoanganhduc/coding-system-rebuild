@@ -44,7 +44,17 @@ if [[ -n "$MISS" ]]; then
 fi
 echo "packed $N files -> $ZIP"
 
-# upload off-machine (Dropbox by default); set CSR_NO_OFFSITE=1 to skip
-bash "$REPO/bin/offsite-sync.sh" "$ZIP" || echo "WARN: offsite sync failed — zip is local-only at $ZIP"
-
 echo "REMINDER: store the password in your password manager; loss = unrecoverable."
+
+# Replicate off-machine (Dropbox by default). The local zip is the primary
+# artifact and is ALWAYS preserved; an offsite failure is fail-fast by default
+# so automation/CI sees it. CSR_NO_OFFSITE=1 skips it; CSR_OFFSITE_OPTIONAL=1
+# downgrades a failure to a warning.
+bash "$REPO/bin/offsite-sync.sh" "$ZIP" && rc=0 || rc=$?
+if [[ $rc -ne 0 ]]; then
+  echo "ERROR: offsite sync FAILED (exit $rc). The local encrypted zip is SAFE at:" >&2
+  echo "       $ZIP" >&2
+  echo "       It was NOT replicated offsite. Retry with: make offsite" >&2
+  [[ "${CSR_OFFSITE_OPTIONAL:-0}" == "1" ]] || exit "$rc"
+  echo "WARN: continuing despite offsite failure (CSR_OFFSITE_OPTIONAL=1)" >&2
+fi
