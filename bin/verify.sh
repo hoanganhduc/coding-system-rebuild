@@ -15,7 +15,10 @@ skp()  { printf 'SKIP  %s\n' "$1"; SKIP=$((SKIP+1)); }
 # global bin on PATH (via login shells). The Codespaces/CI replica has none of these.
 # Detect them so the SAME `make verify` is clean in the replica yet still runs full
 # checks on the host. An explicit DEGRADED=1 is always honored.
-have_user_systemd() { systemctl --user show-environment >/dev/null 2>&1; }
+# /run/systemd/system exists iff systemd is the init (this is how sd_booted() works).
+# `systemctl --user` returns 0 even in containers where systemd is NOT running, so it is
+# not a usable probe — check the directory instead.
+have_user_systemd() { [[ -d /run/systemd/system ]]; }
 have_cron()         { pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1; }
 # put the npm global bin dir on PATH so agent-CLI bins resolve from this non-login shell
 for d in "$(npm config get prefix 2>/dev/null)/bin" "$HOME/.npm-global/bin"; do
