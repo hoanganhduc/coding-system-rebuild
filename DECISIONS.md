@@ -24,4 +24,8 @@ OpenClaw-slice decisions continue in the OpenClaw rebuild plan §6, not here.
 2026-06-12  Git identity for both repos set to public email (<owner-public-email>) — default author email embedded the tailnet hostname into commit metadata
 2026-06-12  /usr/local/bin/getscipapers recorded pointing at ~/.local/bin/getscipapers — live symlink was dangling (target venv removed); replicate the fix, not the breakage
 2026-06-12  Zip password bootstrap: random password generated to ~/.config/coding-system/zip-password.txt (0600, outside zip and repo) — OWNER ACTION: replace with your own and store in a password manager
+2026-06-13  Exact-replica additions: .openclaw/openclaw.json + cron/jobs.json.migrated added to the secrets zip — restoring from the public template alone leaves model/ID placeholders to refill by hand
+2026-06-13  Weekly unattended backup (cron Mon 05:26 UTC, bin/auto-backup.sh): public capture+commit always; zip refresh only when the owner keeps a password file (owner chose MANUAL zips — run `make secrets-pack` after secret changes); Telegram alert on failure
+2026-06-13  Off-machine copies automated: newest zip synced to dropbox:Misc/coding-system-backups (ciphertext only), newest 5 kept remotely — owner decision
+2026-06-13  Both repos published to github.com/hoanganhduc (coding-system-rebuild, openclaw-bot) after working-tree + full-history leak scans — owner approval given
 ```
