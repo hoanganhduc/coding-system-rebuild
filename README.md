@@ -65,8 +65,18 @@ make push      # leak-scans again, then publishes (always manual)
 | | amd64 | arm64 (origin) |
 |---|---|---|
 | Agents + skills + services | ✅ | ✅ |
-| SageMath docker image | ❌ skipped (image is arm64-only) | ✅ |
+| SageMath docker image | ✅ official `sagemath/sagemath` | ✅ prebuilt (`ghcr.io/hoanganhduc/sagemath`) |
+| Zotero Translation Server image | ✅ `ghcr.io/hoanganhduc/translation-server` | ✅ official `zotero/translation-server` |
 | `agy`/`deepseek` local binaries | reinstall per-arch | ✅ |
+
+## Built on
+
+The system installs and configures a number of smaller tools, several with their own repos:
+[getscipapers](https://github.com/hoanganhduc/getscipapers) (paper retrieval),
+[translation-server](https://github.com/hoanganhduc/translation-server) (Zotero translators),
+[vnthuquan](https://github.com/hoanganhduc/vnthuquan) (ebook discovery),
+[vnu-eoffice](https://github.com/hoanganhduc/vnu-eoffice) (document monitor) — plus established
+third-party software (Zotero, SageMath, Calibre, Lean, and the AI agent CLIs).
 
 ## Documents
 
@@ -74,5 +84,7 @@ make push      # leak-scans again, then publishes (always manual)
 - [SECRETS.md](SECRETS.md) — every secret: where to get it, where it lives, what breaks
 - [ARCHITECTURE.md](ARCHITECTURE.md) — surfaces, manifest semantics, delegation boundaries
 - [BACKUP-RESTORE.md](BACKUP-RESTORE.md) — runbooks, zip rotation, restore drills
+- [CODESPACES.md](CODESPACES.md) — live interactive replica in a GitHub Codespace
+- [CI.md](CI.md) — GitHub Actions rehearsal (no-secrets + key live-tests)
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — known post-install fixes
 - [../DECISIONS.md](../DECISIONS.md) — append-only decision log
