@@ -67,8 +67,9 @@ push: ## leak-scan, then git push (manual publish step)
 	@bash bin/leak-scan.sh
 	@git push
 
-test: ## self-tests: canary scan + roundtrip
+test: ## self-tests: canary scan + field-set guard + roundtrip
 	@bash tests/leak_scan_selftest.sh
+	@bash tests/field_set_sync.sh
 	@bash bin/test-roundtrip.sh
 
 roundtrip: ## /tmp-prefix capture/render/secrets cycle (no live mutation)

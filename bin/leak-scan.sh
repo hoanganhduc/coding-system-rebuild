@@ -58,12 +58,20 @@ scan_pattern "private key block"          '-----BEGIN [A-Z ]*PRIVATE KEY-----'
 scan_pattern "telegram bot token"         '[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}'
 scan_pattern "google api key"             'AIza[0-9A-Za-z_-]{35}'
 scan_pattern "gcp/firebase oauth client"  '[0-9]+-[0-9a-z]{32}\.apps\.googleusercontent\.com'
-# credential stored as the JSON value of a key/token/apiKey/accountId field
-# (the blind spot that leaked the Google + Z.AI keys): a non-placeholder value
-# of >=20 mixed-alnum chars under one of those field names
-scan_pattern "secret-shaped JSON field value" \
-  '"(key|apiKey|token|accountId|clientSecret|access)"[[:space:]]*:[[:space:]]*"[A-Za-z0-9][A-Za-z0-9_.+/-]{19,}"' \
-  '^$' '\{\{ *(REDACTED|SECRET_VALUE|[A-Z_]+) *\}\}'
+scan_pattern "openai rt/st token"         '\b[rs]t_[A-Za-z0-9_-]{20,}\b'
+# credential stored as the JSON value of a secret-ish field (the blind spot that
+# leaked the Google + Z.AI keys). The field set here MUST stay a superset of the
+# redactor's SECRET_FIELD_NAMES + SENSITIVE_KEY_RE (tests/field_set_sync.sh enforces
+# it). Case-insensitive; placeholders + the value pattern itself are exempt.
+SECRET_FIELD_ALT='key|apikey|api_key|token|accountid|clientsecret|client_secret|access|refresh|bearer|secret|password|credential|sessionid|session_id|ownerid|owner_id|clientid|client_id|cookie|auth|serviceaccount|service_account|serviceaccountfile'
+{
+  hits=$(list_files | xargs -r grep -niIE "\"($SECRET_FIELD_ALT)\"[[:space:]]*:[[:space:]]*\"[A-Za-z0-9][A-Za-z0-9_.+/-]{19,}\"" 2>/dev/null \
+    | grep -vE '\{\{ *[A-Za-z_]+ *\}\}' | grep -v 'LEAKSCAN-EXEMPT' | head -50)
+  if [[ -n "$hits" ]]; then
+    echo "FINDING [secret-shaped JSON field value]:"; echo "$hits" | mask | sed 's/^/  /'
+    FINDINGS=$((FINDINGS + $(echo "$hits" | wc -l)))
+  fi
+}
 # REBUILD-MANIFEST.json carries this string in its own forbidden-pattern list
 scan_pattern "hardcoded home path"        '/home/ubuntu' 'REBUILD-MANIFEST\.json$'   # LEAKSCAN-EXEMPT (the pattern itself)
 # 40-hex: skip lock/pin files entirely; skip lines whose context shows a public hash
