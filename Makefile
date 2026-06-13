@@ -29,6 +29,9 @@ list-secrets: ## list every rotatable secret id (names only, no values)
 verify-secret: ## live-test a deployed secret works. e.g. make verify-secret SECRET=ZOTERO_API_KEY
 	@python3 bin/lib/verify_secret.py $(SECRET)$(PROVIDER)
 
+ci-secrets: ## set GitHub Actions key secrets from live config (gh). ARGS=--dry-run to preview
+	@bash bin/set-ci-secrets.sh $(ARGS)
+
 sync: ## dry-run capture into .staging/ (fail-closed; no repo changes)
 	@bash bin/sync.sh --dry-run
 

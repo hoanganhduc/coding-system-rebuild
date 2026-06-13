@@ -3,15 +3,12 @@ name: rehearsal
 # Plays the role of a throwaway fresh-Ubuntu VM for the rebuild system.
 #  - rehearsal-core : NO secrets. Always runs. Doctor + leak scans (tree + full
 #    history) + canary/field-set guards + rotation units + full roundtrip.
-#  - verify-keys    : uses individual repo *secret env vars* (each <48KB) to
-#    live-test that specific keys actually work. Skips any secret not configured.
-#  - install-full   : OPT-IN heavyweight. Needs ZIP_PASSWORD + the encrypted zip
-#    fetched as a private Release asset (the zip is >48KB so it can't be a secret).
-#    Disabled unless RUN_FULL_INSTALL=true is dispatched AND ZIP_PASSWORD is set.
+#  - verify-keys    : uses individual repo *secret env vars* to live-test that
+#    specific keys actually work. Skips any secret not configured.
 #
-# All jobs report to the Actions run summary; verify-keys/install-full also send
-# a Telegram summary if TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID secrets are set.
-# Secret VALUES are auto-masked by Actions and are never printed by our scripts.
+# POLICY: the encrypted secrets zip is NEVER uploaded to GitHub. CI only ever
+# uses individual key secrets set via `gh secret set` / repo Settings. Secret
+# VALUES are auto-masked by Actions and are never printed by our scripts.
 
 on:
   push:
@@ -21,11 +18,6 @@ on:
   schedule:
     - cron: '13 6 * * 1'        # weekly Monday 06:13 UTC
   workflow_dispatch:
-    inputs:
-      run_full_install:
-        description: 'Also run the full make install rehearsal (needs ZIP_PASSWORD + release asset)'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -108,45 +100,3 @@ jobs:
           curl -s -m 20 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${msg}" -o /dev/null || true
-
-  # ------------------------------------------------- opt-in full install (heavy)
-  install-full:
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' && inputs.run_full_install
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      - name: Guard — require ZIP_PASSWORD
-        env:
-          ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
-        run: |
-          [ -n "$ZIP_PASSWORD" ] || { echo "::error::ZIP_PASSWORD secret not set — skipping full install"; exit 1; }
-      - name: Reclaim disk (texlive/docker are large)
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
-          df -h / | tail -1
-      - name: Install bootstrap deps
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml
-      - name: Fetch encrypted secrets zip (private Release asset 'secrets-latest')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download secrets-latest --pattern '*.zip' --output secrets.zip \
-            || { echo "::error::no Release 'secrets-latest' with a .zip asset — see docs/CI.md"; exit 1; }
-      - name: make install (degraded-tolerant CI profile, no gateway/services)
-        env:
-          CSR_SECRETS_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
-          SKIP_DOCKER_IMAGES: '1'   # 15GB; flip off only on a larger runner
-          SKIP_LATEX: '1'           # 5.5GB
-        run: |
-          set -o pipefail
-          SECRETS="$PWD/secrets.zip" bash bin/install.sh 2>&1 | tee install.log || true
-          echo "--- verify ---"
-          DEGRADED=1 bash bin/verify.sh 2>&1 | tee -a install.log || true
-      - name: Summary
-        if: always()
-        run: |
-          { echo "## install-full — ${{ job.status }}"; echo '```'; tail -n 40 install.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with: { name: install-full-log, path: install.log }
