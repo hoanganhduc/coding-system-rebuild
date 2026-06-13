@@ -90,20 +90,7 @@ jobs:
           probe DEEPSEEK_API_KEY   DEEPSEEK_KEY
           probe openrouter         OPENROUTER_KEY
           printf "## verify-keys\n\n%b" "$report" >> "$GITHUB_STEP_SUMMARY"
-          echo "REPORT<<EOF" >> "$GITHUB_ENV"; printf "%b" "$report" >> "$GITHUB_ENV"; echo "EOF" >> "$GITHUB_ENV"
           exit $fail
-      - name: Telegram report
-        if: always()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          # no-op unless both Telegram secrets are configured
-          [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || { echo "telegram not configured — skip"; exit 0; }
-          msg="coding-system verify-keys (${{ job.status }}) on $(uname -m):%0A${REPORT:-no report}"
-          curl -s -m 20 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=${msg}" -o /dev/null || true
 
   # ------------------------------------- full install machinery (no secrets/zip)
   # Runs the whole `make install` in DEGRADED mode on a fresh runner: real

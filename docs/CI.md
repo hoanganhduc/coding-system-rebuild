@@ -46,7 +46,6 @@ repository secret**:
 |---|---|---|
 | `ZOTERO_API_KEY` | `ZOTERO_API_KEY` | api.zotero.org/keys/current |
 | `TELEGRAM_BOT_TOKEN` | `TELEGRAM_BOT_TOKEN` | api.telegram.org getMe |
-| `TELEGRAM_CHAT_ID` | (optional) | enables the Telegram result message |
 | `GROQ_KEY` | provider `groq` (soft*) | groq /models |
 | `ZAI_KEY` | provider `zai` | z.ai /models |
 | `GOOGLE_KEY` | provider `google` | gemini /models |
