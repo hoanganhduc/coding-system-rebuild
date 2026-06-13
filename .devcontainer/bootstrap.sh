@@ -15,7 +15,10 @@ echo "=================================================================="
 # (.github/workflows/rehearsal.yml); the devcontainers base image + node/python/gh
 # features ship none of them, so the Codespace bootstrap must match CI to reach parity.
 sudo apt-get update -qq
-sudo apt-get install -y -qq make 7zip python3-yaml
+# python3-flask goes here (system python) on purpose: postStartCommand launches the
+# upload form in a non-login shell where `python3` is /usr/bin/python3, NOT the feature
+# python. Installing flask only into the feature python (below) left port 8099 dead.
+sudo apt-get install -y -qq make 7zip python3-yaml python3-flask
 # The python devcontainer feature makes `python3` resolve to /usr/local/python, but
 # apt's python3-yaml installs into the SYSTEM python (/usr/bin/python3). doctor.sh and
 # the repo's bin/lib scripts run the feature python3, so PyYAML must be installed there
@@ -25,10 +28,11 @@ python3 -m pip install --quiet pyyaml 2>/dev/null \
   || python3 -m pip install --quiet --user pyyaml 2>/dev/null \
   || echo "WARN: could not install PyYAML into the active python — doctor may fail"
 
-# the optional upload form needs Flask
+# also put Flask in the feature python (belt-and-suspenders, in case the lifecycle env
+# ever resolves `python3` there instead of the system python handled by python3-flask above)
 python3 -m pip install --quiet flask 2>/dev/null \
   || python3 -m pip install --quiet --break-system-packages flask 2>/dev/null \
-  || echo "WARN: could not install flask — the upload form may not start"
+  || true
 
 # Degraded install: software + components (public) + render + python + systemd-render +
 # verify. Keep create FAST and resilient: besides texlive (5.5GB) and the multi-GB docker

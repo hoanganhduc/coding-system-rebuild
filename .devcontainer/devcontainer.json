@@ -32,7 +32,10 @@
 
   "forwardPorts": [8099, 18789],
   "portsAttributes": {
-    "8099": { "label": "Secret upload form", "onAutoForward": "openPreview" },
+    // notify (not openPreview): the form's server only starts after onCreate finishes
+    // (minutes), so auto-opening a preview at container start would just show a transient
+    // "network error" until then. notify lets the user open it once it's actually up.
+    "8099": { "label": "Secret upload form", "onAutoForward": "notify" },
     "18789": { "label": "OpenClaw gateway", "onAutoForward": "silent" }
   },
 
