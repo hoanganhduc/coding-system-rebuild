@@ -1,6 +1,6 @@
 services:
   translation-server:
-    image: zotero/translation-server:latest
+    image: ${ZOTERO_TS_IMAGE:-zotero/translation-server:latest}
     container_name: zotero-translation-server
     ports:
       - "1969:1969"
