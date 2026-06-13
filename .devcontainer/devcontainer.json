@@ -41,10 +41,12 @@
 
   // create-time: build the degraded replica (software + components + render + verify)
   "onCreateCommand": "bash .devcontainer/bootstrap.sh",
-  // each start: (re)launch the optional secret-upload web form. setsid detaches it into
-  // its own session so it survives the devcontainer CLI tearing down the lifecycle
-  // command's process group — a plain `nohup … &` here is killed and port 8099 stays down.
-  "postStartCommand": "nohup setsid python3 .devcontainer/upload-server.py >/tmp/upload-server.log 2>&1 </dev/null &",
+  // (re)launch the optional secret-upload form via an idempotent helper. Codespaces kills
+  // processes backgrounded directly from the create-time postStart scope, so we also retry
+  // on attach; if it is still down, `bash .devcontainer/start-form.sh` from a terminal
+  // always brings it up (see docs/CODESPACES.md).
+  "postStartCommand": "bash .devcontainer/start-form.sh || true",
+  "postAttachCommand": "bash .devcontainer/start-form.sh || true",
 
   "remoteUser": "vscode"
 }

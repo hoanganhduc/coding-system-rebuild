@@ -27,8 +27,9 @@ container; it is used to restore secrets and then scrubbed.
 
 ## Optional: complete the full replica (upload the zip)
 
-The Codespace forwards port **8099** ("Secret upload form"). Open it (it auto-previews),
-then:
+The Codespace forwards port **8099** ("Secret upload form"). You get a notification when
+it's available; if the form isn't responding, start it from a terminal with
+`bash .devcontainer/start-form.sh` (idempotent). Then open the forwarded port and:
 1. Choose your `coding-system-secrets-*.zip` and enter its password.
 2. (Optional) tick *start the OpenClaw gateway* — see the warning below.
 3. Submit. The form runs `.devcontainer/finish-setup.sh`, which restores secrets, pulls
