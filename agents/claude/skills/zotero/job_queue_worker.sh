@@ -13,7 +13,8 @@ SEND_QUEUE="$WORKSPACE/data/send-queue"
 JOB_QUEUE="$WORKSPACE/data/job-queue"
 SAGE_OUTPUT="$WORKSPACE/data/research/sagemath"
 SAGE_LOG="$SAGE_OUTPUT/run-log.jsonl"
-SAGE_IMAGE="ghcr.io/hoanganhduc/sagemath:10.8"
+# arm64 (this system) uses the prebuilt image; amd64 uses the official SageMath image.
+case "$(uname -m)" in aarch64|arm64) SAGE_IMAGE="${SAGE_DOCKER_IMAGE:-ghcr.io/hoanganhduc/sagemath:10.8}" ;; *) SAGE_IMAGE="${SAGE_DOCKER_IMAGE:-sagemath/sagemath:10.8}" ;; esac
 SAGE_CONTAINER="sagemath-worker"
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 OUTPUT_MAX_BYTES=1048576  # 1MB

@@ -28,4 +28,5 @@ OpenClaw-slice decisions continue in the OpenClaw rebuild plan §6, not here.
 2026-06-13  Weekly unattended backup (cron Mon 05:26 UTC, bin/auto-backup.sh): public capture+commit always; zip refresh only when the owner keeps a password file (owner chose MANUAL zips — run `make secrets-pack` after secret changes); Telegram alert on failure
 2026-06-13  Off-machine copies automated: newest zip synced to dropbox:Misc/coding-system-backups (ciphertext only), newest 5 kept remotely — owner decision
 2026-06-13  Both repos published to github.com/hoanganhduc (coding-system-rebuild, openclaw-bot) after working-tree + full-history leak scans — owner approval given
+2026-06-13  SageMath docker image arch-aware: amd64 targets use the official sagemath/sagemath:10.8; arm64 (this host, no amd64 emulation) keeps the prebuilt ghcr.io/hoanganhduc/sagemath:10.8. docker-images.txt lists both per-arch; sage wrapper + zotero job_queue_worker resolve by uname -m; SAGE_DOCKER_IMAGE overrides — owner request
 ```

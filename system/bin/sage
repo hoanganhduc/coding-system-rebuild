@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-image="${SAGE_DOCKER_IMAGE:-ghcr.io/hoanganhduc/sagemath:10.8}"
+# arm64 (this system) uses the prebuilt image; amd64 uses the official SageMath image.
+case "$(uname -m)" in
+  aarch64|arm64) _sage_default="ghcr.io/hoanganhduc/sagemath:10.8" ;;
+  *)             _sage_default="sagemath/sagemath:10.8" ;;
+esac
+image="${SAGE_DOCKER_IMAGE:-$_sage_default}"
 workdir="${SAGE_DOCKER_WORKDIR:-$PWD}"
 
 exec docker run \

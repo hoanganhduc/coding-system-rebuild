@@ -1,4 +1,5 @@
 # Pinned docker images. Format: image|arch (any | arm64 | amd64). Hand-curated.
+sagemath/sagemath:10.8|amd64
 ghcr.io/hoanganhduc/sagemath:10.8|arm64
 ghcr.io/hoanganhduc/openclaw-sandbox:latest|any
 zotero/translation-server:latest|any
