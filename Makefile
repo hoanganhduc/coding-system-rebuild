@@ -17,6 +17,9 @@ doctor: ## preflight checks (OS, arch, disk, tools)
 init-private: ## one-time source-machine setup (7zip, bashrc split, denylist, units.state)
 	@bash bin/init-private.sh
 
+setup-tailscale: ## prompt for a tailscale auth key, write tailscale.env, re-pack zip, sync offsite
+	@bash bin/setup-tailscale-key.sh
+
 sync: ## dry-run capture into .staging/ (fail-closed; no repo changes)
 	@bash bin/sync.sh --dry-run
 
