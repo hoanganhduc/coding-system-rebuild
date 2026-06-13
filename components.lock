@@ -4,4 +4,4 @@
 #   not yet published and must be used from its live checkout path (LOCAL=1 mode).
 #   P1 replaces LOCAL with real SHAs after openclaw-bot is populated and published.
 openclaw-bot=https://github.com/hoanganhduc/openclaw-bot.git@1fd8f58fce99df1fdefc40a920c6505573f4d97b
-ai-agents-skills=https://github.com/hoanganhduc/ai-agents-skills.git@743abef6d6e42849e54f0f373a97ff5e3e55e64d
+ai-agents-skills=https://github.com/hoanganhduc/ai-agents-skills.git@9e41f7035abaa55489f723897209c4cba1853b18
