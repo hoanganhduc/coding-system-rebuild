@@ -23,9 +23,12 @@
     "ghcr.io/devcontainers/features/sshd:1": {}
   },
 
-  // Full replica (esp. pulling the multi-GB images) wants room. A larger machine
-  // type is recommended; degraded-only fits the default. Adjust in the Codespaces UI.
-  "hostRequirements": { "cpus": 4, "memory": "16gb", "storage": "64gb" },
+  // Minimum for the DEGRADED replica (texlive + multi-GB images are deferred): the
+  // standard 4-core / 16GB / 32GB machine. 64GB storage would force a premium 8-core,
+  // which the "degraded fits the default" intent does not need. For the FULL replica
+  // (uploading secrets pulls ~15GB of images + optional texlive) pick a larger machine
+  // in the Codespaces UI (the … menu) — it needs more disk.
+  "hostRequirements": { "cpus": 4, "memory": "16gb", "storage": "32gb" },
 
   "forwardPorts": [8099, 18789],
   "portsAttributes": {
