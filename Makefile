@@ -20,8 +20,14 @@ init-private: ## one-time source-machine setup (7zip, bashrc split, denylist, un
 setup-tailscale: ## prompt for a tailscale auth key, write tailscale.env, re-pack zip, sync offsite
 	@bash bin/setup-tailscale-key.sh
 
-rotate-keys: ## rotate provider API keys across all agents (default: google + zai). e.g. make rotate-keys P=google
-	@bash bin/rotate-keys.sh $(P)
+rotate-keys: ## rotate ANY secret + live-test it. e.g. make rotate-keys SECRET=ZOTERO_API_KEY | PROVIDER=google | (no arg = list/picker)
+	@bash bin/rotate-keys.sh $(if $(SECRET),SECRET=$(SECRET)) $(if $(PROVIDER),PROVIDER=$(PROVIDER)) $(P)
+
+list-secrets: ## list every rotatable secret id (names only, no values)
+	@bash bin/rotate-keys.sh --list
+
+verify-secret: ## live-test a deployed secret works. e.g. make verify-secret SECRET=ZOTERO_API_KEY
+	@python3 bin/lib/verify_secret.py $(SECRET)$(PROVIDER)
 
 sync: ## dry-run capture into .staging/ (fail-closed; no repo changes)
 	@bash bin/sync.sh --dry-run
