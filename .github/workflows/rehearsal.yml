@@ -1,0 +1,152 @@
+name: rehearsal
+
+# Plays the role of a throwaway fresh-Ubuntu VM for the rebuild system.
+#  - rehearsal-core : NO secrets. Always runs. Doctor + leak scans (tree + full
+#    history) + canary/field-set guards + rotation units + full roundtrip.
+#  - verify-keys    : uses individual repo *secret env vars* (each <48KB) to
+#    live-test that specific keys actually work. Skips any secret not configured.
+#  - install-full   : OPT-IN heavyweight. Needs ZIP_PASSWORD + the encrypted zip
+#    fetched as a private Release asset (the zip is >48KB so it can't be a secret).
+#    Disabled unless RUN_FULL_INSTALL=true is dispatched AND ZIP_PASSWORD is set.
+#
+# All jobs report to the Actions run summary; verify-keys/install-full also send
+# a Telegram summary if TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID secrets are set.
+# Secret VALUES are auto-masked by Actions and are never printed by our scripts.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '13 6 * * 1'        # weekly Monday 06:13 UTC
+  workflow_dispatch:
+    inputs:
+      run_full_install:
+        description: 'Also run the full make install rehearsal (needs ZIP_PASSWORD + release asset)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- no secrets
+  rehearsal-core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history for leak-scan-history
+      - name: Install minimal deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml
+      - name: No-secrets rehearsal (make ci)
+        run: |
+          set -o pipefail
+          make ci 2>&1 | tee ci.log
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## rehearsal-core (no secrets) — ${{ job.status }}"
+            echo '```'
+            tail -n 25 ci.log 2>/dev/null || echo '(no log)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: rehearsal-core-log, path: ci.log }
+
+  # -------------------------------------------- live-test keys from repo secrets
+  verify-keys:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request'   # secrets not exposed to fork PRs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install minimal deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml
+      - name: Live-test configured keys
+        env:
+          ZOTERO_API_KEY: ${{ secrets.ZOTERO_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GROQ_KEY: ${{ secrets.GROQ_KEY }}
+          ZAI_KEY: ${{ secrets.ZAI_KEY }}
+          GOOGLE_KEY: ${{ secrets.GOOGLE_KEY }}
+          DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_KEY }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          set -u
+          fail=0; report=""
+          # id<TAB>env-var-name  (add rows as you add repo secrets)
+          probe() {
+            local id="$1" var="$2" val="${!2:-}"
+            if [ -z "$val" ]; then echo "SKIP  $id (secret $var not set)"; return; fi
+            res=$(VERIFY_VALUE="$val" python3 bin/lib/verify_secret.py "$id" 2>/dev/null || true)
+            echo "$res $id"
+            case "$res" in FAIL*) fail=1;; esac
+            report="${report}- \`${id}\`: ${res}\n"
+          }
+          probe ZOTERO_API_KEY     ZOTERO_API_KEY
+          probe TELEGRAM_BOT_TOKEN TELEGRAM_BOT_TOKEN
+          probe groq               GROQ_KEY
+          probe zai                ZAI_KEY
+          probe google             GOOGLE_KEY
+          probe DEEPSEEK_API_KEY   DEEPSEEK_KEY
+          probe openrouter         OPENROUTER_KEY
+          printf "## verify-keys\n\n%b" "$report" >> "$GITHUB_STEP_SUMMARY"
+          echo "REPORT<<EOF" >> "$GITHUB_ENV"; printf "%b" "$report" >> "$GITHUB_ENV"; echo "EOF" >> "$GITHUB_ENV"
+          exit $fail
+      - name: Telegram report
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # no-op unless both Telegram secrets are configured
+          [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || { echo "telegram not configured — skip"; exit 0; }
+          msg="coding-system verify-keys (${{ job.status }}) on $(uname -m):%0A${REPORT:-no report}"
+          curl -s -m 20 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${msg}" -o /dev/null || true
+
+  # ------------------------------------------------- opt-in full install (heavy)
+  install-full:
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch' && inputs.run_full_install
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Guard — require ZIP_PASSWORD
+        env:
+          ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
+        run: |
+          [ -n "$ZIP_PASSWORD" ] || { echo "::error::ZIP_PASSWORD secret not set — skipping full install"; exit 1; }
+      - name: Reclaim disk (texlive/docker are large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1
+      - name: Install bootstrap deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml
+      - name: Fetch encrypted secrets zip (private Release asset 'secrets-latest')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download secrets-latest --pattern '*.zip' --output secrets.zip \
+            || { echo "::error::no Release 'secrets-latest' with a .zip asset — see docs/CI.md"; exit 1; }
+      - name: make install (degraded-tolerant CI profile, no gateway/services)
+        env:
+          CSR_SECRETS_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
+          SKIP_DOCKER_IMAGES: '1'   # 15GB; flip off only on a larger runner
+          SKIP_LATEX: '1'           # 5.5GB
+        run: |
+          set -o pipefail
+          SECRETS="$PWD/secrets.zip" bash bin/install.sh 2>&1 | tee install.log || true
+          echo "--- verify ---"
+          DEGRADED=1 bash bin/verify.sh 2>&1 | tee -a install.log || true
+      - name: Summary
+        if: always()
+        run: |
+          { echo "## install-full — ${{ job.status }}"; echo '```'; tail -n 40 install.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: install-full-log, path: install.log }

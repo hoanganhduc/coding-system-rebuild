@@ -46,6 +46,19 @@ def secrets_lookup(name):
     return None
 
 
+# Built-in fallbacks so the verifier works on a fresh machine / CI runner where
+# the live ~/.openclaw config is absent (live config still takes precedence).
+DEFAULT_BASEURLS = {
+    "deepseek": "https://api.deepseek.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "laozhang": "https://api.laozhang.ai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "arcee": "https://openrouter.ai/api/v1",
+    "zai": "https://api.z.ai/api/coding/paas/v4",
+    "taphoaapi": "https://taphoaapi.info.vn/v1",
+}
+
+
 def provider_baseurl(prov):
     for f in glob.glob(os.path.join(HOME, AUTH_GLOB)):
         try:
@@ -55,7 +68,7 @@ def provider_baseurl(prov):
         pd = d.get("providers", {}).get(prov)
         if isinstance(pd, dict) and pd.get("baseUrl"):
             return pd["baseUrl"].rstrip("/")
-    return None
+    return DEFAULT_BASEURLS.get(prov)
 
 
 def read_deployed(idv):
