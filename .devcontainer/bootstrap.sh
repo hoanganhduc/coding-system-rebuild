@@ -16,6 +16,14 @@ echo "=================================================================="
 # features ship none of them, so the Codespace bootstrap must match CI to reach parity.
 sudo apt-get update -qq
 sudo apt-get install -y -qq make 7zip python3-yaml
+# The python devcontainer feature makes `python3` resolve to /usr/local/python, but
+# apt's python3-yaml installs into the SYSTEM python (/usr/bin/python3). doctor.sh and
+# the repo's bin/lib scripts run the feature python3, so PyYAML must be installed there
+# too — otherwise `python3 -c 'import yaml'` fails and phase-1 doctor aborts the build.
+python3 -m pip install --quiet pyyaml 2>/dev/null \
+  || python3 -m pip install --quiet --break-system-packages pyyaml 2>/dev/null \
+  || python3 -m pip install --quiet --user pyyaml 2>/dev/null \
+  || echo "WARN: could not install PyYAML into the active python — doctor may fail"
 
 # the optional upload form needs Flask
 python3 -m pip install --quiet flask 2>/dev/null \
