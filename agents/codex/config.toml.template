@@ -19,48 +19,6 @@ startup_timeout_sec = 20.0
 [mcp_servers.lean-explore]
 command = "{{ HOME }}/.local/bin/lean-explore-mcp-api"
 
-[projects."{{ HOME }}"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/.openclaw/workspace/data/projects"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/.openclaw/workspace/data/projects/REDACTED"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/ai-agents-skills"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/deepseek-tui"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/PrivateResearchRepo"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/PrivateResearchRepo"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/.openclaw/workspace/data/projects/PrivateResearchRepo"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/.openclaw/workspace/data/projects/REDACTED-SUBMISSION-ID-Review"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/.openclaw/workspace"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/.openclaw/workspace/data/projects/PrivateResearchRepo"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/PrivateResearchRepo"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/PrivateResearchRepo"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/PrivateResearchRepo"]
-trust_level = "trusted"
-
 [notice]
 hide_rate_limit_model_nudge = true
 

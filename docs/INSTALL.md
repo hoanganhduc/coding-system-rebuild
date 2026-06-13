@@ -81,7 +81,7 @@ Example minimal try-out: `SKIP_LATEX=1 SKIP_DOCKER_IMAGES=1 make install`
   `~/.claude/skills/_run.sh skills/modal-research-compute/…` call is forwarded to
   it. One-time per machine, run the broker's `bootstrap` (generates config,
   authenticates `gh`, runs `doctor`); the per-install `[gha]` config rides the
-  secrets zip. See [github-actions-offload-routing.md](github-actions-offload-routing.md).
+  secrets zip. See [github-actions-experiment-runner-plan.md](github-actions-experiment-runner-plan.md) and the installed `github-actions-offload-routing` skill instruction.
 
 ## 3. Verify
 

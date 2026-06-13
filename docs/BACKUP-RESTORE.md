@@ -46,7 +46,7 @@ the runtime root; the `_run.sh` shim forwards the documented call to it). Only i
 **per-install config** (`research-compute.toml`, with the `[gha]` repo targets — no tokens)
 rides the secrets zip. After a restore without the zip, run the broker's `bootstrap` once to
 regenerate config and authenticate `gh`. See
-[github-actions-offload-routing.md](github-actions-offload-routing.md).
+[github-actions-experiment-runner-plan.md](github-actions-experiment-runner-plan.md).
 
 ## OpenClaw data backup (separate concern)
 

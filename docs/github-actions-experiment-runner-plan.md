@@ -22,9 +22,9 @@ Built and verified live. Key deviations from this plan, found during implementat
   `install --apply --real-system --backup-replace` from `~/ai-agents-skills` (a plain
   `make install` is only a dry-run); the per-install config rides the secrets zip and the legacy
   in-`~/.claude` snapshot is delegated/removed.
-- **Verified live**: an end-to-end `submit --wait` of `my_sweep` on `hoanganhduc/PrivateResearchRepo`
-  dispatched a GitHub Actions run, budget-gated and reconciled, and fetched the result back
-  (`total_violations: 0`). Runbook: [github-actions-offload-routing.md](github-actions-offload-routing.md).
+- **Verified live**: an end-to-end `submit --wait` of a parameter sweep on a private research
+  repo dispatched a GitHub Actions run, budget-gated and reconciled, and fetched the result
+  back. Runbook: the installed `github-actions-offload-routing` skill instruction (delivered by ai-agents-skills).
 
 **Changelog**
 - **v2** (adversarial review): replaced the English‑only budget guard with a concrete
@@ -166,7 +166,7 @@ build) is normal project CI and does **not** carry the notice.
 
 | Repo | File (NEW unless noted) |
 |---|---|
-| coding-system-rebuild | `docs/github-actions-offload-routing.md` + this plan |
+| coding-system-rebuild | this plan (`github-actions-experiment-runner-plan.md`) |
 | ai-agents-skills | `canonical/instructions/github-actions-offload-routing.md`; `canonical/skills/github-actions-compute/SKILL.md`; `…/research_compute/github_actions_backend.py` (docstring); `…/research_compute/planner.py` (`gha` branch comment) |
 | research-repo-template | `README.md`, `.github/workflows/experiment.yml` header |
 | hoanganhduc.github.io (blog) | NEW post on the experiment‑runner pattern |
@@ -262,25 +262,23 @@ lower tier, so it errors unless Modal is also a candidate); never silently downg
 
 ---
 
-## 9. Live test on PrivateResearchRepo (concretizes Phase 2 and is the push gate)
-Test repo: **`hoanganhduc/PrivateResearchRepo`** (private ✓). Research: token‑sliding `TS_k(G)` acyclicity ⇔
-forbidden induced subgraphs (forbidden subgraphs `REDACTED`). The in‑repo runner (`experiments/`) runs
-the repo's **own committed** compute (reusing the existing `main(job)`/CLI convention from
-`ts_verify.py`), parameterised by dispatch inputs only.
+## 9. Live test on a private research repo (concretizes Phase 2 and is the push gate)
+Test repo: a **private research repo**. The in‑repo runner (`experiments/`) runs the repo's
+**own committed** compute (reusing the repo's existing `main(job)`/CLI convention), parameterised
+by dispatch inputs only.
 
-**Three task types (one per runtime) + a limits probe — all on the repo's research:**
-- **Python `my_sweep`** — `my_predicate(TS_k(F)) == my_predicate(F,k)` over all non‑isomorphic trees
-  up to `n`, for `k` (the paper's theorem check). Pure stdlib; `ubuntu-latest`.
-- **SageMath `my_enum`** — enumerate trees via `graphs.trees(n)`, build `TS_k` as a Sage
-  graph, check acyclicity, cross‑check the Python result. Runs in `container: sagemath/sagemath:10.8`
-  (the image pull is itself a useful cost/limit data point).
-- **C/C++ `my_search`** — a `g++ -O2` enumerator searching slide sequences for a counterexample
-  at larger `n` than Python reaches (the fast path). `ubuntu-latest`.
+**Three task types (one per runtime) + a limits probe — all on the repo's own research:**
+- **Python** — the repo's own theorem check over all generated combinatorial objects up to a size
+  `n`, for a parameter `k`. Pure stdlib; `ubuntu-latest`.
+- **SageMath** — re-runs the check under SageMath and cross‑checks the Python result. Runs in
+  `container: sagemath/sagemath:10.8` (the image pull is itself a useful cost/limit data point).
+- **C/C++** — a `g++ -O2` enumerator (the fast path) reaching larger `n` than Python does.
+  `ubuntu-latest`.
 - **`runner_limits` probe** — reports cores/RAM/disk and runs a scaling `n`‑sweep with
   checkpointing until a soft time budget, recording how far it got → measures GHA's practical limit.
 
-**Templates (≥ 2, reusing the broker families):** `enumerate_objects` (`my_sweep`, `my_enum`),
-`counterexample_search` (`my_search`), `parameter_sweep` ((n,k) grid via `matrix`), `runner_probe`.
+**Templates (≥ 2, reusing the broker families):** `enumerate_objects`, `counterexample_search`,
+`parameter_sweep` ((n,k) grid via `matrix`), and `runner_probe`.
 Each maps `{runtime, experiment, params}`.
 
 **Workflow** `.github/workflows/experiment.yml`: `workflow_dispatch` `{runtime, experiment,

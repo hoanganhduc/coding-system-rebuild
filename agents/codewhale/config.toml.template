@@ -65,12 +65,6 @@ include_summary = false
 method = "auto"
 threshold_secs = 30
 
-[projects."{{ HOME }}/PrivateResearchRepo"]
-trust_level = "trusted"
-
-[projects."{{ HOME }}/ai-agents-skills"]
-trust_level = "trusted"
-
 [providers.deepseek]
 
 [providers.fireworks]

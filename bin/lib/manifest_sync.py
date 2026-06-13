@@ -86,6 +86,51 @@ def key_redact(text, ext, keys):
     return text
 
 
+def strip_projects(text, ext):
+    """Drop per-machine project/location trust records that would otherwise leak
+    local directory names. TOML: every [projects."..."] table. JSON: dict keys
+    that are absolute home paths (the editor/agent "locations" trust ledger).
+    Other formats, and files without such records, pass through unchanged so the
+    verb is a safe no-op on the rest of a multi-file entry."""
+    if ext == ".toml":
+        lines = text.splitlines(keepends=True)
+        hdr = re.compile(r'^\s*\[projects\."[^"]*"\]\s*$')
+        out, i, n = [], 0, len(lines)
+        while i < n:
+            if hdr.match(lines[i]):
+                i += 1
+                while i < n and not lines[i].lstrip().startswith("["):
+                    i += 1
+                continue
+            out.append(lines[i])
+            i += 1
+        return "".join(out)
+    if ext == ".json":
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return text
+        removed = [False]
+
+        def scrub(node):
+            if isinstance(node, dict):
+                for k in [k for k in node
+                          if isinstance(k, str) and k.startswith(HOME)]:
+                    del node[k]
+                    removed[0] = True
+                for v in node.values():
+                    scrub(v)
+            elif isinstance(node, list):
+                for v in node:
+                    scrub(v)
+
+        scrub(data)
+        if not removed[0]:
+            return text
+        return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    return text
+
+
 def split_bashrc(text, errors):
     """Replace the managed secrets block with a sourcing line; flag strays."""
     lines = text.splitlines(keepends=True)
@@ -388,6 +433,8 @@ def main():
             if "key-redact" in verbs:
                 text = key_redact(text, os.path.splitext(f)[1],
                                   entry.get("keys", []))
+            if "strip-projects" in verbs:
+                text = strip_projects(text, os.path.splitext(f)[1])
             # implicit home-substitute on ALL public text files
             text = home_substitute(text, placeholder)
             if HOME in text:

@@ -149,7 +149,7 @@ entries:
     match: ["config.toml"]
     class: public-template
     dest: agents/codex/config.toml.template
-    template: [home-substitute]
+    template: [home-substitute, strip-projects]
 
   - id: codex-core
     root: .codex
@@ -197,6 +197,7 @@ entries:
     class: public-copy
     dest_dir: agents/copilot
     exclude: ["**/__pycache__/**"]
+    template: [strip-projects]
 
   - id: copilot-mcp
     root: .copilot
@@ -232,7 +233,7 @@ entries:
     match: ["config.toml"]
     class: public-template
     dest: agents/codewhale/config.toml.template
-    template: [home-substitute, key-redact]
+    template: [home-substitute, key-redact, strip-projects]
     keys: [api_key]
     note: plaintext DeepSeek api_key inside — redacted to {{ API_KEY }}; full copy in zip
 
@@ -258,7 +259,7 @@ entries:
     match: ["config.toml"]
     class: public-template
     dest: agents/deepseek/config.toml.template
-    template: [home-substitute, key-redact]
+    template: [home-substitute, key-redact, strip-projects]
     keys: [api_key]
 
   - id: deepseek-core
