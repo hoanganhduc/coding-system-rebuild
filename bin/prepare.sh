@@ -15,6 +15,11 @@ skip() { [[ "${!1:-0}" == "1" ]] && { echo "(skipped via $1)"; return 0; } || re
 step "apt base packages"
 if ! skip SKIP_APT; then
   base=$(grep -vE '^\s*(#|$)' "$PKG/apt.txt" | grep -vE '^(texlive-full|calibre|chromium|chromium-driver)$')
+  # Drop packages already provided by a preinstalled tool. On a fresh machine
+  # these are absent and stay in the list; on CI runners / re-runs, docker.io and
+  # gh are preinstalled and would break apt with a conflicting-packages error.
+  command -v docker >/dev/null && base=$(echo "$base" | grep -vx 'docker.io' || true)
+  command -v gh     >/dev/null && base=$(echo "$base" | grep -vx 'gh' || true)
   sudo apt-get update -qq
   # shellcheck disable=SC2086
   sudo apt-get install -y -qq $base
