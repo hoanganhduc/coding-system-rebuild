@@ -104,12 +104,15 @@ entries:
     class: public-copy
     dest_dir: agents/claude
     exclude: ["**/__pycache__/**", "**/*.pyc", "**/tmp/**", "**/.pytest_cache/**",
-              "skills/*/tests/tmp/**"]
+              "skills/*/tests/tmp/**", "skills/modal-research-compute/**"]
     note: >
       _run.sh and skill scripts are user-owned real files. SKILL.md symlinks into
       ~/ai-agents-skills are auto-skipped as delegated. zotero/calibre config.json are
       ALSO in the secrets zip (dual classification) because they carry personal IDs;
       the public copies here are key-redacted by entry claude-skill-configs.
+      skills/modal-research-compute is delegated to the ai-agents-skills installer (the
+      research_compute broker installs to the runtime root and runs via the _run.sh shim);
+      its per-install config rides in the secrets zip (secrets-manifest).
 
   - id: claude-secrets
     root: .claude
