@@ -31,6 +31,6 @@ while IFS='=' read -r name rest; do
   fi
   git -C "$dest" checkout -q "$ref" || { echo "ERROR: cannot checkout $name@$ref" >&2; RC=1; continue; }
   head=$(git -C "$dest" rev-parse HEAD)
-  [[ "$head" == "$ref"* ]] && echo "component $name @ $head" || { echo "ERROR: $name HEAD != lock" >&2; RC=1; }
+  [[ "$head" == "$ref"* ]] && echo "component $name @ ${head:0:12}" || { echo "ERROR: $name HEAD != lock" >&2; RC=1; }
 done < "$REPO/components.lock"
 exit $RC
