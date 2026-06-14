@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Upload an encrypted secrets zip off-machine via rclone and keep the newest 5.
+# Upload an encrypted secrets zip off-machine via rclone and keep the 3 newest
+# plus one newest snapshot per month.
 #   bin/offsite-sync.sh [ZIPFILE]      (default: newest in ~/secrets-out)
 # Env:
 #   CSR_RCLONE_DEST  rclone remote:path  (default dropbox:Misc/coding-system-backups)
@@ -26,9 +27,25 @@ rclone listremotes 2>/dev/null | grep -qx "$remote" || {
 
 if rclone copy --no-traverse "$ZIP" "$DEST/"; then
   echo "offsite: synced $(basename "$ZIP") -> $DEST"
-  # zip names embed UTC timestamps -> lexicographic sort == chronological; keep newest 5
+  # zip names embed UTC timestamps -> lexicographic sort == chronological.
   rclone lsf "$DEST/" 2>/dev/null | grep '^coding-system-secrets-.*\.zip$' \
-    | sort -r | tail -n +6 \
+    | sort -r \
+    | awk '
+        {
+          month=""
+          if (match($0, /^coding-system-secrets-([0-9]{6})[0-9]{2}T/)) {
+            month=substr($0, RSTART + 22, 6)
+          }
+          if (NR <= 3) {
+            if (month != "") seen[month]=1
+            next
+          }
+          if (month != "" && !(month in seen)) {
+            seen[month]=1
+            next
+          }
+          print
+        }' \
     | while read -r f; do rclone delete "$DEST/$f" && echo "offsite: pruned $f"; done
 else
   echo "offsite: ERROR rclone copy FAILED" >&2; exit 6

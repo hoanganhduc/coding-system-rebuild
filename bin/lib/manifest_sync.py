@@ -389,7 +389,7 @@ def main():
                 report["private"].append(rel_home)
                 if secret_paths is not None and not covered_by_secrets(
                         rel_home, secret_paths):
-                    warnings.append(
+                    errors.append(
                         "private-archive path NOT covered by secrets-manifest: %s"
                         % rel_home)
                 if "emit-keys" in verbs and f.endswith(".json"):

@@ -11,6 +11,7 @@ export DEGRADED_MODE
 
 phase() { echo; echo "########## PHASE $1: $2 ##########"; }
 gate()  { echo "---- gate: $1"; }
+skip_enabled() { [[ "${!1:-0}" == "1" ]]; }
 
 if [[ $DEGRADED_MODE -eq 1 ]]; then
   echo "*** DEGRADED MODE: no SECRETS archive provided ***"
@@ -30,7 +31,10 @@ if (( START <= 2 )); then
   phase 2 "prepare (software + images; SKIP_* toggles apply)"
   bash "$REPO/bin/prepare.sh"
   gate "binaries respond"
-  for b in git jq pandoc python3 node npm docker; do command -v "$b" >/dev/null || { echo "FAIL: $b missing"; exit 2; }; done
+  for b in git jq pandoc python3; do command -v "$b" >/dev/null || { echo "FAIL: $b missing"; exit 2; }; done
+  skip_enabled SKIP_NODE || command -v node >/dev/null || { echo "FAIL: node missing"; exit 2; }
+  { skip_enabled SKIP_NODE || skip_enabled SKIP_NPM_GLOBALS; } || command -v npm >/dev/null || { echo "FAIL: npm missing"; exit 2; }
+  skip_enabled SKIP_DOCKER || command -v docker >/dev/null || { echo "FAIL: docker missing"; exit 2; }
 fi
 
 # 3 ─ secrets
@@ -39,7 +43,7 @@ if (( START <= 3 )); then
     phase 3 "restore secrets"
     SECRETS="$SECRETS" bash "$REPO/bin/secrets-restore.sh"
     gate "required secrets present"
-    bash "$REPO/bin/secrets-verify.sh" | grep -q 'MISSING(required)' && { echo "FAIL: required secrets missing after restore"; exit 2; } || true
+    bash "$REPO/bin/secrets-verify.sh"
     if [[ -f "$HOME/.config/coding-system/tailscale.env" ]]; then
       # shellcheck disable=SC1091
       . "$HOME/.config/coding-system/tailscale.env"
@@ -79,7 +83,7 @@ if (( START <= 7 )); then
   phase 7 "OpenClaw slice via openclaw-bot"
   if [[ -x "$REPO/external/openclaw-bot/install.sh" ]]; then
     SHA_BEFORE=$(sha256sum "$HOME/.openclaw/secrets.json" 2>/dev/null | cut -d' ' -f1 || true)
-    bash "$REPO/external/openclaw-bot/install.sh" --prefix "$HOME/.openclaw" --skip-docker --skip-services
+    bash "$REPO/external/openclaw-bot/install.sh" --prefix "$HOME/.openclaw" --skip-docker --skip-services --skip-config
     # the "don't clobber restored secrets" gate only applies when secrets were
     # actually restored (non-degraded); in degraded mode there is no live
     # secrets.json to protect and the component renders one from its template.
@@ -123,7 +127,7 @@ if (( START <= 8 )); then
   fi
   phase 8b "re-overlay zip secrets (idempotent re-extract) + clobber checks"
   if [[ $DEGRADED_MODE -eq 0 ]]; then
-    SECRETS="$SECRETS" bash "$REPO/bin/secrets-restore.sh" || true
+    SECRETS="$SECRETS" bash "$REPO/bin/secrets-restore.sh"
   fi
   gate "_run.sh intact"
   if [[ -f "$HOME/.config/coding-system/run_sh.sha256" && -f "$HOME/.claude/skills/_run.sh" ]]; then
@@ -159,7 +163,20 @@ fi
 # 10 ─ docker images (already handled by prepare; re-check)
 if (( START <= 10 )); then
   phase 10 "docker images check"
-  bash -c 'cd '"$REPO"' && SKIP_APT=1 SKIP_LATEX=1 SKIP_CALIBRE=1 SKIP_CHROMIUM=1 SKIP_TAILSCALE=1 SKIP_NODE=1 SKIP_NPM_GLOBALS=1 SKIP_PIPX=1 SKIP_RUST=1 SKIP_BUN=1 SKIP_LEAN=1 SKIP_MODAL=1 SKIP_DOCKER=1 bash bin/prepare.sh' || true
+  if skip_enabled SKIP_DOCKER || skip_enabled SKIP_DOCKER_IMAGES; then
+    echo "(skipped via SKIP_DOCKER/SKIP_DOCKER_IMAGES)"
+  else
+    ARCH="$(uname -m)"
+    command -v docker >/dev/null || { echo "FAIL: docker missing"; exit 2; }
+    while IFS='|' read -r img cond; do
+      [[ -z "$img" || "$img" == \#* ]] && continue
+      case "$cond" in
+        arm64) [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]] || continue ;;
+        amd64) [[ "$ARCH" == "x86_64" ]] || continue ;;
+      esac
+      docker image inspect "$img" >/dev/null 2>&1 || { echo "FAIL: docker image missing: $img"; exit 2; }
+    done < "$REPO/system/packages/docker-images.txt"
+  fi
 fi
 
 # 11 ─ services + cron
@@ -218,7 +235,7 @@ Post-install manual verifications (see docs/TROUBLESHOOTING.md):
   * Zulip stays disabled by default; re-enable runbook is in TROUBLESHOOTING.
   * Zalo net.js shim: only if gateway logs show the missing-module error.
 EONOTE
-  DEGRADED="$DEGRADED_MODE" bash "$REPO/bin/verify.sh" || true
+  DEGRADED="$DEGRADED_MODE" bash "$REPO/bin/verify.sh"
   if [[ $DEGRADED_MODE -eq 1 ]]; then
     echo; echo "*** install finished in DEGRADED MODE — missing features: ***"
     bash "$REPO/bin/secrets-verify.sh" --degraded || true

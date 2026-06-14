@@ -81,7 +81,11 @@ echo "--- secrets ---"
 if [[ "$DEGRADED" == "1" ]]; then
   skp "required secrets (degraded)"
 else
-  bash "$REPO/bin/secrets-verify.sh" | grep -E 'MISSING\(required\)' && bad "required secrets missing" || ok "required secrets present"
+  if bash "$REPO/bin/secrets-verify.sh" >/dev/null; then
+    ok "required secrets present"
+  else
+    bad "required secrets verification failed"
+  fi
 fi
 
 echo "--- skill smokes ---"
@@ -104,7 +108,11 @@ fi
 
 echo "--- components ---"
 for c in openclaw-bot ai-agents-skills; do
-  [[ -e "$REPO/external/$c" ]] && ok "component present: $c" || skp "component absent: $c (run make components)"
+  if [[ "$c" == "ai-agents-skills" ]]; then
+    [[ -d "$HOME/$c/.git" ]] && ok "component present: ~/$c" || skp "component absent: ~/$c (run make components)"
+  else
+    [[ -d "$REPO/external/$c/.git" ]] && ok "component present: external/$c" || skp "component absent: external/$c (run make components)"
+  fi
 done
 
 echo

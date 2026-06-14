@@ -2,8 +2,10 @@
 
 ## Surfaces
 
-Ten fail-closed manifest roots (every top-level entry must be classified or
-`make sync` aborts):
+`MANIFEST.yaml` defines ten fail-closed roots (every top-level entry under each
+root must be classified or `make sync` aborts). The table combines
+`.codewhale`/`.deepseek` for readability and lists `~` extras separately because
+they are explicit rootless entries, not an additional fail-closed root:
 
 | Root | Agent / role | Public part | Private part | Excluded |
 |---|---|---|---|---|

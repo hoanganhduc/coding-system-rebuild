@@ -1,7 +1,7 @@
 # CI rehearsal (GitHub Actions as the throwaway VM)
 
 `.github/workflows/rehearsal.yml` turns a fresh `ubuntu-24.04` Actions runner into
-the rehearsal VM. Two jobs:
+the rehearsal VM. Three jobs:
 
 | Job | Secrets used | When | Proves |
 |---|---|---|---|

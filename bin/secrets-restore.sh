@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Restore secrets zip into $HOME (or HOME_OVERRIDE for tests) + permission fixups.
 # Usage: SECRETS=/path.zip bin/secrets-restore.sh
-# Env:   CSR_SECRETS_PASSWORD (else prompt), HOME_OVERRIDE (roundtrip tests)
+# Env:   CSR_SECRETS_PASSWORD (else prompt), HOME_OVERRIDE (legacy tests)
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$REPO/secrets/secrets-manifest.yaml"
@@ -15,13 +15,18 @@ PW="${CSR_SECRETS_PASSWORD:-}"
 if [[ -z "$PW" ]]; then read -rs -p "Secrets zip password: " PW; echo; fi
 
 "$SEVENZ" t -p"$PW" "$ZIP" >/dev/null || { echo "ERROR: integrity/password test failed" >&2; exit 2; }
-"$SEVENZ" x -y -o"$DEST" -p"$PW" "$ZIP" >/dev/null
+"$SEVENZ" l -ba -slt -p"$PW" "$ZIP" | sed -n 's/^Path = //p' \
+  | CSR_SECRETS_HOME="$DEST" python3 "$REPO/bin/lib/secrets_tool.py" verify-zip "$MANIFEST" >/dev/null
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/csr-secrets-restore.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+"$SEVENZ" x -y -o"$TMP" -p"$PW" "$ZIP" >/dev/null
+cp -a "$TMP"/. "$DEST"/
 if [[ "$DEST" == "$HOME" ]]; then
-  python3 "$REPO/bin/lib/secrets_tool.py" fixperms "$MANIFEST"
+  CSR_SECRETS_HOME="$DEST" python3 "$REPO/bin/lib/secrets_tool.py" fixperms "$MANIFEST"
   echo "--- post-restore verification ---"
-  python3 "$REPO/bin/lib/secrets_tool.py" verify "$MANIFEST" || true
+  CSR_SECRETS_HOME="$DEST" python3 "$REPO/bin/lib/secrets_tool.py" verify "$MANIFEST"
 else
-  ( cd "$DEST" && find . -type f -exec chmod 600 {} + )
-  echo "restored into $DEST (test mode; uniform 0600)"
+  CSR_SECRETS_HOME="$DEST" python3 "$REPO/bin/lib/secrets_tool.py" fixperms "$MANIFEST"
+  echo "restored into $DEST (test mode; manifest modes)"
 fi
 echo "secrets restored from $ZIP"

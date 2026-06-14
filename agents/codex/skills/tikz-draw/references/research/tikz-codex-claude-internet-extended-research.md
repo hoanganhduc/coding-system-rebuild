@@ -1,7 +1,7 @@
 # Deep Research: Making Codex and Claude Generate Better, More Structural TikZ
 
 Date: 2026-04-19
-Extends: [tikz-codex-claude-deep-research.md](/home/<user>/tikz-codex-claude-deep-research.md)
+Extends: [tikz-codex-claude-deep-research.md](~/tikz-codex-claude-deep-research.md)
 
 ## Scope
 

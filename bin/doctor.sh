@@ -16,7 +16,10 @@ else
 fi
 ARCH=$(uname -m)
 ok "arch: $ARCH"
-[[ "$ARCH" == "aarch64" ]] || warn "sagemath image is arm64-only — sage skill will be skipped on $ARCH"
+case "$ARCH" in
+  x86_64|aarch64) ok "SageMath docker image available for $ARCH" ;;
+  *) warn "no pinned SageMath docker image for $ARCH" ;;
+esac
 
 # disk
 AVAIL_GB=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')

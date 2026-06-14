@@ -42,9 +42,28 @@ notify_fail() {
     if [ "${CSR_AUTO_PUSH:-0}" = "1" ] && git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
       make -C "$REPO" push && echo "auto-push OK" || { echo "auto-push FAILED"; notify_fail; }
     fi
-    # prune local zips: keep 5 newest (offsite upload + remote prune done by
+    # prune local zips: keep 3 newest plus one newest snapshot per month
+    # (offsite upload + remote prune done by
     # secrets-pack -> offsite-sync during `make backup`)
-    ls -t "$HOME"/secrets-out/coding-system-secrets-*.zip 2>/dev/null | tail -n +6 | xargs -r rm -f
+    ls -t "$HOME"/secrets-out/coding-system-secrets-*.zip 2>/dev/null \
+      | awk '
+          {
+            file=$0; base=file; sub(/^.*\//, "", base)
+            month=""
+            if (match(base, /^coding-system-secrets-([0-9]{6})[0-9]{2}T/)) {
+              month=substr(base, RSTART + 22, 6)
+            }
+            if (NR <= 3) {
+              if (month != "") seen[month]=1
+              next
+            }
+            if (month != "" && !(month in seen)) {
+              seen[month]=1
+              next
+            }
+            print file
+          }' \
+      | xargs -r rm -f
   else
     echo "auto-backup FAILED"
     notify_fail

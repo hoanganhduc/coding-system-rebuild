@@ -42,15 +42,25 @@ for e in m["entries"]:
         fh.write("fixture-not-a-secret\n")
 print("fixtures:", sum(1 for _ in m["entries"]))
 PYEOF
-SEVENZ="$(command -v 7zz || command -v 7z)"
-LIST="$RUN/fixlist"; ( cd "$FIX" && find . -type f | sed 's|^\./||' ) > "$LIST"
-( cd "$FIX" && "$SEVENZ" a -tzip -mem=AES256 -pfixturepw "$RUN/fix.zip" "@$LIST" >/dev/null ) || fail "fixture pack"
-"$SEVENZ" t -pfixturepw "$RUN/fix.zip" >/dev/null || fail "fixture integrity"
+OUT="$RUN/out"; mkdir -p "$OUT"
+CSR_SECRETS_HOME="$FIX" CSR_SECRETS_PASSWORD=fixturepw CSR_NO_OFFSITE=1 \
+  bash "$REPO/bin/secrets-pack.sh" "$OUT" >/dev/null || fail "fixture pack via secrets-pack"
+ZIP=$(ls "$OUT"/coding-system-secrets-*.zip 2>/dev/null | head -1)
+[[ -n "${ZIP:-}" ]] || fail "fixture pack did not produce a zip"
+LIST="$RUN/fixlist"
+CSR_SECRETS_HOME="$FIX" python3 "$REPO/bin/lib/secrets_tool.py" expand "$REPO/secrets/secrets-manifest.yaml" | sort > "$LIST"
 mkdir -p "$RUN/home2"
-SECRETS="$RUN/fix.zip" CSR_SECRETS_PASSWORD=fixturepw HOME_OVERRIDE="$RUN/home2" \
+SECRETS="$ZIP" CSR_SECRETS_PASSWORD=fixturepw HOME="$RUN/home2" \
   bash "$REPO/bin/secrets-restore.sh" >/dev/null || fail "fixture restore"
-BADP=$(find "$RUN/home2" -type f ! -perm 600 | wc -l)
-[[ "$BADP" -eq 0 ]] && echo "ok (modes 600)" || fail "$BADP fixture files with wrong mode"
+( cd "$RUN/home2" && find . -type f | sed 's|^\./||' | sort ) > "$RUN/restored-list"
+comm -3 "$LIST" "$RUN/restored-list" > "$RUN/list-diff"
+[[ ! -s "$RUN/list-diff" ]] && echo "ok (listing)" || fail "restored listing differs"
+while read -r f; do
+  [[ -z "$f" ]] && continue
+  cmp -s "$FIX/$f" "$RUN/home2/$f" || { fail "restored content differs: $f"; break; }
+done < "$LIST"
+CSR_SECRETS_HOME="$RUN/home2" python3 "$REPO/bin/lib/secrets_tool.py" verify "$REPO/secrets/secrets-manifest.yaml" >/dev/null \
+  && echo "ok (manifest modes)" || fail "fixture permissions/manifest verify"
 
 step "4/5 re-sync stability from rendered home"
 mkdir -p "$RUN/resync"
@@ -58,9 +68,9 @@ mkdir -p "$RUN/resync"
 # absent there, so run the engine fail-open on roots (missing roots warn only)
 CSR_HOME_OVERRIDE="$RUN/home" python3 "$REPO/bin/lib/manifest_sync.py" \
   --repo "$REPO" --out "$RUN/resync" >/dev/null 2>&1
-DIFF=$(diff -rq "$RUN/resync/agents" "$REPO/agents" 2>/dev/null | grep -v '\.keys' | grep -cv '^Only in /home' || true)
-echo "re-sync diff lines (informational): $DIFF"
-[[ -d "$RUN/resync/agents" ]] && echo ok || fail "re-sync produced nothing"
+diff -rq "$RUN/resync/agents" "$REPO/agents" 2>/dev/null | grep -v '\.keys' > "$RUN/resync.diff" || true
+[[ -d "$RUN/resync/agents" ]] || fail "re-sync produced nothing"
+[[ ! -s "$RUN/resync.diff" ]] && echo "ok (diff clean)" || fail "re-sync diff not clean"
 
 step "5/5 leak-scan canary self-test"
 bash "$REPO/tests/leak_scan_selftest.sh" || fail "canary self-test"

@@ -8,9 +8,9 @@
   - Verify:
     - re-read the updated spec and plan and confirm the same follow-on direction appears in both
   - Files:
-    - `/home/<user>/tasks/tikz-semantic-verifier/SPEC.md`
-    - `/home/<user>/tasks/tikz-semantic-verifier/tasks/plan.md`
-    - `/home/<user>/tasks/tikz-semantic-verifier/tasks/todo.md`
+    - `~/tasks/tikz-semantic-verifier/SPEC.md`
+    - `~/tasks/tikz-semantic-verifier/tasks/plan.md`
+    - `~/tasks/tikz-semantic-verifier/tasks/todo.md`
 
 - [x] Task: Lock the Phase 6 graph-family contract.
   - Acceptance:
@@ -19,9 +19,9 @@
   - Verify:
     - re-read the updated spec and task files and confirm the same scope appears everywhere
   - Files:
-    - `/home/<user>/tasks/tikz-semantic-verifier/SPEC.md`
-    - `/home/<user>/tasks/tikz-semantic-verifier/tasks/plan.md`
-    - `/home/<user>/tasks/tikz-semantic-verifier/tasks/todo.md`
+    - `~/tasks/tikz-semantic-verifier/SPEC.md`
+    - `~/tasks/tikz-semantic-verifier/tasks/plan.md`
+    - `~/tasks/tikz-semantic-verifier/tasks/todo.md`
 
 - [x] Task: Add the Sage graph backend.
   - Acceptance:

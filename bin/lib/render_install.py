@@ -37,6 +37,18 @@ def read(path):
     return data.decode("utf-8", errors="surrogateescape")
 
 
+def write_conflict_preview(dst, data, binary, mode, report):
+    preview = dst + ".new"
+    if binary:
+        with open(preview, "wb") as fh:
+            fh.write(data)
+    else:
+        with open(preview, "w", errors="surrogateescape") as fh:
+            fh.write(data)
+    os.chmod(preview, mode)
+    report["conflicts"].append((dst, preview))
+
+
 def install_file(src, dst, home, report, skip_if_exists=False):
     if src.endswith(".keys"):
         return
@@ -45,10 +57,30 @@ def install_file(src, dst, home, report, skip_if_exists=False):
         return
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     text = read(src)
+    mode = os.stat(src).st_mode
     if text is None:
+        with open(src, "rb") as fh:
+            data = fh.read()
+        if os.path.exists(dst):
+            with open(dst, "rb") as fh:
+                if fh.read() == data:
+                    report["installed"] += 1
+                    return
+            write_conflict_preview(dst, data, True, stat.S_IMODE(mode), report)
+            return
         shutil.copy2(src, dst)
     else:
         rendered = text.replace("{{ HOME }}", home)
+        if os.path.exists(dst):
+            try:
+                with open(dst, "r", errors="surrogateescape") as fh:
+                    if fh.read() == rendered:
+                        report["installed"] += 1
+                        return
+            except UnicodeError:
+                pass
+            write_conflict_preview(dst, rendered, False, stat.S_IMODE(mode), report)
+            return
         with open(dst, "w", errors="surrogateescape") as fh:
             fh.write(rendered)
         if not src.endswith(".template") and PLACEHOLDER_RE.search(rendered):
@@ -72,7 +104,7 @@ def main():
         manifest = yaml.safe_load(fh)
 
     report = {"installed": 0, "skipped_existing": [], "placeholders": [],
-              "symlinks": 0}
+              "symlinks": 0, "blocked_symlinks": [], "conflicts": []}
 
     # --- shell files (whole-file installs with one-time backup) -------------
     shell_map = {
@@ -146,6 +178,7 @@ def main():
                 if os.path.islink(link):
                     os.unlink(link)
                 else:
+                    report["blocked_symlinks"].append((link, target))
                     continue  # real file/dir in the way — leave it, report
             os.symlink(target, link)
             report["symlinks"] += 1
@@ -177,6 +210,16 @@ def main():
     print("render-install: %d files, %d symlinks, %d skipped-existing"
           % (report["installed"], report["symlinks"],
              len(report["skipped_existing"])))
+    if report["conflicts"]:
+        for dst, preview in report["conflicts"][:10]:
+            print("ERROR: existing file differs; preserved %s and wrote %s"
+                  % (dst, preview), file=sys.stderr)
+        return 2
+    if report["blocked_symlinks"]:
+        for link, target in report["blocked_symlinks"][:10]:
+            print("ERROR: symlink blocked by existing real path: %s -> %s"
+                  % (link, target), file=sys.stderr)
+        return 2
     if report["placeholders"]:
         for p in report["placeholders"][:10]:
             print("ERROR: unresolved placeholder in %s" % p, file=sys.stderr)

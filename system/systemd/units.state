@@ -1,5 +1,6 @@
 openclaw-gateway.service	enabled
 send-queue-worker.service	enabled
+syncthing.service	enabled
 rss_news_digest_bot.service	disabled
 rss_news_digest_bot.timer	disabled
 moltbook-relay.service	static

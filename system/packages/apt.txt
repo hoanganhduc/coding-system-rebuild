@@ -10,6 +10,7 @@ python3-venv
 python3-pip
 python3-yaml
 stress
+syncthing
 gpg
 git
 make

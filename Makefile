@@ -112,7 +112,7 @@ status: ## drift summary (sync dry-run + component pins)
 prepare: ## install all software (SKIP_* toggles; see docs/INSTALL.md)
 	@bash bin/prepare.sh
 
-components: ## clone/refresh pinned components into external/
+components: ## clone/refresh pinned components (external/ plus ~/ai-agents-skills)
 	@bash bin/components.sh
 
 install: ## full restore on a fresh machine (SECRETS=... optional, degraded without)

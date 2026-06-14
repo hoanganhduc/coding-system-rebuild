@@ -3,5 +3,5 @@
 # - "ref" is a commit SHA once the component is published; "LOCAL" means the component is
 #   not yet published and must be used from its live checkout path (LOCAL=1 mode).
 #   P1 replaces LOCAL with real SHAs after openclaw-bot is populated and published.
-openclaw-bot=https://github.com/hoanganhduc/openclaw-bot.git@782037c6a1e7b4b008c3d774b2ec5df0057efc47
-ai-agents-skills=https://github.com/hoanganhduc/ai-agents-skills.git@8b69a6d9cc2881e28d18a8df528a50b63c3263bc
+openclaw-bot=https://github.com/hoanganhduc/openclaw-bot.git@3d2d0a4df7cd642818e19d9f78081b3465956fc6
+ai-agents-skills=https://github.com/hoanganhduc/ai-agents-skills.git@31db8dfe94ec03a42058e3994b4aff42a514b074

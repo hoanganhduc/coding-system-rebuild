@@ -11,15 +11,15 @@
 ## 1. Bootstrap
 
 ```bash
-sudo apt-get update && sudo apt-get install -y git make 7zip
+sudo apt-get update && sudo apt-get install -y git make 7zip python3-yaml
 git clone https://github.com/hoanganhduc/coding-system-rebuild
 cd coding-system-rebuild
 make doctor
 ```
 
 `doctor` hard-fails on: no network, missing git/make/python3/python3-yaml, no
-7-Zip CLI. It warns on: <60GB free disk, missing linger, non-24.04, amd64
-(SageMath image is arm64-only).
+7-Zip CLI. It warns on: <60GB free disk, missing linger, non-24.04, or an
+architecture without a pinned SageMath image.
 
 ## 2. Full install
 
@@ -73,8 +73,8 @@ Example minimal try-out: `SKIP_LATEX=1 SKIP_DOCKER_IMAGES=1 make install`
   at the start and end. Re-run later with
   `make restore-secrets SECRETS=… && PHASE=7 bin/install.sh`.
 - **Ollama** is intentionally NOT installed (verified unused on the source
-  system). If ever wanted: `curl -fsSL https://ollama.com/install.sh | sh &&
-  ollama pull qwen2.5:7b` — the OpenClaw provider entries for it are inert.
+  system). The OpenClaw provider entries for it are inert unless Ollama is
+  deliberately installed later.
 - **GHA compute broker**: `~/ai-agents-skills` is the single source for skills;
   phase 8 installs the `research_compute` broker (the local→Modal→GitHub Actions
   compute router) from there to the runtime root, and the documented
@@ -86,7 +86,7 @@ Example minimal try-out: `SKIP_LATEX=1 SKIP_DOCKER_IMAGES=1 make install`
 ## 3. Verify
 
 ```bash
-make test      # doctor + verify
+make test      # no-secrets self-tests and roundtrip
 make smoke     # quick CLI pin checks only
 ```
 

@@ -17,7 +17,8 @@ Copy the newest `~/secrets-out/coding-system-secrets-<stamp>.zip` somewhere
 password lives only in your password manager
 (bootstrap copy: `~/.config/coding-system/zip-password.txt` — rotate it).
 
-Zip rotation: keep the 3 newest + one monthly; prune the rest manually.
+Zip rotation: local and offsite pruning keep the 3 newest plus the newest
+snapshot per month.
 
 ## Full restore drill (fresh machine)
 
@@ -61,13 +62,12 @@ external/openclaw-bot/backup.sh --output ~/openclaw-backups
 
 ## Optional: restoring the DeepSeek plugin in OpenClaw (decision 10)
 
-The rebuilt openclaw.json has the personal deepseek plugin/provider stripped
-and model primaries as `{{ DEFAULT_PRIMARY_MODEL }}` placeholders. To restore
-the old setup: clone `https://github.com/openclaw/openclaw`, build/keep
-`extensions/deepseek`, add its path to `plugins.load.paths`, re-add `deepseek`
-to `plugins.allow` + `plugins.entries`, restore a `deepseek` provider block
-under `models.providers`, set the primaries, and restart the gateway. The
-DeepSeek CLI agents (`~/.codewhale`, `~/.deepseek`) need none of this.
+The sanitized OpenClaw template keeps bundled provider/plugin wiring, including
+DeepSeek entries, while removing owner-local checkout paths such as
+`openclaw-src` and templating secrets. If a recaptured template still contains
+`{{ DEFAULT_PRIMARY_MODEL }}` placeholders, set the desired model primaries in
+`openclaw.json` and restart the gateway. The DeepSeek CLI agents
+(`~/.codewhale`, `~/.deepseek`) are separate surfaces.
 
 ## Roundtrip self-test (no system mutation)
 

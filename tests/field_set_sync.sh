@@ -4,8 +4,8 @@
 # on an uncovered field would pass the scanner silently (the incident class).
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OCB="${OPENCLAW_BOT_DIR:-$HOME/openclaw-bot}"
-[ -f "$OCB/sync.sh" ] || { echo "SKIP: openclaw-bot not found"; exit 0; }
+OCB="${OPENCLAW_BOT_DIR:-$REPO/external/openclaw-bot}"
+[ -f "$OCB/sync.sh" ] || { echo "FAIL: openclaw-bot not found at $OCB"; exit 2; }
 
 # redactor field set: SECRET_FIELD_NAMES literals + SENSITIVE_KEY_RE alternatives
 red=$(python3 - "$OCB/sync.sh" <<'EOF'

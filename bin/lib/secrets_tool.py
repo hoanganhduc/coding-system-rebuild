@@ -12,6 +12,7 @@ Subcommands (all print to stdout, never secret values):
 
 import glob
 import hashlib
+import fnmatch
 import json
 import os
 import stat
@@ -20,7 +21,7 @@ from datetime import datetime, timezone
 
 import yaml
 
-HOME = os.path.expanduser("~")
+HOME = os.environ.get("CSR_SECRETS_HOME") or os.path.expanduser("~")
 
 
 def load(manifest_path):
@@ -55,6 +56,28 @@ def expand_entry(path):
     return uniq
 
 
+def match_archive_path(pattern, rel):
+    pattern = pattern.strip().rstrip("/")
+    rel = rel.strip().rstrip("/")
+    if not pattern or not rel:
+        return False
+    if rel == pattern:
+        return True
+    if pattern.endswith("/**") and (
+            rel == pattern[:-3] or rel.startswith(pattern[:-3] + "/")):
+        return True
+    if "*" in pattern:
+        return fnmatch.fnmatch(rel, pattern)
+    if pattern.endswith("/") or rel.startswith(pattern + "/"):
+        return rel.startswith(pattern.rstrip("/") + "/")
+    return False
+
+
+def unsafe_archive_path(rel):
+    parts = rel.split("/")
+    return rel.startswith("/") or any(p in ("", ".", "..") for p in parts)
+
+
 def main():
     cmd = sys.argv[1]
     manifest = load(sys.argv[2])
@@ -85,15 +108,29 @@ def main():
         listing = None
         if cmd == "verify-zip":
             listing = set(l.strip().rstrip("/") for l in sys.stdin if l.strip())
+            unknown = []
+            for member in listing:
+                if unsafe_archive_path(member) or not any(
+                        match_archive_path(e["path"], member) for e in entries):
+                    unknown.append(member)
+            if unknown:
+                for member in sorted(unknown)[:20]:
+                    print("%-70s UNKNOWN" % member)
+                return 1
         bad = 0
         for e in entries:
             files = expand_entry(e["path"])
             if cmd == "verify-zip":
+                missing_live = sorted(f for f in files if f not in listing)
+                if missing_live:
+                    status = "MISSING(live:%d)" % len(missing_live)
+                    bad += 1
+                    print("%-70s %s" % (e["path"], status))
+                    continue
                 present = [f for f in files if f in listing] if files else []
                 if not files:
                     # nothing live to compare; check any zip member under the path
-                    base = e["path"].rstrip("/").split("*")[0].rstrip("/")
-                    present = [m for m in listing if m.startswith(base)]
+                    present = [m for m in listing if match_archive_path(e["path"], m)]
                 status = "OK" if present else (
                     "MISSING(required)" if e.get("required") else "missing")
                 if status == "MISSING(required)":
@@ -115,6 +152,7 @@ def main():
             status = "OK(%d)" % len(files)
             if badperm:
                 status += " BAD-PERM[" + "; ".join(badperm[:3]) + "]"
+                bad += 1
             print("%-70s %s" % (e["path"], status))
         return 1 if bad else 0
 

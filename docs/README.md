@@ -40,12 +40,12 @@ Two existing repositories are orchestrated as **pinned components**
 ## Quickstart (fresh machine)
 
 ```bash
-sudo apt-get install -y git make 7zip
+sudo apt-get install -y git make 7zip python3-yaml
 git clone https://github.com/hoanganhduc/coding-system-rebuild
 cd coding-system-rebuild
 make doctor                                   # preflight
 make install SECRETS=/path/to/coding-system-secrets-<stamp>.zip
-make test                                     # verify everything
+make test                                     # no-secrets self-tests and roundtrip
 ```
 
 Without the secrets zip, `make install` still completes in **degraded mode**

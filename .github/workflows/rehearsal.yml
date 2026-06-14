@@ -77,6 +77,7 @@ jobs:
             if [ -z "$val" ]; then echo "SKIP  $id (secret $var not set)"; report="${report}- \`${id}\`: SKIP (not set)\n"; return; fi
             res=$(VERIFY_VALUE="$val" python3 bin/lib/verify_secret.py "$id" 2>/dev/null || true)
             case "$res" in
+              ERROR*) fail=1 ;;
               FAIL*) if [ -n "$soft" ]; then res="$res [soft: provider may block CI IPs]"; else fail=1; fi ;;
             esac
             echo "$res $id"

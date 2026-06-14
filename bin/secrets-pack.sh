@@ -7,6 +7,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$REPO/secrets/secrets-manifest.yaml"
 OUT_DIR="${1:-$HOME/secrets-out}"
+SECRETS_HOME="${CSR_SECRETS_HOME:-$HOME}"
 SEVENZ="$(command -v 7zz || command -v 7z || true)"
 [[ -n "$SEVENZ" ]] || { echo "ERROR: no 7zz/7z binary — apt install 7zip (and 7zip-standalone if available)" >&2; exit 2; }
 
@@ -19,21 +20,21 @@ if [[ -z "$PW" ]]; then
 fi
 
 # refresh pack metadata (sha256s) into its live location so it rides in the zip
-mkdir -p "$HOME/.config/coding-system"
-python3 "$REPO/bin/lib/secrets_tool.py" meta "$MANIFEST" > "$HOME/.config/coding-system/secrets-meta.json"
-chmod 600 "$HOME/.config/coding-system/secrets-meta.json"
+mkdir -p "$SECRETS_HOME/.config/coding-system"
+CSR_SECRETS_HOME="$SECRETS_HOME" python3 "$REPO/bin/lib/secrets_tool.py" meta "$MANIFEST" > "$SECRETS_HOME/.config/coding-system/secrets-meta.json"
+chmod 600 "$SECRETS_HOME/.config/coding-system/secrets-meta.json"
 
 # build file list (mktemp 0600, deleted on exit)
 LIST="$(mktemp)"; chmod 600 "$LIST"
 trap 'rm -f "$LIST"' EXIT
-python3 "$REPO/bin/lib/secrets_tool.py" expand "$MANIFEST" > "$LIST"
+CSR_SECRETS_HOME="$SECRETS_HOME" python3 "$REPO/bin/lib/secrets_tool.py" expand "$MANIFEST" > "$LIST"
 N=$(wc -l < "$LIST")
 [[ "$N" -gt 0 ]] || { echo "ERROR: empty file list" >&2; exit 2; }
 
 mkdir -p "$OUT_DIR"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 ZIP="$OUT_DIR/coding-system-secrets-$STAMP.zip"
-( cd "$HOME" && "$SEVENZ" a -tzip -mem=AES256 -mx=5 -p"$PW" "$ZIP" "@$LIST" >/dev/null )
+( cd "$SECRETS_HOME" && "$SEVENZ" a -tzip -mem=AES256 -mx=5 -p"$PW" "$ZIP" "@$LIST" >/dev/null )
 chmod 600 "$ZIP"
 "$SEVENZ" t -p"$PW" "$ZIP" >/dev/null || { echo "ERROR: archive integrity test failed" >&2; exit 2; }
 

@@ -5,19 +5,19 @@
 This is a targeted multi-agent repo-backed research pass on how others configure Codex/Claude-adjacent skills, commands, and rules to produce correct and visually strong TikZ pictures. It is not an exhaustive census of all public repositories.
 
 Comparison target:
-- [current cross-platform plan](/home/<user>/tasks/tikz-semantic-verifier-codex-integration-plan.md)
+- [current cross-platform plan](~/tasks/tikz-semantic-verifier-codex-integration-plan.md)
 
 Local comparison anchors:
-- [prior repo research](/home/<user>/.codex/skills/tikz-draw/references/research/tikz-codex-claude-repo-research.md)
-- [round 1 findings](/home/<user>/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_01.md)
-- [round 2 synthesis](/home/<user>/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_02.md)
+- [prior repo research](~/.codex/skills/tikz-draw/references/research/tikz-codex-claude-repo-research.md)
+- [round 1 findings](~/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_01.md)
+- [round 2 synthesis](~/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_02.md)
 
 ## Evidence Inspected
 
 ### Local
-- [current plan](/home/<user>/tasks/tikz-semantic-verifier-codex-integration-plan.md)
-- [prior repo research](/home/<user>/.codex/skills/tikz-draw/references/research/tikz-codex-claude-repo-research.md)
-- [round 1 findings](/home/<user>/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_01.md)
+- [current plan](~/tasks/tikz-semantic-verifier-codex-integration-plan.md)
+- [prior repo research](~/.codex/skills/tikz-draw/references/research/tikz-codex-claude-repo-research.md)
+- [round 1 findings](~/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_01.md)
 
 ### Directly Re-Checked In This Run
 - `pedrohcgs/claude-code-my-workflow` `new-diagram` skill:
@@ -189,10 +189,10 @@ The current plan is strong on semantic-verifier architecture and rollout discipl
 ## Source Ledger
 
 ### Local
-- [current plan](/home/<user>/tasks/tikz-semantic-verifier-codex-integration-plan.md)
-- [prior repo research](/home/<user>/.codex/skills/tikz-draw/references/research/tikz-codex-claude-repo-research.md)
-- [round 1 findings](/home/<user>/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_01.md)
-- [round 2 synthesis](/home/<user>/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_02.md)
+- [current plan](~/tasks/tikz-semantic-verifier-codex-integration-plan.md)
+- [prior repo research](~/.codex/skills/tikz-draw/references/research/tikz-codex-claude-repo-research.md)
+- [round 1 findings](~/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_01.md)
+- [round 2 synthesis](~/.codex/runs/agent_group_discuss/tikz-settings-research-20260419-202302/round_02.md)
 
 ### External
 - <https://github.com/pedrohcgs/claude-code-my-workflow/blob/034e30d879f2124b1799d09194c7d8bc01564ee4/.claude/skills/new-diagram/SKILL.md>

@@ -24,17 +24,17 @@ Out of scope for this plan:
 
 Inspected local evidence:
 
-- current Codex skill surface: [SKILL.md](/home/<user>/.codex/skills/tikz-draw/SKILL.md)
-- current Codex runtime helper: [tikz_draw.py](/home/<user>/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py)
-- current implementation baseline: [SPEC.md](/home/<user>/.codex/skills/tikz-draw/references/implementation/SPEC.md)
-- current research recommendation: [tikz-semantic-verifier-deep-research.md](/home/<user>/tikz-semantic-verifier-deep-research.md)
-- current graph helper: [graph_verifier.py](/home/<user>/.codex/runtime/workspace/skills/graph-verifier/graph_verifier.py)
-- current Claude skill surface: [SKILL.md](/home/<user>/.claude/skills/tikz-draw/SKILL.md)
-- current Claude public command: [tikz.md](/home/<user>/.claude/commands/tikz.md)
-- current Claude runtime helper: [tikz_draw.py](/home/<user>/.claude/skills/tikz-draw/tikz_draw.py)
-- current Claude runner: [_run.sh](/home/<user>/.claude/skills/_run.sh)
-- current Claude deep-research handoff: [deep-research/SKILL.md](/home/<user>/.claude/skills/deep-research/SKILL.md)
-- latest repo-backed comparison: [tikz-settings-plan-multi-agent-research.md](/home/<user>/tasks/tikz-settings-plan-multi-agent-research.md)
+- current Codex skill surface: [SKILL.md](~/.codex/skills/tikz-draw/SKILL.md)
+- current Codex runtime helper: [tikz_draw.py](~/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py)
+- current implementation baseline: [SPEC.md](~/.codex/skills/tikz-draw/references/implementation/SPEC.md)
+- current research recommendation: [tikz-semantic-verifier-deep-research.md](~/tikz-semantic-verifier-deep-research.md)
+- current graph helper: [graph_verifier.py](~/.codex/runtime/workspace/skills/graph-verifier/graph_verifier.py)
+- current Claude skill surface: [SKILL.md](~/.claude/skills/tikz-draw/SKILL.md)
+- current Claude public command: [tikz.md](~/.claude/commands/tikz.md)
+- current Claude runtime helper: [tikz_draw.py](~/.claude/skills/tikz-draw/tikz_draw.py)
+- current Claude runner: [_run.sh](~/.claude/skills/_run.sh)
+- current Claude deep-research handoff: [deep-research/SKILL.md](~/.claude/skills/deep-research/SKILL.md)
+- latest repo-backed comparison: [tikz-settings-plan-multi-agent-research.md](~/tasks/tikz-settings-plan-multi-agent-research.md)
 
 Confirmed baseline facts:
 
@@ -555,11 +555,11 @@ Tasks:
   - swapped arrow labels
   - reversed arrows
   - wrong object placement
-- update [SKILL.md](/home/<user>/.codex/skills/tikz-draw/SKILL.md) to document `verify-semantic`
+- update [SKILL.md](~/.codex/skills/tikz-draw/SKILL.md) to document `verify-semantic`
 - keep root docs thin and reference dedicated prevention, measurement, snippet, and semantic-review docs
 - add strong-approval semantics to Codex-facing usage examples
 - update any Codex deep-research or TikZ references that currently imply semantic review is already the default
-- update [SKILL.md](/home/<user>/.claude/skills/tikz-draw/SKILL.md), [tikz.md](/home/<user>/.claude/commands/tikz.md), and Claude deep-research references to document the semantic path
+- update [SKILL.md](~/.claude/skills/tikz-draw/SKILL.md), [tikz.md](~/.claude/commands/tikz.md), and Claude deep-research references to document the semantic path
 - keep `/tikz` as the public Claude entrypoint and the skill private
 - make an explicit decision on whether `review` should remain opt-in for semantic mode or switch defaults later
 
@@ -572,15 +572,15 @@ Verification gate:
 
 Primary implementation files:
 
-- [tikz_draw.py](/home/<user>/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py)
-- [run_tikz_draw.sh](/home/<user>/.codex/runtime/workspace/skills/tikz-draw/run_tikz_draw.sh)
-- [SKILL.md](/home/<user>/.codex/skills/tikz-draw/SKILL.md)
-- [tikz_draw.py](/home/<user>/.claude/skills/tikz-draw/tikz_draw.py)
-- [run_tikz_draw.sh](/home/<user>/.claude/skills/tikz-draw/run_tikz_draw.sh)
-- [SKILL.md](/home/<user>/.claude/skills/tikz-draw/SKILL.md)
-- [tikz.md](/home/<user>/.claude/commands/tikz.md)
-- [deep-research/SKILL.md](/home/<user>/.claude/skills/deep-research/SKILL.md)
-- [deep-research.md](/home/<user>/.claude/commands/deep-research.md)
+- [tikz_draw.py](~/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py)
+- [run_tikz_draw.sh](~/.codex/runtime/workspace/skills/tikz-draw/run_tikz_draw.sh)
+- [SKILL.md](~/.codex/skills/tikz-draw/SKILL.md)
+- [tikz_draw.py](~/.claude/skills/tikz-draw/tikz_draw.py)
+- [run_tikz_draw.sh](~/.claude/skills/tikz-draw/run_tikz_draw.sh)
+- [SKILL.md](~/.claude/skills/tikz-draw/SKILL.md)
+- [tikz.md](~/.claude/commands/tikz.md)
+- [deep-research/SKILL.md](~/.claude/skills/deep-research/SKILL.md)
+- [deep-research.md](~/.claude/commands/deep-research.md)
 
 Likely new files under the same runtime skill directory:
 
