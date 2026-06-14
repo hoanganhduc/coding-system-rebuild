@@ -1,3 +1,4 @@
+.claude/skills/adversarial-boundary-gate/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/adversarial-boundary-gate/SKILL.md	delegated
 .claude/skills/agent-group-discuss/EXECUTION.md	{{ HOME }}/ai-agents-skills/canonical/skills/agent-group-discuss/EXECUTION.md	delegated
 .claude/skills/agent-group-discuss/MODEL_TIERS.example.md	{{ HOME }}/ai-agents-skills/canonical/skills/agent-group-discuss/MODEL_TIERS.example.md	delegated
 .claude/skills/agent-group-discuss/MODEL_TIERS.md	{{ HOME }}/ai-agents-skills/canonical/skills/agent-group-discuss/MODEL_TIERS.md	delegated
@@ -9,6 +10,7 @@
 .claude/skills/autonomous-research-loop-runtime/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/autonomous-research-loop-runtime/SKILL.md	delegated
 .claude/skills/autonomous-research-loop/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/autonomous-research-loop/SKILL.md	delegated
 .claude/skills/axiom-axle-mcp/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/axiom-axle-mcp/SKILL.md	delegated
+.claude/skills/behavior-preserving-cleanup/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/behavior-preserving-cleanup/SKILL.md	delegated
 .claude/skills/calibre/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/calibre/SKILL.md	delegated
 .claude/skills/cross-agent-delegation/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/cross-agent-delegation/SKILL.md	delegated
 .claude/skills/cross-agent-delegation/references/examples.md	{{ HOME }}/ai-agents-skills/canonical/skills/cross-agent-delegation/references/examples.md	delegated
@@ -33,6 +35,7 @@
 .claude/skills/database-lookup/references/treasury.md	{{ HOME }}/ai-agents-skills/canonical/skills/database-lookup/references/treasury.md	delegated
 .claude/skills/database-lookup/references/uniprot.md	{{ HOME }}/ai-agents-skills/canonical/skills/database-lookup/references/uniprot.md	delegated
 .claude/skills/database-lookup/references/uspto.md	{{ HOME }}/ai-agents-skills/canonical/skills/database-lookup/references/uspto.md	delegated
+.claude/skills/decision-doubt-loop/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/decision-doubt-loop/SKILL.md	delegated
 .claude/skills/deep-research-workflow/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/deep-research-workflow/SKILL.md	delegated
 .claude/skills/deep-research-workflow/references/output-structure.md	{{ HOME }}/ai-agents-skills/canonical/skills/deep-research-workflow/references/output-structure.md	delegated
 .claude/skills/deep-research-workflow/references/research-quality-guards.md	{{ HOME }}/ai-agents-skills/canonical/skills/deep-research-workflow/references/research-quality-guards.md	delegated
@@ -48,10 +51,11 @@
 .claude/skills/get-available-resources/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/get-available-resources/SKILL.md	delegated
 .claude/skills/getscipapers-requester/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/getscipapers-requester/SKILL.md	delegated
 .claude/skills/graph-verifier/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/graph-verifier/SKILL.md	delegated
+.claude/skills/intent-interview/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/intent-interview/SKILL.md	delegated
+.claude/skills/intent-interview/references/intent-interview-template.md	{{ HOME }}/ai-agents-skills/canonical/skills/intent-interview/references/intent-interview-template.md	delegated
 .claude/skills/lean-explore-mcp/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/lean-explore-mcp/SKILL.md	delegated
 .claude/skills/lean-formalization-intake/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/lean-formalization-intake/SKILL.md	delegated
 .claude/skills/lean-strict-verification-gate/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/lean-strict-verification-gate/SKILL.md	delegated
-.claude/skills/modal-research-compute/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/modal-research-compute/SKILL.md	delegated
 .claude/skills/model-router/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/model-router/SKILL.md	delegated
 .claude/skills/paper-lookup/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/paper-lookup/SKILL.md	delegated
 .claude/skills/paper-lookup/references/arxiv.md	{{ HOME }}/ai-agents-skills/canonical/skills/paper-lookup/references/arxiv.md	delegated
@@ -84,6 +88,7 @@
 .claude/skills/self-improving-agent/scripts/detect_common_errors.sh	{{ HOME }}/ai-agents-skills/canonical/skills/self-improving-agent/scripts/detect_common_errors.sh	delegated
 .claude/skills/self-improving-agent/scripts/review_pending.sh	{{ HOME }}/ai-agents-skills/canonical/skills/self-improving-agent/scripts/review_pending.sh	delegated
 .claude/skills/session-logs/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/session-logs/SKILL.md	delegated
+.claude/skills/source-grounded-decisions/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/source-grounded-decisions/SKILL.md	delegated
 .claude/skills/source-research/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/source-research/SKILL.md	delegated
 .claude/skills/source-research/references/literature-review-template.md	{{ HOME }}/ai-agents-skills/canonical/skills/source-research/references/literature-review-template.md	delegated
 .claude/skills/source-research/references/specialist-subagents.md	{{ HOME }}/ai-agents-skills/canonical/skills/source-research/references/specialist-subagents.md	delegated

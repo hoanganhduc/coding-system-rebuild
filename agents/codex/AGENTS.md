@@ -712,3 +712,28 @@ Generated target: codex.
 - `vnu-eoffice`: Use VNU eOffice functions from any supported agent target: monitor updates, list latest incoming/outgoing documents, search by keyword, download attachments, and send requested files through Telegram.
 
 <!-- ai-agents-skills:vnu-eoffice:end -->
+
+<!-- ai-agents-skills:decision-doubt-loop:start -->
+- `decision-doubt-loop`: In-flight fresh-context adversarial review of a non-trivial decision before it stands.
+
+<!-- ai-agents-skills:decision-doubt-loop:end -->
+
+<!-- ai-agents-skills:intent-interview:start -->
+- `intent-interview`: Elicit and confirm real intent one question at a time before any brief, spec, or code.
+
+<!-- ai-agents-skills:intent-interview:end -->
+
+<!-- ai-agents-skills:adversarial-boundary-gate:start -->
+- `adversarial-boundary-gate`: Pre-delivery threat-model of trust boundaries and an abuse-case/injection check, delegating to a fresh-context security reviewer.
+
+<!-- ai-agents-skills:adversarial-boundary-gate:end -->
+
+<!-- ai-agents-skills:behavior-preserving-cleanup:start -->
+- `behavior-preserving-cleanup`: Clarity-only edit pass behind a comprehension gate with verify-after-each-change so behavior stays fixed.
+
+<!-- ai-agents-skills:behavior-preserving-cleanup:end -->
+
+<!-- ai-agents-skills:source-grounded-decisions:start -->
+- `source-grounded-decisions`: Ground version- and spec-sensitive decisions in cited authoritative sources; flag when unverified.
+
+<!-- ai-agents-skills:source-grounded-decisions:end -->
