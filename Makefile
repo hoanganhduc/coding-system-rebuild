@@ -88,8 +88,9 @@ test: ## self-tests: canary scan + field-set guard + rotation units + roundtrip
 	@bash tests/rotation_unit.sh
 	@bash bin/test-roundtrip.sh
 
-ci: ## no-secrets rehearsal for CI/fresh VM: doctor + leak scans + all self-tests
+ci: ## no-secrets rehearsal for CI/fresh VM: doctor + components + leak scans + all self-tests
 	@bash bin/doctor.sh
+	@[ -f external/openclaw-bot/sync.sh ] || $(MAKE) -s components
 	@bash bin/leak-scan.sh
 	@$(MAKE) -s leak-scan-history
 	@$(MAKE) -s test
