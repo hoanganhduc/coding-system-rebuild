@@ -14,6 +14,14 @@ if [[ -z "${LEANEXPLORE_API_KEY:-}" ]]; then
   fi
 fi
 
+if [[ -z "${LEANEXPLORE_API_KEY:-}" && -f "${HOME}/.secrets.env" ]]; then
+  key_line="$(grep -E '^[[:space:]]*export[[:space:]]+LEANEXPLORE_API_KEY=' "${HOME}/.secrets.env" | tail -n 1 || true)"
+  if [[ -n "$key_line" ]]; then
+    eval "${key_line#export }"
+    export LEANEXPLORE_API_KEY
+  fi
+fi
+
 if [[ -z "${LEANEXPLORE_API_KEY:-}" ]]; then
   printf '%s\n' "LEANEXPLORE_API_KEY is required for LeanExplore MCP API backend." >&2
   exit 1
