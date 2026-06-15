@@ -146,7 +146,7 @@ Because those areas were not executed live, this plan is an evidence-based integ
 
 Windows post-integration acceptance artifact:
 
-- [tikz-draw-windows-post-integration-checklist.md](~/tikz-draw-windows-post-integration-checklist.md)
+- [tikz-draw-windows-post-integration-checklist.md](/home/<user>/tikz-draw-windows-post-integration-checklist.md)
 
 Use that checklist after Windows rollout to verify file presence, launcher adaptation, dependency state, TeX availability, and one end-to-end smoke per Windows target.
 
@@ -338,7 +338,7 @@ Before touching any target:
    - `compile`
    - `verify-semantic`
 8. Complete the Windows Codex section in:
-   - [tikz-draw-windows-post-integration-checklist.md](~/tikz-draw-windows-post-integration-checklist.md)
+   - [tikz-draw-windows-post-integration-checklist.md](/home/<user>/tikz-draw-windows-post-integration-checklist.md)
 
 ### Phase E. Local Windows Claude
 
@@ -361,7 +361,7 @@ Before touching any target:
    - `compile`
    - `verify-semantic`
 9. Complete the Windows Claude section in:
-   - [tikz-draw-windows-post-integration-checklist.md](~/tikz-draw-windows-post-integration-checklist.md)
+   - [tikz-draw-windows-post-integration-checklist.md](/home/<user>/tikz-draw-windows-post-integration-checklist.md)
 
 ## Verification Gates
 

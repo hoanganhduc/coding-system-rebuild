@@ -2,9 +2,9 @@
 
 Date: 2026-04-19
 Basis:
-- [tikz-codex-claude-deep-research.md](~/tikz-codex-claude-deep-research.md)
-- [tikz-codex-claude-internet-extended-research.md](~/tikz-codex-claude-internet-extended-research.md)
-- [tikz-codex-claude-repo-research.md](~/tikz-codex-claude-repo-research.md)
+- [tikz-codex-claude-deep-research.md](/home/<user>/tikz-codex-claude-deep-research.md)
+- [tikz-codex-claude-internet-extended-research.md](/home/<user>/tikz-codex-claude-internet-extended-research.md)
+- [tikz-codex-claude-repo-research.md](/home/<user>/tikz-codex-claude-repo-research.md)
 
 ## Scope
 
@@ -51,8 +51,8 @@ Inspected local state relevant to this plan:
   - `~/.claude/skills/deep-research/SKILL.md`
   - `~/.claude/skills/deep-research/templates/{sources,analysis,report}.md`
 - There is currently no `tikz`, `diagram`, or `beamer` skill directory under either `~/.codex/skills/` or `~/.claude/skills/`.
-- Current Codex global config is `model = "gpt-5.4"` with `model_reasoning_effort = "xhigh"` in [config.toml](~/.codex/config.toml).
-- Current Claude settings enable always-thinking, disable adaptive thinking via env, force max effort via env, and set `disableSkillShellExecution = true` in [settings.json](~/.claude/settings.json).
+- Current Codex global config is `model = "gpt-5.4"` with `model_reasoning_effort = "xhigh"` in [config.toml](/home/<user>/.codex/config.toml).
+- Current Claude settings enable always-thinking, disable adaptive thinking via env, force max effort via env, and set `disableSkillShellExecution = true` in [settings.json](/home/<user>/.claude/settings.json).
 - The local LaTeX toolchain already includes `latexmk`, `pdflatex`, `xelatex`, `lualatex`, `dvisvgm`, and `pdf2svg`.
 - Current deep-research docs in both environments do not mention TikZ routing or figure-generation handoffs.
 
@@ -69,7 +69,7 @@ This section supersedes any conflicting implementation detail below the original
    - `review`
    - `extract`
 2. One canonical source of truth for shared assets:
-   - `~/tasks/tikz-draw-skill/shared/`
+   - `/home/<user>/tasks/tikz-draw-skill/shared/`
 3. One concrete research handoff artifact:
    - `figure-brief.json`
 4. Codex public entrypoint:
@@ -95,11 +95,11 @@ This section supersedes any conflicting implementation detail below the original
 
 The canonical authoring workspace is:
 
-- `~/tasks/tikz-draw-skill/`
+- `/home/<user>/tasks/tikz-draw-skill/`
 
 The canonical shared assets live under:
 
-- `~/tasks/tikz-draw-skill/shared/`
+- `/home/<user>/tasks/tikz-draw-skill/shared/`
 
 Planned shared contents:
 
@@ -194,8 +194,8 @@ Implications:
 
 This is mandatory because both wrappers force a fixed cwd:
 
-- Claude: [_run.sh](~/.claude/skills/_run.sh)
-- Codex: [run_skill.sh](~/.codex/runtime/run_skill.sh)
+- Claude: [_run.sh](/home/<user>/.claude/skills/_run.sh)
+- Codex: [run_skill.sh](/home/<user>/.codex/runtime/run_skill.sh)
 
 ### Hard rules
 
@@ -343,10 +343,10 @@ Codex render rule:
 
 Update:
 
-- [AGENTS.md](~/.codex/AGENTS.md)
-- [research-quick-actions.md](~/.codex/instructions/research-quick-actions.md)
-- [openclaw-research SKILL.md](~/.codex/skills/openclaw-research/SKILL.md)
-- [deep-research-workflow SKILL.md](~/.codex/skills/deep-research-workflow/SKILL.md)
+- [AGENTS.md](/home/<user>/.codex/AGENTS.md)
+- [research-quick-actions.md](/home/<user>/.codex/instructions/research-quick-actions.md)
+- [openclaw-research SKILL.md](/home/<user>/.codex/skills/openclaw-research/SKILL.md)
+- [deep-research-workflow SKILL.md](/home/<user>/.codex/skills/deep-research-workflow/SKILL.md)
 
 Routing rule:
 
@@ -357,9 +357,9 @@ Routing rule:
 
 Modify:
 
-- [deep-research-analysis.md](~/.codex/templates/deep-research-analysis.md)
-- [deep-research-report.md](~/.codex/templates/deep-research-report.md)
-- [source-handoff.md](~/.codex/skills/deep-research-workflow/references/source-handoff.md)
+- [deep-research-analysis.md](/home/<user>/.codex/templates/deep-research-analysis.md)
+- [deep-research-report.md](/home/<user>/.codex/templates/deep-research-report.md)
+- [source-handoff.md](/home/<user>/.codex/skills/deep-research-workflow/references/source-handoff.md)
 - `output-structure.md`
 
 Add:
@@ -422,7 +422,7 @@ Claude render rule:
 
 ### Claude runtime behavior
 
-Because of current Claude settings in [settings.json](~/.claude/settings.json):
+Because of current Claude settings in [settings.json](/home/<user>/.claude/settings.json):
 
 - do not rely on inline skill-shell execution as the public path
 - set env explicitly inside the runner
@@ -433,9 +433,9 @@ Because of current Claude settings in [settings.json](~/.claude/settings.json):
 
 Update:
 
-- [CLAUDE.md](~/.claude/CLAUDE.md)
-- [deep-research.md](~/.claude/commands/deep-research.md)
-- [deep-research SKILL.md](~/.claude/skills/deep-research/SKILL.md)
+- [CLAUDE.md](/home/<user>/.claude/CLAUDE.md)
+- [deep-research.md](/home/<user>/.claude/commands/deep-research.md)
+- [deep-research SKILL.md](/home/<user>/.claude/skills/deep-research/SKILL.md)
 - `~/.claude/skills/deep-research/templates/analysis.md`
 - `~/.claude/skills/deep-research/templates/report.md`
 
@@ -471,7 +471,7 @@ Claude artifact conventions:
 
 ### Codex
 
-Do not change [config.toml](~/.codex/config.toml) in phase 1.
+Do not change [config.toml](/home/<user>/.codex/config.toml) in phase 1.
 
 Reason:
 
@@ -480,7 +480,7 @@ Reason:
 
 ### Claude
 
-Do not change [settings.json](~/.claude/settings.json) or `settings.local.json` in phase 1.
+Do not change [settings.json](/home/<user>/.claude/settings.json) or `settings.local.json` in phase 1.
 
 Reason:
 
@@ -577,7 +577,7 @@ For both platforms:
 
 ## Recommended Build Order
 
-1. Create execution artifacts in `~/tasks/tikz-draw-skill/`.
+1. Create execution artifacts in `/home/<user>/tasks/tikz-draw-skill/`.
 2. Add shared schema files and shared snippet/style/check assets.
 3. Implement Codex `tikz-draw` skill plus runtime helper.
 4. Implement Claude private skill plus `/tikz` command.

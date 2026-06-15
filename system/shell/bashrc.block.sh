@@ -133,6 +133,14 @@ eval "$(register-python-argcomplete pipx)"
 
 # coding-system: personal/secret exports live in ~/.secrets.env (restored from the encrypted archive)
 [ -f ~/.secrets.env ] && . ~/.secrets.env
+
+# OpenClaw sandbox credentials; keep the actual secret in the private env file.
+if [ -f "$HOME/.openclaw/moltbook.env" ]; then
+  case $- in
+    *a*) . "$HOME/.openclaw/moltbook.env" ;;
+    *) set -a; . "$HOME/.openclaw/moltbook.env"; set +a ;;
+  esac
+fi
 export CHROMEDRIVER_PATH=/usr/bin/chromedriver
 export CHROME_BINARY=/usr/bin/chromium
 export CHROMIUM_BINARY=/usr/bin/chromium
@@ -147,3 +155,5 @@ export PATH=$PATH:{{ HOME }}/.npm-global/bin
 
 # Added by Antigravity CLI installer
 export PATH="{{ HOME }}/.local/bin:$PATH"
+# coding-system: personal/secret exports live in ~/.secrets.env (restored from the encrypted archive)
+[ -f ~/.secrets.env ] && . ~/.secrets.env

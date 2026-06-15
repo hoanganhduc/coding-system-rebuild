@@ -45,7 +45,7 @@
 ## Project Structure
 
 - Files or directories expected to change:
-  - `~/tasks/tikz-semantic-verifier/`
+  - `/home/<user>/tasks/tikz-semantic-verifier/`
   - `~/.codex/runtime/workspace/skills/tikz-draw/`
   - `~/.codex/skills/tikz-draw/`
   - `~/.claude/skills/tikz-draw/`

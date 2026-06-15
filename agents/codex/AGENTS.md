@@ -4,7 +4,7 @@ Codex has its own copy of research skills, runtime wrappers, and memories under 
 
 ## Global Workflow Rules
 
-These rules govern work under `~` and all child directories.
+These rules govern work under `/home/<user>` and all child directories.
 
 ### Workflow
 

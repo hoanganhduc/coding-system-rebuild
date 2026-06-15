@@ -102,9 +102,9 @@ Implementation note for slice 1:
 ## Commands
 
 - Verify planning artifacts:
-  - `sed -n '1,260p' ~/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
-  - `sed -n '1,220p' ~/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
-  - `sed -n '1,220p' ~/tasks/tikz-sage-assisted-graph-mode/tasks/todo.md`
+  - `sed -n '1,260p' /home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+  - `sed -n '1,220p' /home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
+  - `sed -n '1,220p' /home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/todo.md`
 - Future implementation verification:
   - `python3 ~/.codex/runtime/workspace/skills/tikz-draw/semantic_parity_check.py`
   - `python3 ~/.codex/runtime/workspace/skills/tikz-draw/semantic_regression_runner.py --platform both`
@@ -112,7 +112,7 @@ Implementation note for slice 1:
 ## Project Structure
 
 - New planning workspace:
-  - `~/tasks/tikz-sage-assisted-graph-mode/`
+  - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/`
 - Likely implementation touchpoints:
   - `~/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py`
   - `~/.codex/runtime/workspace/skills/tikz-draw/sage_graph_backend.py`
