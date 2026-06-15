@@ -49,7 +49,8 @@ def write_conflict_preview(dst, data, binary, mode, report):
     report["conflicts"].append((dst, preview))
 
 
-def install_file(src, dst, home, report, skip_if_exists=False):
+def install_file(src, dst, home, report, skip_if_exists=False,
+                 overwrite_existing=False):
     if src.endswith(".keys"):
         return
     if skip_if_exists and os.path.exists(dst):
@@ -66,6 +67,12 @@ def install_file(src, dst, home, report, skip_if_exists=False):
                 if fh.read() == data:
                     report["installed"] += 1
                     return
+            if overwrite_existing:
+                with open(dst, "wb") as fh:
+                    fh.write(data)
+                os.chmod(dst, stat.S_IMODE(mode))
+                report["installed"] += 1
+                return
             write_conflict_preview(dst, data, True, stat.S_IMODE(mode), report)
             return
         shutil.copy2(src, dst)
@@ -79,6 +86,16 @@ def install_file(src, dst, home, report, skip_if_exists=False):
                         return
             except UnicodeError:
                 pass
+            if overwrite_existing:
+                with open(dst, "w", errors="surrogateescape") as fh:
+                    fh.write(rendered)
+                if not src.endswith(".template") and PLACEHOLDER_RE.search(rendered):
+                    report["placeholders"].append(dst)
+                if os.access(src, os.X_OK):
+                    os.chmod(dst, os.stat(dst).st_mode | stat.S_IXUSR
+                             | stat.S_IXGRP | stat.S_IXOTH)
+                report["installed"] += 1
+                return
             write_conflict_preview(dst, rendered, False, stat.S_IMODE(mode), report)
             return
         with open(dst, "w", errors="surrogateescape") as fh:
@@ -121,7 +138,9 @@ def main():
             shutil.copy2(dst, dst + ".pre-coding-system")
         skip = src_rel.endswith(".template") and os.path.exists(dst) \
             and ".npmrc" in dst_rel
-        install_file(src, dst, home, report, skip_if_exists=skip)
+        overwrite = dst_rel in (".bashrc", ".profile")
+        install_file(src, dst, home, report, skip_if_exists=skip,
+                     overwrite_existing=overwrite)
 
     # --- manifest-driven agent/system trees ---------------------------------
     handled_dests = set(shell_map)

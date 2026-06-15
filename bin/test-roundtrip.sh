@@ -19,9 +19,13 @@ step "1/5 sync dry-run clean"
 
 step "2/5 render-only install into fixture home"
 mkdir -p "$RUN/home"
+printf '%s\n' '# fixture pre-existing bashrc' > "$RUN/home/.bashrc"
+printf '%s\n' '# fixture pre-existing profile' > "$RUN/home/.profile"
 python3 "$REPO/bin/lib/render_install.py" --repo "$REPO" --home "$RUN/home" --render-only \
   && echo ok || fail "render-install"
 # spot-checks
+[[ -f "$RUN/home/.bashrc.pre-coding-system" ]] || fail "bashrc backup not created"
+[[ -f "$RUN/home/.profile.pre-coding-system" ]] || fail "profile backup not created"
 [[ -x "$RUN/home/.claude/skills/_run.sh" ]] || fail "_run.sh not installed/executable"
 grep -rl '{{ HOME }}' "$RUN/home" --include='*.sh' -m1 2>/dev/null | grep -v '\.template' | head -1 | grep -q . \
   && fail "unresolved {{ HOME }} in rendered shell file" || echo "placeholders: none in rendered files"
