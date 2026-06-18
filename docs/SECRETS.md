@@ -38,6 +38,20 @@ password manager. Losing it makes the archive unrecoverable — there is no rese
 | `LEANEXPLORE_API_KEY` | lean-explore MCP (leanexplore.com) |
 | `MOLTBOOK_*`, `MOLBOOK_AGENT_ID` | moltbook agent configuration (personal) |
 
+## ai-agents-skills runtime secrets (`<runtime_root>/workspace/.secrets.json`)
+
+Skills run via the managed runner read `AAS_SECRETS_FILE` =
+`<runtime_root>/workspace/.secrets.json` (e.g. `~/.codex/runtime/workspace/` and
+`~/.local/share/ai-agents-skills/runtime/workspace/`). The `send-email` skill
+keeps its SMTP credentials and sender identity here, in an `smtp` object (one
+profile, or several named profiles). Only `user`/`password` are sensitive.
+
+| Key | Feature | Obtain |
+|---|---|---|
+| `smtp.host`, `smtp.port`, `smtp.security` | SMTP server endpoint | your mail provider (e.g. smtp.gmail.com 587 starttls) |
+| `smtp.user`, `smtp.password` | SMTP authentication | provider app password (revocable; not the account password) |
+| `smtp.from`, `smtp.from_name`, `smtp.reply_to`, `smtp.signature*` | sender identity (not secret) | per the send-email SKILL.md |
+
 ## Per-agent auth files
 
 | File | Agent | Re-auth alternative |
