@@ -52,6 +52,10 @@ profile, or several named profiles). Only `user`/`password` are sensitive.
 | `smtp.user`, `smtp.password` | SMTP authentication | provider app password (revocable; not the account password) |
 | `smtp.from`, `smtp.from_name`, `smtp.reply_to`, `smtp.signature*` | sender identity (not secret) | per the send-email SKILL.md |
 
+Send-email also keeps an **address book** of saved recipients at
+`<runtime_root>/workspace/.address-book.json` (personal state, not credentials);
+it is backed up so saved contacts survive a rebuild.
+
 ## Per-agent auth files
 
 | File | Agent | Re-auth alternative |
