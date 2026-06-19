@@ -56,6 +56,11 @@ Send-email also keeps an **address book** of saved recipients at
 `<runtime_root>/workspace/.address-book.json` (personal state, not credentials);
 it is backed up so saved contacts survive a rebuild.
 
+To serve every install target from one config, this machine uses the shared file
+`~/.config/send-email/secrets.json` (option 1): `.secrets.env` exports
+`AAS_ALLOW_EXTERNAL_SECRETS_FILE=1` and `AAS_SECRETS_FILE` pointing there, so all
+runners read it. That file is backed up too.
+
 ## Per-agent auth files
 
 | File | Agent | Re-auth alternative |
