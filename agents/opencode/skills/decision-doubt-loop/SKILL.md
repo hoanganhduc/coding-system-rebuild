@@ -58,10 +58,19 @@ decision. Do not self-review inline; spawn it.
 4. **Resolve.** If the reviewer refutes the decision or its load-bearing assumption,
    course-correct now. If it survives, record that the decision stands and move on.
 
+If fresh-context review is unavailable for a high-risk, irreversible,
+security-sensitive, or outward-facing decision, do not substitute an inline
+self-review. Output `BLOCKED-FRESH-CONTEXT-UNAVAILABLE`, state the decision and
+why it is gated, and ask for explicit user direction. For lower-risk decisions,
+you may proceed only after disclosing that the fresh-context check was unavailable
+and either receiving confirmation or narrowing the decision to a reversible local
+step.
+
 ## Output contract
 
 A short visible note: `Decision`, `Load-bearing assumption`, `Doubt verdict`
-(STANDS | REVISED | BLOCKED), and the one change made if revised.
+(STANDS | REVISED | BLOCKED | BLOCKED-FRESH-CONTEXT-UNAVAILABLE), and the one
+change made if revised.
 
 ## Guardrails
 
@@ -70,3 +79,14 @@ A short visible note: `Decision`, `Load-bearing assumption`, `Doubt verdict`
 - bias the reviewer to disprove; a reviewer that sets out to approve finds nothing
 - keep it bounded: one decision, the smallest sufficient reviewer set
 - when unsure whether a decision is non-trivial, run it
+
+## Recommended templates
+
+When this skill is involved, consider these workflow templates (install via
+the `workflow-templates` artifact profile, or `--with-deps` to pull backing skills):
+
+- `autonomous-research-loop-runbook` -- Bounded autonomous research-loop runbook with four stop conditions, single-path solving, mandatory cross-agent verification, fresh-agent backtracking, and Modal/GitHub Actions credit-gated heavy-compute offload.
+- `cross-agent-adversarial-review` -- Producer-never-confirmer adversarial review of a paper, proof, or code artifact across agent families with a fresh-agent confirmation gate.
+- `engineering-delivery-loop-runbook` -- Bounded build-and-deliver loop runbook: single-path implementation with seen-to-fail proof, cross-agent diff verification, behavior-preserving cleanup, and credit-gated heavy-compute offload.
+- `reversible-decision-memo` -- Evidence-grounded decision record with named alternatives, source-cited rationale, reversibility class and trip-wires, and a fresh-context adversarial confirmation before the decision stands.
+- `informal-to-lean-formalization-runbook` -- Local-first intake mapping an informal proof to Lean declarations with a scanner-first verification gate separating typecheck status from claim support.

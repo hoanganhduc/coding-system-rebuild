@@ -8,9 +8,9 @@
   - Verify:
     - re-read the revised plan and confirm no residual `new --spec` wording remains
   - Files:
-    - `/home/<user>/tikz-draw-skill-implementation-plan.md`
-    - `/home/<user>/tasks/tikz-draw-skill/SPEC.md`
-    - `/home/<user>/tasks/tikz-draw-skill/tasks/plan.md`
+    - `/home/hoanganhduc/tikz-draw-skill-implementation-plan.md`
+    - `/home/hoanganhduc/tasks/tikz-draw-skill/SPEC.md`
+    - `/home/hoanganhduc/tasks/tikz-draw-skill/tasks/plan.md`
 
 - [x] Task: Define the canonical shared source tree and sync/install policy.
   - Acceptance:
@@ -19,8 +19,8 @@
   - Verify:
     - the plan and spec name the same canonical source tree
   - Files:
-    - `/home/<user>/tikz-draw-skill-implementation-plan.md`
-    - `/home/<user>/tasks/tikz-draw-skill/SPEC.md`
+    - `/home/hoanganhduc/tikz-draw-skill-implementation-plan.md`
+    - `/home/hoanganhduc/tasks/tikz-draw-skill/SPEC.md`
 
 - [x] Task: Define `diagram.schema.json` and `figure-brief.schema.json`.
   - Acceptance:
@@ -29,8 +29,8 @@
   - Verify:
     - validate example payloads against both schemas
   - Files:
-    - `/home/<user>/tasks/tikz-draw-skill/shared/spec-schema/diagram.schema.json`
-    - `/home/<user>/tasks/tikz-draw-skill/shared/spec-schema/figure-brief.schema.json`
+    - `/home/hoanganhduc/tasks/tikz-draw-skill/shared/spec-schema/diagram.schema.json`
+    - `/home/hoanganhduc/tasks/tikz-draw-skill/shared/spec-schema/figure-brief.schema.json`
 
 - [x] Task: Build the shared snippet, style, and review-rule assets.
   - Acceptance:
@@ -41,9 +41,9 @@
   - Verify:
     - spot-check asset paths and content against the plan
   - Files:
-    - `/home/<user>/tasks/tikz-draw-skill/shared/snippets/`
-    - `/home/<user>/tasks/tikz-draw-skill/shared/styles/`
-    - `/home/<user>/tasks/tikz-draw-skill/shared/checks/`
+    - `/home/hoanganhduc/tasks/tikz-draw-skill/shared/snippets/`
+    - `/home/hoanganhduc/tasks/tikz-draw-skill/shared/styles/`
+    - `/home/hoanganhduc/tasks/tikz-draw-skill/shared/checks/`
 
 - [x] Task: Implement the Codex `tikz-draw` root skill and runtime helper.
   - Acceptance:
@@ -52,7 +52,7 @@
     - no hardcoded `/workspace` assumptions remain
     - rendered document-facing output wraps `tikzpicture` in `adjustbox{max width=\\textwidth}`
   - Verify:
-    - `python3 /home/<user>/.codex/skills/.system/skill-creator/scripts/quick_validate.py /home/<user>/.codex/skills/tikz-draw`
+    - `python3 /home/hoanganhduc/.codex/skills/.system/skill-creator/scripts/quick_validate.py /home/hoanganhduc/.codex/skills/tikz-draw`
     - `bash ~/.codex/runtime/run_skill.sh skills/tikz-draw/run_tikz_draw.sh doctor`
     - inspect one rendered `.tex` output for the required wrapper
   - Files:

@@ -3,7 +3,7 @@
 Date: 2026-04-19
 
 Target plan:
-[tikz-semantic-verifier-codex-integration-plan.md](/home/<user>/tasks/tikz-semantic-verifier-codex-integration-plan.md)
+[tikz-semantic-verifier-codex-integration-plan.md](/home/hoanganhduc/tasks/tikz-semantic-verifier-codex-integration-plan.md)
 
 ## Highest-Priority Changes
 

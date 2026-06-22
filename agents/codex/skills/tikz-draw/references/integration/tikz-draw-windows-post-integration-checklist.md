@@ -6,8 +6,8 @@ Status: planning artifact only. Use this after Windows integration is completed.
 
 This checklist defines what must exist and what must be verified for:
 
-- Windows Codex at `C:\Users\<user>\.codex`
-- Windows Claude at `C:\Users\<user>\.claude`
+- Windows Codex at `C:\Users\hoanganhduc\.codex`
+- Windows Claude at `C:\Users\hoanganhduc\.claude`
 
 It is a post-integration acceptance sheet, not an implementation script.
 
@@ -17,51 +17,51 @@ It is a post-integration acceptance sheet, not an implementation script.
 
 Core skill metadata:
 
-- `C:\Users\<user>\.codex\skills\tikz-draw\SKILL.md`
-- `C:\Users\<user>\.codex\skills\tikz-draw\references\backend-routing.md`
-- `C:\Users\<user>\.codex\skills\tikz-draw\references\quality-gates.md`
-- `C:\Users\<user>\.codex\skills\tikz-draw\references\tikz-prevention.md`
-- `C:\Users\<user>\.codex\skills\tikz-draw\references\tikz-measurement.md`
-- `C:\Users\<user>\.codex\skills\tikz-draw\references\research\*`
-- `C:\Users\<user>\.codex\skills\tikz-draw\references\implementation\*`
+- `C:\Users\hoanganhduc\.codex\skills\tikz-draw\SKILL.md`
+- `C:\Users\hoanganhduc\.codex\skills\tikz-draw\references\backend-routing.md`
+- `C:\Users\hoanganhduc\.codex\skills\tikz-draw\references\quality-gates.md`
+- `C:\Users\hoanganhduc\.codex\skills\tikz-draw\references\tikz-prevention.md`
+- `C:\Users\hoanganhduc\.codex\skills\tikz-draw\references\tikz-measurement.md`
+- `C:\Users\hoanganhduc\.codex\skills\tikz-draw\references\research\*`
+- `C:\Users\hoanganhduc\.codex\skills\tikz-draw\references\implementation\*`
 
 Runtime skill files:
 
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\tikz_draw.py`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\sage_graph_backend.py`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\family_verifiers.py`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\pdf_extract.py`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\semantic_parity_check.py`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\semantic_regression_runner.py`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\requirements-semantic-verifier.txt`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\run_tikz_draw.sh`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\run_tikz_draw.bat`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\tikz_draw.py`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\sage_graph_backend.py`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\family_verifiers.py`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\pdf_extract.py`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\semantic_parity_check.py`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\semantic_regression_runner.py`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\requirements-semantic-verifier.txt`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\run_tikz_draw.sh`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\run_tikz_draw.bat`
 
 Runtime assets:
 
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\assets\checks\*`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\assets\spec-schema\*`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\assets\styles\*`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\assets\templates\tikz-snippets\*`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\assets\examples\semantic-regression\*`
-- `C:\Users\<user>\.codex\runtime\workspace\skills\tikz-draw\assets\snippets\*`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\assets\checks\*`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\assets\spec-schema\*`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\assets\styles\*`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\assets\templates\tikz-snippets\*`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\assets\examples\semantic-regression\*`
+- `C:\Users\hoanganhduc\.codex\runtime\workspace\skills\tikz-draw\assets\snippets\*`
 
 Codex routing/docs:
 
-- `C:\Users\<user>\.codex\AGENTS.md`
+- `C:\Users\hoanganhduc\.codex\AGENTS.md`
   - includes `tikz-draw` routing
-- `C:\Users\<user>\.codex\instructions\research-quick-actions.md`
+- `C:\Users\hoanganhduc\.codex\instructions\research-quick-actions.md`
   - includes Windows Codex `tikz-draw` examples
-- `C:\Users\<user>\.codex\skills\deep-research-workflow\SKILL.md`
+- `C:\Users\hoanganhduc\.codex\skills\deep-research-workflow\SKILL.md`
   - includes `figure-brief` handoff to `tikz-draw`
-- `C:\Users\<user>\.codex\templates\deep-research-analysis.md`
-- `C:\Users\<user>\.codex\templates\deep-research-report.md`
+- `C:\Users\hoanganhduc\.codex\templates\deep-research-analysis.md`
+- `C:\Users\hoanganhduc\.codex\templates\deep-research-report.md`
 
 ### Must be checked after install
 
 Python and launcher:
 
-- `C:\Users\<user>\.codex\.venv\Scripts\python.exe` exists
+- `C:\Users\hoanganhduc\.codex\.venv\Scripts\python.exe` exists
 - `run_tikz_draw.bat` uses the intended Python environment
 - `run_tikz_draw.bat` can route all supported verbs
 
@@ -107,50 +107,50 @@ Output contract:
 
 Core skill metadata:
 
-- `C:\Users\<user>\.claude\skills\tikz-draw\SKILL.md`
-- `C:\Users\<user>\.claude\skills\tikz-draw\references\backend-routing.md`
-- `C:\Users\<user>\.claude\skills\tikz-draw\references\quality-gates.md`
-- `C:\Users\<user>\.claude\skills\tikz-draw\references\tikz-prevention.md`
-- `C:\Users\<user>\.claude\skills\tikz-draw\references\tikz-measurement.md`
-- `C:\Users\<user>\.claude\skills\tikz-draw\references\research\*`
-- `C:\Users\<user>\.claude\skills\tikz-draw\references\implementation\*`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\SKILL.md`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\references\backend-routing.md`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\references\quality-gates.md`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\references\tikz-prevention.md`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\references\tikz-measurement.md`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\references\research\*`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\references\implementation\*`
 
 Skill/runtime files:
 
-- `C:\Users\<user>\.claude\skills\tikz-draw\tikz_draw.py`
-- `C:\Users\<user>\.claude\skills\tikz-draw\sage_graph_backend.py`
-- `C:\Users\<user>\.claude\skills\tikz-draw\family_verifiers.py`
-- `C:\Users\<user>\.claude\skills\tikz-draw\pdf_extract.py`
-- `C:\Users\<user>\.claude\skills\tikz-draw\semantic_regression_runner.py`
-- `C:\Users\<user>\.claude\skills\tikz-draw\requirements-semantic-verifier.txt`
-- `C:\Users\<user>\.claude\skills\tikz-draw\run_tikz_draw.sh`
-- `C:\Users\<user>\.claude\skills\tikz-draw\run_tikz_draw.bat`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\tikz_draw.py`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\sage_graph_backend.py`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\family_verifiers.py`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\pdf_extract.py`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\semantic_regression_runner.py`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\requirements-semantic-verifier.txt`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\run_tikz_draw.sh`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\run_tikz_draw.bat`
 
 Runtime assets:
 
-- `C:\Users\<user>\.claude\skills\tikz-draw\assets\checks\*`
-- `C:\Users\<user>\.claude\skills\tikz-draw\assets\spec-schema\*`
-- `C:\Users\<user>\.claude\skills\tikz-draw\assets\styles\*`
-- `C:\Users\<user>\.claude\skills\tikz-draw\assets\templates\tikz-snippets\*`
-- `C:\Users\<user>\.claude\skills\tikz-draw\assets\examples\semantic-regression\*`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\assets\checks\*`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\assets\spec-schema\*`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\assets\styles\*`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\assets\templates\tikz-snippets\*`
+- `C:\Users\hoanganhduc\.claude\skills\tikz-draw\assets\examples\semantic-regression\*`
 
 Claude routing/docs:
 
-- `C:\Users\<user>\.claude\commands\tikz.md`
-- `C:\Users\<user>\.claude\CLAUDE.md`
+- `C:\Users\hoanganhduc\.claude\commands\tikz.md`
+- `C:\Users\hoanganhduc\.claude\CLAUDE.md`
   - includes `/tikz`
-- `C:\Users\<user>\.claude\commands\deep-research.md`
+- `C:\Users\hoanganhduc\.claude\commands\deep-research.md`
   - includes post-analysis `figure-brief` handoff to `/tikz`
-- `C:\Users\<user>\.claude\skills\deep-research\SKILL.md`
+- `C:\Users\hoanganhduc\.claude\skills\deep-research\SKILL.md`
   - includes `figure-brief` handoff
-- `C:\Users\<user>\.claude\skills\deep-research\templates\analysis.md`
-- `C:\Users\<user>\.claude\skills\deep-research\templates\report.md`
+- `C:\Users\hoanganhduc\.claude\skills\deep-research\templates\analysis.md`
+- `C:\Users\hoanganhduc\.claude\skills\deep-research\templates\report.md`
 
 ### Must be checked after install
 
 Python and launcher:
 
-- `C:\Users\<user>\.claude\.venv\Scripts\python.exe` exists
+- `C:\Users\hoanganhduc\.claude\.venv\Scripts\python.exe` exists
 - `skills\_run.bat` can invoke `skills\tikz-draw\run_tikz_draw.bat`
 - `run_tikz_draw.bat` uses the intended Python environment
 

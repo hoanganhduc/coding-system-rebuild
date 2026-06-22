@@ -300,9 +300,14 @@ Inputs:
 
 - the analyzed theme matrix
 - preserved source ids and uncertainty notes
+- prior posts, templates, style guides, venue instructions, source ledgers, or
+  supplied examples when the deliverable must match an existing format or voice
 
 - produce a structured output
 - include only citations that survive from earlier phases
+- inspect and follow relevant prior-format/style artifacts before drafting blog
+  posts, articles, reports, or other publication-style prose; if they are absent,
+  state that assumption instead of inventing a house style
 - distinguish observation, inference, and recommendation
 - say `incomplete analysis` if material scope remains unchecked
 
@@ -325,7 +330,7 @@ Output structure guidance:
 - Use `docling` before or between Phases 1 and 2 when local PDFs, HTML exports, or office documents need structure-aware parsing.
 - Use `database-lookup` during Phase 1 when the task depends on structured public database records rather than general web synthesis.
 - Use `paper-lookup` during Phase 1 when external literature metadata/discovery is needed after the local library-first workflow.
-- Use `research_digest_wrapper` or `rss_news_digest` to seed Phase 1 when the task starts from tracked topics, alerts, or feeds.
+- Use `research-digest-wrapper` or `rss-news-digest` to seed Phase 1 when the task starts from tracked topics, alerts, or feeds.
 - Use `tikz-draw` only after Phase 2 when there is an explicit figure request or a clear post-analysis figure brief to execute.
 - Use `formal-skeleton-helper`, `lean-formalization-intake`,
   `lean-explore-mcp`, and `lean-strict-verification-gate` only for optional
@@ -341,7 +346,7 @@ Output structure guidance:
 
 - Stay in this skill for single-agent phased deep research.
 - Escalate to `prose` when the user explicitly wants structured multi-agent research-and-synthesis orchestration.
-- Escalate to `agent_group_discuss` when the user wants panel-style discussion, debate, or multi-agent research perspectives.
+- Escalate to `agent-group-discuss` when the user wants panel-style discussion, debate, or multi-agent research perspectives.
 
 ## Guardrails
 
@@ -353,6 +358,9 @@ Output structure guidance:
 - Do not drop a Phase 1 source silently in later phases; if it is excluded, note why.
 - Do not reuse one source id for multiple different sources.
 - Do not skip the Zotero cross-check for paper-like sources.
+- Do not collapse research and drafting into one step when the user asks for a
+  new post, article, report, or format-matched deliverable; inspect relevant
+  prior context first, then write from the analyzed evidence.
 
 ## Verification
 
@@ -362,6 +370,8 @@ Output structure guidance:
 - [ ] Optional figure briefs preserve `S*` source linkage and assign stable `F*` ids
 - [ ] Final output distinguishes sourced fact from inference
 - [ ] Missing coverage is disclosed explicitly
+- [ ] Prior posts, templates, style guides, or supplied examples were inspected
+      before format-matched writing, or their absence was disclosed
 - [ ] Dropped or excluded sources are explained
 - [ ] Nontrivial runs include guard outputs with `guard_output_id`
 - [ ] Supported `pass` or `warn` guard outputs cite source or evidence IDs

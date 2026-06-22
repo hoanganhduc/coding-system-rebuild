@@ -4,7 +4,7 @@ Codex has its own copy of research skills, runtime wrappers, and memories under 
 
 ## Global Workflow Rules
 
-These rules govern work under `/home/<user>` and all child directories.
+These rules govern work under `/home/hoanganhduc` and all child directories.
 
 ### Workflow
 
@@ -737,3 +737,18 @@ Generated target: codex.
 - `source-grounded-decisions`: Ground version- and spec-sensitive decisions in cited authoritative sources; flag when unverified.
 
 <!-- ai-agents-skills:source-grounded-decisions:end -->
+
+<!-- ai-agents-skills:slides-to-video:start -->
+- `slides-to-video`: Turn prepared slides (PNG/PDF/PPTX) into a narrated, captioned video in a chosen language and presenter role using only free tools; three-phase human-in-the-loop with an approval gate before rendering.
+
+<!-- ai-agents-skills:slides-to-video:end -->
+
+<!-- ai-agents-skills:manim-math-animation:start -->
+- `manim-math-animation`: Render Manim math animations (handwritten-style equation Write, equation morphing, emphasis) to a silent clip normalized for splicing into slides-to-video or standalone use.
+
+<!-- ai-agents-skills:manim-math-animation:end -->
+
+<!-- ai-agents-skills:send-email:start -->
+- `send-email`: Send email over SMTP using only the Python standard library: plain-text and HTML bodies, attachments, cc/bcc, reply-to, dry-run preview, connection verification, and redacted config inspection.
+
+<!-- ai-agents-skills:send-email:end -->

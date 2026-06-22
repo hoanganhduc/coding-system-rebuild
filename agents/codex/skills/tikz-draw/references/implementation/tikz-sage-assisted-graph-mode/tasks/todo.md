@@ -7,9 +7,9 @@
   - Verify:
     - re-open the new `SPEC.md`, `tasks/plan.md`, and `tasks/todo.md`
   - Files:
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/todo.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/tasks/todo.md`
 
 - [x] Task: Define trigger rules for `baseline` vs `sage-assisted` routing.
   - Acceptance:
@@ -19,7 +19,7 @@
   - Verify:
     - re-read the `Trigger Rules` section in `SPEC.md`
   - Files:
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
 
 - [x] Task: Define the Sage-assisted contract.
   - Acceptance:
@@ -30,7 +30,7 @@
   - Verify:
     - re-read the `Sage-Assisted Contract` section in `SPEC.md`
   - Files:
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
 
 - [x] Task: Define boundaries and implementation touchpoints.
   - Acceptance:
@@ -40,8 +40,8 @@
   - Verify:
     - re-read the `Project Structure` and `Boundaries` sections in `SPEC.md`
   - Files:
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
 
 - [x] Task: Define verification expectations for a future implementation slice.
   - Acceptance:
@@ -51,8 +51,8 @@
     - re-read `Testing Strategy` in `SPEC.md`
     - re-read `Verification checkpoints` in `tasks/plan.md`
   - Files:
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
 
 - [x] Task: Turn the Sage-assisted contract into concrete code-touch implementation tasks.
   - Acceptance:
@@ -65,9 +65,9 @@
     - re-read the `First Implementation Slice` section in `SPEC.md`
     - re-read the `First code-touch slice` section in `tasks/plan.md`
   - Files:
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
-    - `/home/<user>/tasks/tikz-sage-assisted-graph-mode/tasks/todo.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/SPEC.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/tasks/plan.md`
+    - `/home/hoanganhduc/tasks/tikz-sage-assisted-graph-mode/tasks/todo.md`
 
 - [x] Task: Implement the first Sage-assisted graph routing/report slice.
   - Acceptance:
@@ -76,9 +76,9 @@
     - Codex and Claude stay in parity on the new routing/report surface
     - thin docs mention baseline vs Sage-assisted graph routing accurately
   - Verify:
-    - `python3 -c "import ast, pathlib; ast.parse(pathlib.Path('/home/<user>/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py').read_text())"`
-    - `python3 -c "import ast, pathlib; ast.parse(pathlib.Path('/home/<user>/.codex/runtime/workspace/skills/tikz-draw/sage_graph_backend.py').read_text())"`
-    - `python3 /home/<user>/.codex/runtime/workspace/skills/tikz-draw/semantic_parity_check.py`
+    - `python3 -c "import ast, pathlib; ast.parse(pathlib.Path('/home/hoanganhduc/.codex/runtime/workspace/skills/tikz-draw/tikz_draw.py').read_text())"`
+    - `python3 -c "import ast, pathlib; ast.parse(pathlib.Path('/home/hoanganhduc/.codex/runtime/workspace/skills/tikz-draw/sage_graph_backend.py').read_text())"`
+    - `python3 /home/hoanganhduc/.codex/runtime/workspace/skills/tikz-draw/semantic_parity_check.py`
     - `bash ~/.codex/runtime/run_skill.sh skills/tikz-draw/run_tikz_draw.sh doctor`
     - baseline graph render smoke, Sage-assisted render smoke, and one negative routing smoke
   - Files:

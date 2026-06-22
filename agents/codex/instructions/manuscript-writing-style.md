@@ -6,11 +6,17 @@ which is the canonical OpenClaw writing profile.
 
 - Match the current manuscript first; keep prose simple, direct, and logically
   necessary.
-- Open sections by saying what appears in the section, in order, and why those
+- Open each section, except Introduction and Concluding Remarks, with a short
+  outline paragraph saying what appears in the section, in order, and why those
   parts are needed.
-- Introduce statements by explaining their role in the argument, not only by
-  saying that a lemma or theorem follows.
-- Begin proofs with a strategy sentence and vary nearby proof openings.
+- Do not put the role of a theorem, proposition, lemma, corollary, definition,
+  or remark only in a short optional bracket title. Add one to three short
+  sentences before the statement explaining informally what it says and how it
+  is used in the proof.
+- Begin every long, complicated, or important proof with a short strategy
+  paragraph explaining the proof idea, such as the main induction, reduction,
+  counting argument, case split, invariant, or obstruction mechanism. Vary
+  nearby proof openings.
 - In `.tex`, split if-and-only-if proofs into itemized `($\Rightarrow$)` and
   `($\Leftarrow$)` directions when this improves clarity.
 - In `.tex`, list parallel proof cases with `itemize`.

@@ -2,8 +2,8 @@
 
 Date: 2026-04-19
 Extends:
-- [tikz-codex-claude-deep-research.md](/home/<user>/tikz-codex-claude-deep-research.md)
-- [tikz-codex-claude-internet-extended-research.md](/home/<user>/tikz-codex-claude-internet-extended-research.md)
+- [tikz-codex-claude-deep-research.md](/home/hoanganhduc/tikz-codex-claude-deep-research.md)
+- [tikz-codex-claude-internet-extended-research.md](/home/hoanganhduc/tikz-codex-claude-internet-extended-research.md)
 
 ## Scope
 

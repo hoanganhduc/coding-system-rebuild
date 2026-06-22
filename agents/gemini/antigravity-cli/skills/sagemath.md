@@ -29,6 +29,22 @@ POSIX examples below use `run_skill.sh` and `.sh` command targets; use the Windo
 
 This uses the vendored Codex runtime copy of the SageMath workflow.
 
+If `sage` is not on the non-interactive WSL `PATH`, set the executable path
+explicitly before running the wrapper. Bash aliases in `~/.bashrc` are not
+visible to the Windows runtime wrapper.
+
+```powershell
+$env:AAS_SAGE_WSL_DISTRO = "Ubuntu-24.04"
+$env:AAS_SAGE_BIN = "/home/.../sage-10.4/sage"
+& "$runtime\run_skill.bat" "skills/sagemath/run_sage.bat" "print(2+2)"
+```
+
+Alternatively, make `sage` a real executable in WSL:
+
+```powershell
+wsl.exe -d Ubuntu-24.04 -e bash -lc 'sudo ln -sfn "$HOME/sage-10.4/sage" /usr/local/bin/sage && sage --version'
+```
+
 ## When to use
 
 - chromatic polynomial or chromatic number computations on nontrivial graph families
@@ -97,3 +113,10 @@ Common templates in `skills/sagemath/templates/`:
 - Results are returned as JSON.
 - Prefer this skill when correctness depends on SageMath-native graph or algebra routines rather than lightweight heuristics.
 - Treat this `SKILL.md` and `sage_reference.md` as the primary quick reference for the wrapper; the wrapper’s default interface is execution-oriented rather than documentation-oriented.
+
+## Recommended templates
+
+When this skill is involved, consider this workflow template (install via
+the `workflow-templates` artifact profile, or `--with-deps` to pull backing skills):
+
+- `tikz-figure-verification-runbook` -- Bounded draw-compile-verify-redraw loop for a TikZ figure that guarantees it is free of overlap, wrong meaning, and bad layout, with Sage-assisted graph realization and fresh-agent visual confirmation before the strict approval gate.

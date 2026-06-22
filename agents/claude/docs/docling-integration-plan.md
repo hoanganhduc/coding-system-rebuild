@@ -53,7 +53,7 @@ Solution: dedicated virtualenv with its own pydantic v2. The skill runner, CLI, 
 
 **Actual venv locations** (differs per OS due to filesystem constraints):
 - **Linux**: `~/.local/share/docling-venv/` (`~/.claude/` has a read-only bind mount for bash)
-- **Windows**: `~/.venv-docling/` (i.e., `C:\Users\<user>\.venv-docling\`)
+- **Windows**: `~/.venv-docling/` (i.e., `C:\Users\hoanganhduc\.venv-docling\`)
 
 ### Tool Availability
 
@@ -114,7 +114,7 @@ Solution: dedicated virtualenv with its own pydantic v2. The skill runner, CLI, 
 
 ## 2. Environment Audit Summary
 
-### Local Linux (`/home/<user>/.claude/`)
+### Local Linux (`/home/hoanganhduc/.claude/`)
 
 | Component | Status |
 |---|---|
@@ -129,7 +129,7 @@ Solution: dedicated virtualenv with its own pydantic v2. The skill runner, CLI, 
 | Env vars | `CLAUDE_CODE_NO_FLICKER`, `DISABLE_GIT_INSTRUCTIONS`, `SUBPROCESS_ENV_SCRUB` |
 | **Docling** | **Not installed** |
 
-### Local Windows (`/windows/Users/<user>/.claude/`)
+### Local Windows (`/windows/Users/hoanganhduc/.claude/`)
 
 | Component | Status |
 |---|---|
@@ -172,7 +172,7 @@ Add `docling-mcp` to `.mcp.json` on all environments. Gives Claude Code a `conve
 **Linux** (uses dedicated venv python):
 ```json
 "docling": {
-  "command": "/home/<user>/.claude/.venv-docling/bin/python",
+  "command": "/home/hoanganhduc/.claude/.venv-docling/bin/python",
   "args": ["-m", "docling_mcp"],
   "env": {
     "TESSDATA_PREFIX": "/usr/share/tessdata/"

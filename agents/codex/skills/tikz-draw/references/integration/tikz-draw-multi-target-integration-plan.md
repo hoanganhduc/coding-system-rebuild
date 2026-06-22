@@ -8,8 +8,8 @@ Integrate the current local `tikz-draw` Codex and Claude settings into:
 
 - remote Codex: `{{ HOME }}/.codex`
 - remote Claude: `{{ HOME }}/.claude`
-- local Windows Codex: `/windows/Users/<user>/.codex`
-- local Windows Claude: `/windows/Users/<user>/.claude`
+- local Windows Codex: `/windows/Users/hoanganhduc/.codex`
+- local Windows Claude: `/windows/Users/hoanganhduc/.claude`
 
 The plan is adaptation-first. It treats Linux and Windows as different runtime targets, not as simple file-copy mirrors.
 
@@ -81,14 +81,14 @@ Confirmed remote Ubuntu target state:
 
 Confirmed Windows target state:
 
-- `/windows/Users/<user>/.codex` exists with:
+- `/windows/Users/hoanganhduc/.codex` exists with:
   - `AGENTS.md`
   - `config.toml`
   - `runtime/run_skill.bat`
   - `runtime/run_skill.ps1`
   - `runtime/workspace/skills/`
   - deep-research and sagemath surfaces
-- `/windows/Users/<user>/.claude` exists with:
+- `/windows/Users/hoanganhduc/.claude` exists with:
   - `CLAUDE.md`
   - `settings.json`
   - `settings.local.json`
@@ -146,7 +146,7 @@ Because those areas were not executed live, this plan is an evidence-based integ
 
 Windows post-integration acceptance artifact:
 
-- [tikz-draw-windows-post-integration-checklist.md](/home/<user>/tikz-draw-windows-post-integration-checklist.md)
+- [tikz-draw-windows-post-integration-checklist.md](/home/hoanganhduc/tikz-draw-windows-post-integration-checklist.md)
 
 Use that checklist after Windows rollout to verify file presence, launcher adaptation, dependency state, TeX availability, and one end-to-end smoke per Windows target.
 
@@ -338,7 +338,7 @@ Before touching any target:
    - `compile`
    - `verify-semantic`
 8. Complete the Windows Codex section in:
-   - [tikz-draw-windows-post-integration-checklist.md](/home/<user>/tikz-draw-windows-post-integration-checklist.md)
+   - [tikz-draw-windows-post-integration-checklist.md](/home/hoanganhduc/tikz-draw-windows-post-integration-checklist.md)
 
 ### Phase E. Local Windows Claude
 
@@ -361,7 +361,7 @@ Before touching any target:
    - `compile`
    - `verify-semantic`
 9. Complete the Windows Claude section in:
-   - [tikz-draw-windows-post-integration-checklist.md](/home/<user>/tikz-draw-windows-post-integration-checklist.md)
+   - [tikz-draw-windows-post-integration-checklist.md](/home/hoanganhduc/tikz-draw-windows-post-integration-checklist.md)
 
 ## Verification Gates
 

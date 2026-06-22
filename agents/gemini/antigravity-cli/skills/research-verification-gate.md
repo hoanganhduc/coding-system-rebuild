@@ -21,7 +21,12 @@ Use this as the last gate before claiming a research output is ready.
 
 - the stated scope was actually answered
 - important claims still have supporting evidence
+- available structured artifacts (`sources.jsonl`, `claims.jsonl`,
+  `guards.jsonl`, `delivery.json`, source ledgers, evidence maps) were inspected
+  when present
 - time-sensitive facts include concrete dates when needed
+- requested format/style context was inspected for blog, article, report, or
+  other format-matched writing
 - remaining gaps are disclosed
 - `incomplete analysis` is used when material scope is still unchecked
 
@@ -43,3 +48,11 @@ Use the checklist in `references/checklist.md`.
 - do not silently downgrade a blocker into a caveat
 - if material scope is unchecked, require `incomplete analysis`
 - keep the gate short and concrete
+
+## Recommended templates
+
+When this skill is involved, consider these workflow templates (install via
+the `workflow-templates` artifact profile, or `--with-deps` to pull backing skills):
+
+- `autonomous-research-loop-runbook` -- Bounded autonomous research-loop runbook with four stop conditions, single-path solving, mandatory cross-agent verification, fresh-agent backtracking, and Modal/GitHub Actions credit-gated heavy-compute offload.
+- `cross-agent-adversarial-review` -- Producer-never-confirmer adversarial review of a paper, proof, or code artifact across agent families with a fresh-agent confirmation gate.

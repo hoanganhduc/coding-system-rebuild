@@ -79,7 +79,7 @@ def _trigger_ingest(book_data):
     """Fire-and-forget: ingest Calibre book into memory. Does not block."""
     import subprocess
     script = os.path.join(
-        os.environ.get("OPENCLAW_WORKSPACE", "/home/<user>/.codex/runtime/workspace"),
+        os.environ.get("OPENCLAW_WORKSPACE", "/home/hoanganhduc/.codex/runtime/workspace"),
         "scripts", "ingest_library.py",
     )
     if not os.path.exists(script):

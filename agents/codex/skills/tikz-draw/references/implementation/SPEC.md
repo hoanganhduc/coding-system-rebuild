@@ -14,7 +14,7 @@
 1. Phase 1 does not change global settings in `~/.codex/config.toml` or `~/.claude/settings*.json`.
 2. Claude’s public interface is `/tikz`; the underlying Claude skill is private via frontmatter.
 3. Codex triggering depends primarily on strong `SKILL.md` frontmatter, especially `description`.
-4. Shared schema, snippet, and style assets live canonically under `/home/<user>/tasks/tikz-draw-skill/shared/`.
+4. Shared schema, snippet, and style assets live canonically under `/home/hoanganhduc/tasks/tikz-draw-skill/shared/`.
 5. Deep-research integration is post-analysis only in phase 1.
 6. All runner paths and output paths must be normalized to absolute host paths before execution.
 7. Phase-1 document-facing outputs must not emit a bare top-level `tikzpicture`; they must use the required `adjustbox` wrapper.
@@ -29,7 +29,7 @@
 - Lint:
   - `bash -n ~/.codex/runtime/workspace/skills/tikz-draw/run_tikz_draw.sh`
   - `bash -n ~/.claude/skills/tikz-draw/run_tikz_draw.sh`
-  - `python3 /home/<user>/.codex/skills/.system/skill-creator/scripts/quick_validate.py /home/<user>/.codex/skills/tikz-draw`
+  - `python3 /home/hoanganhduc/.codex/skills/.system/skill-creator/scripts/quick_validate.py /home/hoanganhduc/.codex/skills/tikz-draw`
 - Run:
   - `bash ~/.codex/runtime/run_skill.sh skills/tikz-draw/run_tikz_draw.sh render --spec <ABS_SPEC> --out <ABS_OUT_DIR>`
   - `bash ~/.claude/skills/_run.sh skills/tikz-draw/run_tikz_draw.sh render --spec <ABS_SPEC> --out <ABS_OUT_DIR>`
@@ -37,8 +37,8 @@
 ## Project Structure
 
 - Files or directories expected to change:
-  - `/home/<user>/tikz-draw-skill-implementation-plan.md`
-  - `/home/<user>/tasks/tikz-draw-skill/`
+  - `/home/hoanganhduc/tikz-draw-skill-implementation-plan.md`
+  - `/home/hoanganhduc/tasks/tikz-draw-skill/`
   - `~/.codex/skills/tikz-draw/`
   - `~/.codex/runtime/workspace/skills/tikz-draw/`
   - `~/.codex/AGENTS.md`
@@ -103,7 +103,7 @@
 
 ## Success Criteria
 
-- [ ] A canonical shared source tree exists under `/home/<user>/tasks/tikz-draw-skill/shared/`.
+- [ ] A canonical shared source tree exists under `/home/hoanganhduc/tasks/tikz-draw-skill/shared/`.
 - [ ] Codex has a working `tikz-draw` skill plus runtime helper with the stable API.
 - [ ] Claude has a working private `tikz-draw` skill plus public `/tikz` command with the stable API.
 - [ ] Both platforms implement explicit absolute-path and run-root handling.

@@ -1,12 +1,12 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "env": {
-    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "0",
-    "CLAUDE_CODE_EFFORT_LEVEL": "ultracode",
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
-    "MAX_THINKING_TOKENS": "63999",
     "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
-    "DISABLE_TELEMETRY": "1"
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+    "CLAUDE_CODE_EFFORT_LEVEL": "ultracode",
+    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "0",
+    "DISABLE_TELEMETRY": "1",
+    "MAX_THINKING_TOKENS": "63999"
   },
   "includeGitInstructions": false,
   "permissions": {
@@ -42,12 +42,45 @@
     "defaultMode": "bypassPermissions"
   },
   "hooks": {
-    "UserPromptSubmit": [
+    "PostCompact": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/self-improvement/activator.sh",
+            "command": "bash ~/.claude/hooks/post-compact-context.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/self-improvement/error-detector.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/context-monitor.js",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/pre-compact-guard.sh",
             "timeout": 5
           }
         ]
@@ -75,34 +108,17 @@
         ]
       }
     ],
-    "PostToolUse": [
+    "SessionStart": [
       {
-        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/self-improvement/error-detector.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node ~/.claude/hooks/context-monitor.js",
+            "command": "find /tmp -maxdepth 1 \\( -name .claude-session-titled-\\* -o -name claude-ctx-\\*.json -o -name claude-ctx-alert-\\*.json -o -name claude-statusline-debug-\\*.jsonl -o -name claude-sess-\\*-git-baseline.txt \\) -mtime +1 -delete 2>/dev/null; tail -100 /tmp/claude-compact.log > /tmp/claude-compact.log.tmp 2>/dev/null && mv /tmp/claude-compact.log.tmp /tmp/claude-compact.log 2>/dev/null; true",
             "timeout": 3
-          }
-        ]
-      }
-    ],
-    "PostCompact": [
-      {
-        "hooks": [
+          },
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/post-compact-context.sh",
+            "command": "bash ~/.openclaw/workspace/scripts/capture-session-git.sh",
             "timeout": 5
           }
         ]
@@ -122,30 +138,22 @@
             "timeout": 30
           }
         ]
-      }
-    ],
-    "PreCompact": [
+      },
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/pre-compact-guard.sh",
-            "timeout": 5
+            "command": "bash \"{{ HOME }}/.local/share/ai-agents-skills/runtime/workspace/skills/autonomous-research-loop-runtime/autoloop_stop_hook.sh\""
           }
         ]
       }
     ],
-    "SessionStart": [
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "find /tmp -maxdepth 1 \\( -name .claude-session-titled-\\* -o -name claude-ctx-\\*.json -o -name claude-ctx-alert-\\*.json -o -name claude-statusline-debug-\\*.jsonl -o -name claude-sess-\\*-git-baseline.txt \\) -mtime +1 -delete 2>/dev/null; tail -100 /tmp/claude-compact.log > /tmp/claude-compact.log.tmp 2>/dev/null && mv /tmp/claude-compact.log.tmp /tmp/claude-compact.log 2>/dev/null; true",
-            "timeout": 3
-          },
-          {
-            "type": "command",
-            "command": "bash ~/.openclaw/workspace/scripts/capture-session-git.sh",
+            "command": "bash ~/.claude/hooks/self-improvement/activator.sh",
             "timeout": 5
           }
         ]

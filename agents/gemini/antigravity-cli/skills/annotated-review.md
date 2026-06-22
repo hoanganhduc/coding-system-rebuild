@@ -57,7 +57,7 @@ Examples that should **not** trigger this skill by themselves:
 Routing rule for review-only requests:
 
 - if the user asks only for a review, use the normal single-agent review flow via `paper-review`
-- if the user asks for a multi-agent review, use `agent_group_discuss`
+- if the user asks for a multi-agent review, use `agent-group-discuss`
 - do not auto-route review-only requests to `annotated-review`
 
 ## Strict Zotero rule
@@ -127,3 +127,10 @@ bash ~/.codex/runtime/run_skill.sh skills/annotated-review/run_review.sh --revie
 ## Output rule
 
 Companion review artifacts are still useful even if LaTeX compilation fails. Report the best available artifact and any compile error explicitly.
+
+## Recommended templates
+
+When this skill is involved, consider these workflow templates (install via
+the `workflow-templates` artifact profile, or `--with-deps` to pull backing skills):
+
+- `cross-agent-adversarial-review` -- Producer-never-confirmer adversarial review of a paper, proof, or code artifact across agent families with a fresh-agent confirmation gate.
