@@ -61,6 +61,14 @@ To serve every install target from one config, this machine uses the shared file
 `AAS_ALLOW_EXTERNAL_SECRETS_FILE=1` and `AAS_SECRETS_FILE` pointing there, so all
 runners read it. That file is backed up too.
 
+The OpenClaw sandbox cannot read `~/.config`, so it gets its own copy at
+`~/.openclaw/workspace/.config/send-email/secrets.json` (mounted at
+`/workspace/.config/...`; `.config` is `.stignore`'d so it never syncs); it is
+backed up. PGP-signed sends from the OpenClaw sandbox are routed to a host signing
+queue because the sandbox has no `gpg` or private key — the host signs with the
+`.gnupg` keyring (see Infrastructure), so that keyring must be backed up for
+signing to survive a rebuild.
+
 ## Per-agent auth files
 
 | File | Agent | Re-auth alternative |
@@ -79,6 +87,7 @@ runners read it. That file is backed up too.
 | File | Feature | Obtain |
 |---|---|---|
 | `.ssh/*` | git push, host identities | existing keys / `ssh-keygen` + GitHub |
+| `.gnupg/` | GnuPG keyring — PGP private key for `send-email` signing (also used by the OpenClaw host signing queue) | import your existing secret key, or `gpg --full-generate-key` |
 | `.gitconfig`, `.config/gh/hosts.yml` | git identity, gh auth | `gh auth login` |
 | `.docker/config.json` | private registry pulls (absent on source machine — optional) | `docker login ghcr.io` |
 | `.config/rclone/rclone.conf` | rclone remotes | `rclone config` |
