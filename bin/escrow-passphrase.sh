@@ -75,7 +75,7 @@ case "$MODE" in
   ensure)
     [ -s "$PWFILE" ] || { echo "ensure: passphrase file missing: $PWFILE" >&2; exit 2; }
     if bash "$0" check >/dev/null 2>&1; then
-      echo "escrow: current (2-of-4 shares present, hash matches)"
+      echo "escrow: current (shares present per manifest, hash matches)"
       exit 0
     fi
     # Location set is dynamic: local + dropbox + github always; gdrive joins
