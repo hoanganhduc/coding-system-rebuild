@@ -137,7 +137,7 @@ entries:
     match: [".credentials.json.bak.*", ".last-cleanup", ".last-update-result.json",
             ".local", "agent-memory", "backups", "cache", "data", "file-history",
             "history.jsonl", "mcp-needs-auth-cache.json", "paste-cache", "plans",
-            "projects", "runs", "session-env", "sessions", "settings.json.bak",
+            "projects", "runs", "session-env", "sessions", "settings.json.bak", "settings.json.bak-*",
             "shell-snapshots", "state", "stats-cache.json", "tasks", "todos",
             "statsig", "memories", "workflows"]
     class: exclude-generated
