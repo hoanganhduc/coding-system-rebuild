@@ -7,9 +7,14 @@ plus small personal state, with `$HOME`-relative paths. Authoritative inventory:
 `make verify-secrets SECRETS=<zip>` checks an archive;
 `bin/secrets-verify.sh --degraded` prints the missing → broken-feature table.
 
-**Password policy:** the zip password exists nowhere on disk except (optionally)
-`~/.config/coding-system/zip-password.txt` on the source machine. Keep it in a
-password manager. Losing it makes the archive unrecoverable — there is no reset.
+**Password policy:** on the source machine the zip password lives in exactly one
+file, `~/.config/coding-system/zip-password.txt` (mode 600, provisioned by
+`make init-private`); it never enters the repo or the zip. There is no reset,
+but since 2026-07-03 loss of this machine is survivable: the passphrase is
+escrowed as a 2-of-N Shamir split across independent locations — see
+[Backup password file](#backup-password-file). Only archives created before
+2026-07-03 depend on their original, non-escrowed passwords. A password-manager
+copy remains recommended as a human-readable fallback.
 
 ## Key-by-key: `~/.claude/secrets.json` (16 keys, shared design with `~/.openclaw/secrets.json`)
 

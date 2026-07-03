@@ -10,12 +10,19 @@ make push          # re-scans, then pushes (manual by design)
 ```
 
 Pre-backup gates hard-fail unless `make init-private` has run on this machine
-(7-Zip present, bashrc markers, denylist, units.state).
+(7-Zip present, bashrc markers, denylist, units.state, zip password file).
 
-Copy the newest `~/secrets-out/coding-system-secrets-<stamp>.zip` somewhere
-**off this machine** (encrypted USB, private cloud). The zip is AES-256; its
-password lives only in your password manager
-(bootstrap copy: `~/.config/coding-system/zip-password.txt` — rotate it).
+The weekly cron (`bin/auto-backup.sh`, Mon 05:26 UTC) runs the same capture
+unattended, plus the owner-data snapshot and the passphrase-escrow ensure; it
+commits locally but does **not** publish unless `CSR_AUTO_PUSH=1` is set.
+
+The off-machine copy is automatic: `make backup` uploads the new AES-256 zip
+to `dropbox:Misc/coding-system-backups` via rclone (ciphertext only;
+`CSR_NO_OFFSITE=1` skips). Extra copies on an encrypted USB or another cloud
+remain a good idea, not a requirement. The zip password is
+`~/.config/coding-system/zip-password.txt` (one passphrase for zip + GPG
+snapshots), escrowed 2-of-N off-machine — see
+[SECRETS.md](SECRETS.md#backup-password-file).
 
 Zip rotation: local and offsite pruning keep the 3 newest plus the newest
 snapshot per month.
