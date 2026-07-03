@@ -113,8 +113,19 @@ valid for their snapshot date; prune them manually from `~/secrets-out/`.
 
 `~/.config/coding-system/zip-password.txt` (mode 600, provisioned by
 `make init-private`) is the single passphrase for BOTH the AES-256 secrets zip
-and the GPG owner-data snapshots. It intentionally lives only on the source
-machine and inside your password manager — it must never enter the repo or the
-zip itself. Losing it makes every offsite zip and snapshot unrecoverable;
-rotate by writing a new value and re-running `make backup` (old archives keep
-the old passphrase).
+and the GPG owner-data snapshots. It must never enter the repo or the zip itself.
+It is NOT a single point of failure: `bin/escrow-passphrase.sh ensure`
+(run by init-private and weekly by auto-backup) splits it with 2-of-N Shamir
+sharing (`bin/lib/shamir.py`, GF(256), stdlib-only) across independent
+locations — local disk, the Dropbox offsite, a private GitHub repo
+(`hoanganhduc/key-escrow`), and Google Drive once its rclone token is
+reconnected. Any single location reveals nothing; any two reconstruct it:
+
+```bash
+bin/escrow-passphrase.sh recover <share-file-or-string> <share-file-or-string>
+```
+
+`escrow-passphrase.sh check` audits presence and freshness; rotation
+re-escrows automatically on the next ensure (old archives keep the old
+passphrase). A password-manager copy remains recommended as a human-readable
+fallback, but recovery no longer depends on it.

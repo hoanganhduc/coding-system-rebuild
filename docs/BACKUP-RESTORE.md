@@ -67,6 +67,12 @@ OPENCLAW_BACKUP_PASSPHRASE_FILE=~/.config/coding-system/zip-password.txt \
   external/openclaw-bot/backup.sh --output ~/openclaw-backups --verify
 ```
 
+Machine-loss recovery of the passphrase itself: fetch any two escrow shares
+(Dropbox `escrow/passphrase-share-dropbox.txt`, private GitHub repo
+`key-escrow`, Google Drive when connected) and run
+`bin/escrow-passphrase.sh recover <share> <share>` — proven by a live
+disaster drill on 2026-07-03.
+
 Restore a snapshot with `gpg --decrypt <archive> | tar -xzf - -C ~/.openclaw`
 (prompted, or batch with the same passphrase-file mechanism). Archives created
 before 2026-07-03 used an interactively entered password and the older

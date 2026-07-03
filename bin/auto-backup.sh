@@ -63,6 +63,14 @@ notify_fail() {
     else
       echo "data-snapshot fresh (<6 days) — skipped"
     fi
+    # passphrase escrow: idempotent 2-of-N Shamir redistribution (re-escrows
+    # automatically after rotation; upgrades 2-of-3 -> 2-of-4 when gdrive returns)
+    if bash "$REPO/bin/escrow-passphrase.sh" ensure; then
+      echo "escrow OK"
+    else
+      echo "escrow FAILED"
+      notify_fail
+    fi
     if [ "${CSR_AUTO_PUSH:-0}" = "1" ] && git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
       make -C "$REPO" push && echo "auto-push OK" || { echo "auto-push FAILED"; notify_fail; }
     fi

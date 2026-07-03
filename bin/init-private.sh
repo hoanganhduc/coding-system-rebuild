@@ -151,3 +151,6 @@ if [ ! -s "$PWFILE" ]; then
   echo "generated backup password file: $PWFILE"
   echo "ACTION REQUIRED: copy its contents to your password manager now."
 fi
+# split the passphrase 2-of-N across independent locations so no single
+# machine or account loss makes the encrypted backups unrecoverable
+bash "$(dirname "$0")/escrow-passphrase.sh" ensure ||   echo "WARN: passphrase escrow incomplete - run bin/escrow-passphrase.sh ensure"
