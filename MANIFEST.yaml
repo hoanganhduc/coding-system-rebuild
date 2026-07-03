@@ -250,7 +250,7 @@ entries:
 
   - id: codewhale-exclude
     root: .codewhale
-    match: ["audit.log"]
+    match: ["audit.log", "slop_ledger"]
     class: exclude-generated
 
   # ---------------------------------------------------------------- deepseek

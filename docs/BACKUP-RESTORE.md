@@ -53,12 +53,25 @@ regenerate config and authenticate `gh`. See
 
 This repo's zip carries OpenClaw **secrets/config only**. Research data,
 sessions, memory, and the workspace git history are the domain of
-`openclaw-bot/backup.sh` (GPG tar.gz, ~600MB–1GB) — run it separately if you
-want owner-data snapshots:
+`openclaw-bot/backup.sh` (GPG tar.gz, ~600MB–1GB). Since 2026-07-03 the weekly
+`bin/auto-backup.sh` cron runs it automatically after a successful `make
+backup`: age-gated (at most one snapshot per 6 days), guarded by a 5GB
+free-disk check, refreshed via `make components` so the pinned copy is
+current, encrypted non-interactively with the same passphrase file as the zip
+(`~/.config/coding-system/zip-password.txt`, via
+`OPENCLAW_BACKUP_PASSPHRASE_FILE`), verified by decrypt+list, and pruned to
+the newest 2 archives under `~/openclaw-backups/`. Manual run:
 
 ```bash
-external/openclaw-bot/backup.sh --output ~/openclaw-backups
+OPENCLAW_BACKUP_PASSPHRASE_FILE=~/.config/coding-system/zip-password.txt \
+  external/openclaw-bot/backup.sh --output ~/openclaw-backups --verify
 ```
+
+Restore a snapshot with `gpg --decrypt <archive> | tar -xzf - -C ~/.openclaw`
+(prompted, or batch with the same passphrase-file mechanism). Archives created
+before 2026-07-03 used an interactively entered password and the older
+`*-openclaw-backup.tar.gz` naming; the current chain is
+`openclaw-private-<stamp>.tar.gz.gpg`.
 
 ## Optional: restoring the DeepSeek plugin in OpenClaw (decision 10)
 

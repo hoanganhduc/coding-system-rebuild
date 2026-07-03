@@ -58,9 +58,28 @@ if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
 fi
 
 echo "-- component drift"
+# SHA-pinned components: if the live checkout at ~/<name> has moved past the
+# pin AND its HEAD is pushed to origin, bump the pin in components.lock so a
+# restore reproduces the current system. Unpushed or dirty HEADs only warn.
 while IFS='=' read -r name rest; do
   [[ -z "$name" || "$name" == \#* ]] && continue
   ref="${rest##*@}"
+  if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+    path="$HOME/$name"
+    if [[ -d "$path/.git" ]]; then
+      head=$(git -C "$path" rev-parse HEAD 2>/dev/null || true)
+      dirty=$(git -C "$path" status --porcelain 2>/dev/null | wc -l)
+      [[ "$dirty" -gt 0 ]] && echo "WARN: component $name has $dirty uncommitted changes at $path"
+      if [[ -n "$head" && "$head" != "$ref" ]]; then
+        if [[ -n "$(git -C "$path" branch -r --contains "$head" 2>/dev/null)" ]]; then
+          sed -i "s|^$name=\(.*\)@$ref\$|$name=\1@$head|" "$REPO/components.lock"
+          echo "pin-bump: $name ${ref:0:9} -> ${head:0:9}"
+        else
+          echo "WARN: component $name HEAD ${head:0:9} is ahead of pin ${ref:0:9} but NOT pushed — pin left unchanged"
+        fi
+      fi
+    fi
+  fi
   if [[ "$ref" == LOCAL:* ]]; then
     path="${ref#LOCAL:}"; path="${path/#\~/$HOME}"
     if [[ -d "$path/.git" ]]; then

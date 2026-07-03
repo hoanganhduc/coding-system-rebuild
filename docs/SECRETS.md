@@ -108,3 +108,13 @@ skill `config.json` files with personal IDs (zotero/calibre, both homes),
 
 Rotate a key → update the live file → `make backup` (new zip). Old zips remain
 valid for their snapshot date; prune them manually from `~/secrets-out/`.
+
+## Backup password file
+
+`~/.config/coding-system/zip-password.txt` (mode 600, provisioned by
+`make init-private`) is the single passphrase for BOTH the AES-256 secrets zip
+and the GPG owner-data snapshots. It intentionally lives only on the source
+machine and inside your password manager — it must never enter the repo or the
+zip itself. Losing it makes every offsite zip and snapshot unrecoverable;
+rotate by writing a new value and re-running `make backup` (old archives keep
+the old passphrase).

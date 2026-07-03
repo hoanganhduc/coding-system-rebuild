@@ -12,6 +12,10 @@ SEVENZ="$(command -v 7zz || command -v 7z || true)"
 [[ -n "$SEVENZ" ]] || { echo "ERROR: no 7zz/7z binary — apt install 7zip (and 7zip-standalone if available)" >&2; exit 2; }
 
 PW="${CSR_SECRETS_PASSWORD:-}"
+# Fall back to the init-private password file so manual and cron runs pack
+# without prompting; interactive double-entry remains the last resort.
+PWFILE_DEFAULT="$HOME/.config/coding-system/zip-password.txt"
+[[ -z "$PW" && -s "$PWFILE_DEFAULT" ]] && PW="$(<"$PWFILE_DEFAULT")"
 if [[ -z "$PW" ]]; then
   read -rs -p "Secrets zip password: " PW; echo
   read -rs -p "Repeat password: " PW2; echo

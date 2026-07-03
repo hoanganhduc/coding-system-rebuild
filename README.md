@@ -58,6 +58,8 @@ and prints exactly which feature each missing secret disables
 make backup    # refresh state → sanitize-capture → leak-scan → local commit → new zip
 git show       # review what changed
 make push      # leak-scans again, then publishes (always manual)
+# weekly cron (bin/auto-backup.sh) additionally refreshes an encrypted
+# owner-data snapshot (research data/sessions/memory) via openclaw-bot/backup.sh
 ```
 
 ## Target matrix

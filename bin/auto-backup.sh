@@ -39,6 +39,30 @@ notify_fail() {
   fi
   if CSR_SECRETS_PASSWORD="$(cat "$PWFILE")" make -C "$REPO" backup; then
     echo "auto-backup OK"
+    # Owner-data snapshot (research data, sessions, memory, workspace git):
+    # age-gated so any trigger cadence self-heals to at most one per 6 days.
+    # Uses the same passphrase file as the zip; keeps the newest 2 archives.
+    SNAP_DIR="$HOME/openclaw-backups"
+    NEWEST="$(ls -1t "$SNAP_DIR"/openclaw-private-*.tar.gz.gpg 2>/dev/null | head -1)"
+    if [ -z "$NEWEST" ] || [ -n "$(find "$NEWEST" -mtime +6 2>/dev/null)" ]; then
+      FREE_GB=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc '0-9')
+      if [ "${FREE_GB:-0}" -lt 5 ]; then
+        echo "data-snapshot SKIPPED: only ${FREE_GB}GB free (<5GB guard)"
+        notify_fail
+      elif ! make -C "$REPO" components >/dev/null 2>&1; then
+        echo "data-snapshot FAILED: external component refresh failed"
+        notify_fail
+      elif OPENCLAW_BACKUP_PASSPHRASE_FILE="$PWFILE" \
+           bash "$REPO/external/openclaw-bot/backup.sh" --output "$SNAP_DIR" --verify; then
+        echo "data-snapshot OK"
+        ls -1t "$SNAP_DIR"/openclaw-private-*.tar.gz.gpg 2>/dev/null | tail -n +3 | xargs -r rm -f
+      else
+        echo "data-snapshot FAILED"
+        notify_fail
+      fi
+    else
+      echo "data-snapshot fresh (<6 days) — skipped"
+    fi
     if [ "${CSR_AUTO_PUSH:-0}" = "1" ] && git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
       make -C "$REPO" push && echo "auto-push OK" || { echo "auto-push FAILED"; notify_fail; }
     fi

@@ -139,3 +139,15 @@ for u in openclaw-gateway.service send-queue-worker.service \
 done
 cat "$REPO/system/systemd/units.state"
 echo "init-private: all four mutations complete"
+
+# zip/backup password file: one secret protects both the secrets zip and the
+# owner-data snapshot. Generated once; STORE IT IN YOUR PASSWORD MANAGER —
+# without it every offsite zip and snapshot is unrecoverable.
+PWFILE="$HOME/.config/coding-system/zip-password.txt"
+if [ ! -s "$PWFILE" ]; then
+  umask 077
+  openssl rand -base64 27 | tr -d '\n' > "$PWFILE" && echo >> "$PWFILE"
+  chmod 600 "$PWFILE"
+  echo "generated backup password file: $PWFILE"
+  echo "ACTION REQUIRED: copy its contents to your password manager now."
+fi
