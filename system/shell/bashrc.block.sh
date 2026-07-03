@@ -157,7 +157,3 @@ export PATH=$PATH:{{ HOME }}/.npm-global/bin
 export PATH="{{ HOME }}/.local/bin:$PATH"
 # coding-system: personal/secret exports live in ~/.secrets.env (restored from the encrypted archive)
 [ -f ~/.secrets.env ] && . ~/.secrets.env
-
-# send-email: share one secrets file across all install targets (option 1)
-export AAS_ALLOW_EXTERNAL_SECRETS_FILE=1
-export AAS_SECRETS_FILE="$HOME/.config/send-email/secrets.json"

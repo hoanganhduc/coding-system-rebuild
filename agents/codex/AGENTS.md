@@ -12,8 +12,20 @@ These rules govern work under `/home/hoanganhduc` and all child directories.
 2. Present a short explicit plan before execution.
 3. If no docs or helpers exist, say that explicitly before proceeding.
 4. Do not execute substantive work until after the plan has been shown.
-5. If the user asked only for analysis, planning, or verification, stop after that instead of continuing into implementation.
+5. If the user asked only for analysis, planning, investigation, diagnosis, review, audit, reporting, or verification, stop after that instead of continuing into implementation or remediation.
 6. If you changed code, scripts, configs, or other behavior-affecting files, run the most relevant verification before reporting completion. If full verification is not possible, say exactly what was and was not checked.
+
+### Scope Boundary For Report-Only Requests
+
+When the user asks only to analyze, investigate, diagnose, explain why, review,
+audit, verify, or report, stop after delivering the requested findings. Do not
+continue into remediation, retrieval beyond what is necessary for the diagnosis,
+artifact creation, report patching, commits, cleanup, or follow-on fixes unless
+the user explicitly asks for those actions.
+
+Diagnostic read-only commands are allowed when needed to answer the question.
+Any file write, persistent note, generated artifact, external mutation, or
+workflow continuation requires explicit user instruction.
 
 ### Commands For The User
 
