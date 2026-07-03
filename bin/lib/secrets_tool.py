@@ -29,8 +29,10 @@ def load(manifest_path):
         return yaml.safe_load(fh)
 
 
-def expand_entry(path):
-    """Return list of existing $HOME-relative files for a manifest path."""
+def expand_entry(path, excludes=()):
+    """Return list of existing $HOME-relative files for a manifest path.
+    excludes: fnmatch globs applied to the home-relative path and basename
+    (volatile files like .gnupg/random_seed that must not gate pack/verify)."""
     rel = path.rstrip("/")
     abs_p = os.path.join(HOME, rel)
     out = []
@@ -53,6 +55,11 @@ def expand_entry(path):
         if rp not in seen:
             seen.add(rp)
             uniq.append(os.path.relpath(f, HOME))
+    if excludes:
+        uniq = [f for f in uniq
+                if not any(fnmatch.fnmatch(f, pat) or
+                           fnmatch.fnmatch(os.path.basename(f), pat)
+                           for pat in excludes)]
     return uniq
 
 
@@ -88,7 +95,7 @@ def main():
         missing_required = []
         all_files = []
         for e in entries:
-            files = expand_entry(e["path"])
+            files = expand_entry(e["path"], e.get("exclude") or ())
             if not files and e.get("required"):
                 missing_required.append(e["path"])
             all_files += files
@@ -119,7 +126,7 @@ def main():
                 return 1
         bad = 0
         for e in entries:
-            files = expand_entry(e["path"])
+            files = expand_entry(e["path"], e.get("exclude") or ())
             if cmd == "verify-zip":
                 missing_live = sorted(f for f in files if f not in listing)
                 if missing_live:
