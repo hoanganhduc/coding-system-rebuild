@@ -13,7 +13,7 @@
 | Learnings | `~/.claude/learnings/` |
 | Hooks | `~/.claude/hooks/self-improvement/` |
 | Memory | `~/.claude/projects/-home-ubuntu/memory/` |
-| Multi-agent templates | `~/.claude/skills/agent_group_discuss/claude_code_exec.md` |
+| Multi-agent templates | `~/.claude/skills/agent-group-discuss/EXECUTION.md` |
 | Run state | `~/.claude/data/runs/` (symlink) |
 | Engineering lifecycle | `~/.claude/docs/engineering-lifecycle.md` |
 | Evidence-first protocol | `~/.claude/docs/evidence-first-protocol.md` |

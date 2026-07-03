@@ -324,11 +324,18 @@ entries:
     match: ["antigravity-cli/antigravity-oauth-token"]
     class: private-archive
 
+  - id: gemini-runtime-state-exclude
+    root: .gemini
+    match: ["projects.json"]
+    class: exclude-generated
+    note: gemini CLI project registry, volatile runtime state like config/projects/
+
   # ---------------------------------------------------------------- ai-agents-skills state home
   - id: aas-state-exclude
     root: .ai-agents-skills
     match: ["backups", "delegation-runs", "openclaw-target-runs",
-            "openclaw-target-state.json", "runs", "state.json", ".state.json.*.tmp"]
+            "openclaw-target-state.json", "runs", "state.json", ".state.json.*.tmp",
+            "state.json.bak-*"]
     class: exclude-generated
     note: fresh `make install` of the ai-agents-skills installer creates fresh state
 

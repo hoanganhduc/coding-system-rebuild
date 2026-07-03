@@ -18,10 +18,10 @@ installer live under `~/.gemini/antigravity-cli/plugins/ai-agents-skills/`.
 
 ## Windows Runtime Commands
 
-On native Windows, use the managed Windows runner and the native runtime command target. For Codex-only installs the runtime is usually `%USERPROFILE%\.codex\runtime`; for multi-agent installs it is usually `%LOCALAPPDATA%\ai-agents-skills\runtime`. Set `$runtime` to the installed runtime root, then run:
+On native Windows, use the managed Windows runner and the native runtime command target. Set `$runtime` to the installed runtime root. Multi-agent installs usually use `%LOCALAPPDATA%\ai-agents-skills\runtime`. Then run:
 
 ```powershell
-$runtime = if ($env:AAS_RUNTIME_ROOT) { $env:AAS_RUNTIME_ROOT } elseif (Test-Path "$env:USERPROFILE\.codex\runtime") { "$env:USERPROFILE\.codex\runtime" } else { "$env:LOCALAPPDATA\ai-agents-skills\runtime" }
+$runtime = if ($env:AAS_RUNTIME_ROOT) { $env:AAS_RUNTIME_ROOT } else { "$env:LOCALAPPDATA\ai-agents-skills\runtime" }
 & "$runtime\run_skill.bat" "skills/rss-news-digest/run_and_summarize.bat" <args>
 & "$runtime\run_skill.bat" "skills/rss-news-digest/run_rss_news_digest.bat" <args>
 ```
@@ -30,13 +30,13 @@ POSIX examples below use `run_skill.sh` and `.sh` command targets; use the Windo
 
 ## Base path
 
-- `~/.codex/runtime/workspace/skills/rss-news-digest/`
+- `$AAS_RUNTIME_WORKSPACE/skills/rss-news-digest/`
 
-Use the Codex runtime runner rather than invoking the RSS script directly.
+Use the managed runtime runner rather than invoking the RSS script directly.
 
 Shared runner:
 
-- `bash ~/.codex/runtime/run_skill.sh`
+- `bash "$AAS_RUNTIME_ROOT/run_skill.sh"`
 
 ## Use cases
 
@@ -48,7 +48,7 @@ Shared runner:
 ## Core execution
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/rss-news-digest/run_rss_news_digest.sh <COMMAND AND ARGS>
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/rss-news-digest/run_rss_news_digest.sh <COMMAND AND ARGS>
 ```
 
 ## Common actions
@@ -72,13 +72,22 @@ bash ~/.codex/runtime/run_skill.sh skills/rss-news-digest/run_rss_news_digest.sh
 Verified example shapes:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/rss-news-digest/run_rss_news_digest.sh run --tag research --max-items 25 --per-feed-limit 5
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/rss-news-digest/run_rss_news_digest.sh run --tag research --max-items 25 --per-feed-limit 5
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/rss-news-digest/run_rss_news_digest.sh add-feed "https://example.com/rss.xml" --tag research --priority 5
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/rss-news-digest/run_rss_news_digest.sh add-feed "https://example.com/rss.xml" --tag research --priority 5
 ```
 
 ## After execution
 
 If a digest is produced, read the digest path reported by the command output and summarize the top items for the user.
+
+## Writing Style Gate
+
+For any user-facing RSS digest summary, load `writing-style-settings.md` before
+writing. If the digest item or synthesis is mathematical, TCS, graph-theoretic,
+Lean-related, or LaTeX manuscript prose, also load `math-manuscript-style.md`.
+Stored summaries should record `style_profile_ref`, `active_overlays`,
+`active_requirement_ids`, and `style_applied`; do not accept a bare
+`style_applied: true` assertion as sufficient evidence.

@@ -41,6 +41,9 @@ Keep it brief and include:
 - `Context/style artifacts` — prior posts, templates, house style, examples,
   source ledgers, or supplied materials to inspect before drafting or matching a
   publication format
+- `Style profile` — whether `writing-style-settings.md` and any overlay such as
+  `math-manuscript-style.md` will be active for downstream writing, plus the
+  expected `style_profile_ref`, `active_overlays`, and `active_requirement_ids`
 - `Evidence plan` — primary source types and verification expectations
 - `Workflow` — which downstream research skill or path to use
 - `Risks` — likely ambiguity, missing evidence, or live-data concerns
@@ -50,9 +53,17 @@ Use the compact template in `references/brief-template.md` when helpful.
 ## Guardrails
 
 - keep the brief short enough to read in a few seconds
+- if the user's request is only to scope, analyze, investigate, diagnose, or
+  report, stop after the brief or findings; do not continue into source
+  retrieval, drafting, artifact creation, or remediation unless the user
+  explicitly asks for that next action
 - state assumptions explicitly instead of hiding them in later research
 - for writing or publication-format tasks, inspect old posts, templates, house
   style, and supplied examples before drafting; if they are absent, say so and
   state the style assumption before writing
+- for downstream writing, require the selected workflow to load
+  `writing-style-settings.md` and record `style_profile_ref`,
+  `active_overlays`, `active_requirement_ids`, and `style_applied` before final
+  output
 - if the task is simple, say so and skip heavyweight planning
 - if the user already provided a plan, validate and tighten it rather than replacing it

@@ -56,6 +56,15 @@ Use Docling especially when the review depends on:
 - reading order in complex layouts
 - OCR on scanned pages
 
+## Writing Style Gate
+
+Before writing review prose, load `writing-style-settings.md` and record the
+active style profile for the review artifact. If the paper is a mathematical,
+TCS, graph-theoretic, Lean, or LaTeX manuscript, also load
+`math-manuscript-style.md`. Final review artifacts should record
+`style_profile_ref`, `active_overlays`, `active_requirement_ids`, and
+`style_applied`; do not treat a bare `style_applied: true` assertion as
+evidence that the style policy was loaded.
 
 ## Zotero rule
 
@@ -73,7 +82,10 @@ Do not touch Zotero beyond lookup/retrieval unless the user explicitly asks.
 - When useful, use the imported `references/common_issues.md` and `references/reporting_standards.md` as internal checklists.
 - Summarize the main issues clearly, with evidence from the provided or retrieved document.
 - If the document cannot be found in Zotero or Calibre, report that before attempting online retrieval.
-- If you need a narrow internal checklist for proof auditing or single-reviewer critique, adapt the specialist briefs in `~/.codex/skills/source-research/references/specialist-subagents.md` without turning the task into a multi-agent run unless the user asked for one.
+- If you need a narrow internal checklist for proof auditing or single-reviewer critique, adapt `source-research/references/specialist-subagents.md` without turning the task into a multi-agent run unless the user asked for one.
+- For review-only requests, stop after the review. Do not annotate, store notes,
+  patch manuscripts, retrieve extra nonessential artifacts, or begin fixes
+  unless the user explicitly asks for those actions.
 
 ## Recommended output format
 
@@ -81,6 +93,8 @@ Do not touch Zotero beyond lookup/retrieval unless the user explicitly asks.
 
 - paper title, authors, venue/year when available
 - overall assessment
+- active writing-style profile and overlays, if the review is stored as an
+  artifact
 
 ### Issues
 

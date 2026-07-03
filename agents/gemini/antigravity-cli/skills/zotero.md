@@ -18,16 +18,16 @@ installer live under `~/.gemini/antigravity-cli/plugins/ai-agents-skills/`.
 
 ## Windows Runtime Commands
 
-On native Windows, use the managed Windows runner and the native runtime command target. For Codex-only installs the runtime is usually `%USERPROFILE%\.codex\runtime`; for multi-agent installs it is usually `%LOCALAPPDATA%\ai-agents-skills\runtime`. Set `$runtime` to the installed runtime root, then run:
+On native Windows, use the managed Windows runner and the native runtime command target. Set `$runtime` to the installed runtime root. Multi-agent installs usually use `%LOCALAPPDATA%\ai-agents-skills\runtime`. Then run:
 
 ```powershell
-$runtime = if ($env:AAS_RUNTIME_ROOT) { $env:AAS_RUNTIME_ROOT } elseif (Test-Path "$env:USERPROFILE\.codex\runtime") { "$env:USERPROFILE\.codex\runtime" } else { "$env:LOCALAPPDATA\ai-agents-skills\runtime" }
+$runtime = if ($env:AAS_RUNTIME_ROOT) { $env:AAS_RUNTIME_ROOT } else { "$env:LOCALAPPDATA\ai-agents-skills\runtime" }
 & "$runtime\run_skill.bat" "skills/zotero/run_zot.bat" <args>
 ```
 
 POSIX examples below use `run_skill.sh` and `.sh` command targets; use the Windows command target above on native Windows.
 
-This uses the vendored Codex runtime copy of the Zotero workflow.
+This uses the managed ai-agents-skills runtime copy of the Zotero workflow.
 
 ## Routing rule
 
@@ -44,21 +44,21 @@ Use this skill first for any paper request involving:
 - "my papers"
 - "my collections"
 
-Prefer this over `getscipapers_requester` whenever the request involves the user's library.
+Prefer this over `getscipapers-requester` whenever the request involves the user's library.
 
 ## Base path
 
 All live commands come from:
 
-- `~/.codex/runtime/workspace/skills/zotero/`
+- `$AAS_RUNTIME_WORKSPACE/skills/zotero/`
 
-Use the shared Codex runtime runner rather than invoking `run_zot.sh` directly. The runner sets
+Use the managed runtime runner rather than invoking `run_zot.sh` directly. The runner sets
 the vendored workspace path, `PYTHONPATH`, secrets, and workspace-local binaries for the migrated
 workflow.
 
 Shared runner:
 
-- `bash ~/.codex/runtime/run_skill.sh`
+- `bash "$AAS_RUNTIME_ROOT/run_skill.sh"`
 
 ## Local Library Profile Gate
 
@@ -151,7 +151,7 @@ curl -s -X POST -H 'Content-Type: text/plain' --data 'https://doi.org/10.1038/np
 When starting or repairing the local server, prefer the runtime helper:
 
 ```bash
-bash ~/.codex/runtime/workspace/skills/zotero/scripts/start-translation-server.sh
+bash $AAS_RUNTIME_WORKSPACE/skills/zotero/scripts/start-translation-server.sh
 ```
 
 Then run `doctor` before metadata-dependent add/update workflows. A reachable
@@ -162,7 +162,7 @@ Treat other failed `doctor` checks as blockers unless the user explicitly asks
 for a degraded diagnostic path:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh doctor
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/zotero/run_zot.sh doctor
 ```
 
 ## Core commands
@@ -172,64 +172,69 @@ Use `functions.exec_command`.
 Common patterns:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh --json get "<query>"
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/zotero/run_zot.sh --json get "<query>"
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh --json get --link "<query>"
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/zotero/run_zot.sh --json get --link "<query>"
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh --json get "<query>" --index 0
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/zotero/run_zot.sh --json get "<query>" --index 0
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh add "<DOI or arXiv or URL>" --collection "<name>"
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/zotero/run_zot.sh add "<DOI or arXiv or URL>" --collection "<name>"
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh add "/path/to/file.ext" --collection "<name>"
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/zotero/run_zot.sh add "/path/to/file.ext" --collection "<name>"
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh update <key> --item-type manuscript
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/zotero/run_zot.sh update <key> --item-type manuscript
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh update <key> --attach-file "/path/to/file.pdf"
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/zotero/run_zot.sh update <key> --attach-file "/path/to/file.pdf"
 ```
 
 ```bash
-cd ~/.codex/runtime/workspace && PYTHONPATH="$HOME/.codex/runtime/workspace/.local:$PYTHONPATH" python3 skills/zotero/zot.py search "<query>" --json
+cd "$AAS_RUNTIME_WORKSPACE" && PYTHONPATH="$AAS_RUNTIME_WORKSPACE/.local:${PYTHONPATH:-}" python3 skills/zotero/zot.py search "<query>" --json
 ```
 
 ```bash
-cd ~/.codex/runtime/workspace && PYTHONPATH="$HOME/.codex/runtime/workspace/.local:$PYTHONPATH" python3 skills/zotero/zot.py search --local-db "<query>" --json
+cd "$AAS_RUNTIME_WORKSPACE" && PYTHONPATH="$AAS_RUNTIME_WORKSPACE/.local:${PYTHONPATH:-}" python3 skills/zotero/zot.py search --local-db "<query>" --json
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh --json get "<query>" --no-local-storage
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/zotero/run_zot.sh --json get "<query>" --no-local-storage
 ```
 
 ```bash
-cd ~/.codex/runtime/workspace && PYTHONPATH="$HOME/.codex/runtime/workspace/.local:$PYTHONPATH" python3 skills/zotero/zot.py list-collections --tree --json
+cd "$AAS_RUNTIME_WORKSPACE" && PYTHONPATH="$AAS_RUNTIME_WORKSPACE/.local:${PYTHONPATH:-}" python3 skills/zotero/zot.py list-collections --tree --json
 ```
 
 ```bash
-cd ~/.codex/runtime/workspace && PYTHONPATH="$HOME/.codex/runtime/workspace/.local:$PYTHONPATH" python3 skills/zotero/zot.py notes <key>
+cd "$AAS_RUNTIME_WORKSPACE" && PYTHONPATH="$AAS_RUNTIME_WORKSPACE/.local:${PYTHONPATH:-}" python3 skills/zotero/zot.py notes <key>
 ```
 
 ```bash
-cd ~/.codex/runtime/workspace && PYTHONPATH="$HOME/.codex/runtime/workspace/.local:$PYTHONPATH" python3 skills/zotero/zot.py doctor
+cd "$AAS_RUNTIME_WORKSPACE" && PYTHONPATH="$AAS_RUNTIME_WORKSPACE/.local:${PYTHONPATH:-}" python3 skills/zotero/zot.py doctor
 ```
 
 ```bash
-cd ~/.codex/runtime/workspace && PYTHONPATH="$HOME/.codex/runtime/workspace/.local:$PYTHONPATH" python3 skills/zotero/zot.py sync-cache
+cd "$AAS_RUNTIME_WORKSPACE" && PYTHONPATH="$AAS_RUNTIME_WORKSPACE/.local:${PYTHONPATH:-}" python3 skills/zotero/zot.py sync-cache
 ```
 
 ## Most important behaviors imported from OpenClaw
 
 - Always search Zotero first before trying other retrieval paths.
+- For chapters, `@incollection` entries, proceedings articles, and older
+  no-DOI sources, search at both levels before reporting an absence: the
+  chapter title/author and the parent container title/editor/ISBN. Clearly
+  distinguish "standalone chapter item not found" from "parent book or
+  proceedings item found."
 - For review tasks that need a paper/book, if Zotero does not have it, route next to
   `calibre` before any online retrieval.
 - If `get` returns multiple results, show the numbered candidates and ask the user to pick.
@@ -240,6 +245,11 @@ cd ~/.codex/runtime/workspace && PYTHONPATH="$HOME/.codex/runtime/workspace/.loc
   malformed SQLite results as degraded.
 - For link sharing, use the Zotero workflow rather than ad hoc file browsing.
 - Use `--index` only after showing the user the numbered candidate list.
+- For library-mutating or outward-facing actions (`add`, `update`, attachment
+  changes, trash/delete/remove, sync-affecting operations, `send`, or share),
+  run the relevant dry-run/preview/search first when available, state the exact
+  item/library/collection/channel to be affected, and get explicit confirmation
+  unless the user's latest request already approved that exact action.
 
 ## Add-paper rules imported from the bot
 
@@ -266,10 +276,13 @@ If the user asks to add a paper and does not specify a collection:
 
 ## Fallback rule
 
-Only route to `getscipapers_requester` if:
+Only route to `getscipapers-requester` if:
 
-- the paper is not in Zotero
+- the paper is not in Zotero; for chapters and `@incollection` entries, this
+  means both the chapter-level query and the parent book/proceedings query
+  failed or cannot provide the needed text
 - the Calibre library also does not satisfy the request when the task is a review
   that needs the document
-- the user explicitly wants an external download
+- the user explicitly says not to check/use the library, or confirms external
+  retrieval after the library-first result is reported
 - or the Zotero workflow clearly cannot satisfy the request

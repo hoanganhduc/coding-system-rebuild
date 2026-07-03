@@ -1,6 +1,6 @@
 # Multi-agent research templates
 
-When the user requests a multi-agent discussion, panel review, proof stress-test, or structured research session, read `~/.claude/skills/agent_group_discuss/claude_code_exec.md` for execution instructions. Template definitions (roles, rounds, hard rules): `~/.claude/skills/agent_group_discuss/SKILL.md`.
+When the user requests a multi-agent discussion, panel review, proof stress-test, or structured research session, read `~/.claude/skills/agent-group-discuss/EXECUTION.md` for execution instructions. Template definitions (roles, rounds, hard rules): `~/.claude/skills/agent-group-discuss/TEMPLATES.md`.
 
 | Template | Trigger phrases | Roles | Model tier |
 |----------|----------------|-------|------------|

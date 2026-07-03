@@ -19,10 +19,10 @@ path.
 
 ## Windows Runtime Commands
 
-On native Windows, use the managed Windows runner and the native runtime command target. For Codex-only installs the runtime is usually `%USERPROFILE%\.codex\runtime`; for multi-agent installs it is usually `%LOCALAPPDATA%\ai-agents-skills\runtime`. Set `$runtime` to the installed runtime root, then run:
+On native Windows, use the managed Windows runner and the native runtime command target. Set `$runtime` to the installed runtime root. Multi-agent installs usually use `%LOCALAPPDATA%\ai-agents-skills\runtime`. Then run:
 
 ```powershell
-$runtime = if ($env:AAS_RUNTIME_ROOT) { $env:AAS_RUNTIME_ROOT } elseif (Test-Path "$env:USERPROFILE\.codex\runtime") { "$env:USERPROFILE\.codex\runtime" } else { "$env:LOCALAPPDATA\ai-agents-skills\runtime" }
+$runtime = if ($env:AAS_RUNTIME_ROOT) { $env:AAS_RUNTIME_ROOT } else { "$env:LOCALAPPDATA\ai-agents-skills\runtime" }
 & "$runtime\run_skill.bat" "skills/deep-research-workflow/run_deep_research_workflow.bat" <args>
 ```
 
@@ -42,19 +42,26 @@ This skill provides a Codex-native phased research workflow:
 
 Use it when the user wants a deeper research pass than a normal quick synthesis and when source preservation matters.
 
+For any writing-producing output, load `writing-style-settings.md` before the
+write phase. For mathematical manuscripts, TCS reports, graph-theoretic drafts,
+formal-proof prose, or LaTeX output, also load `math-manuscript-style.md`.
+Finalizable reports must record `style_profile_ref`, `policy_hash`,
+`active_overlays`, `active_requirement_ids`, and `style_applied` in the run
+ledger or final artifact metadata.
+
 ## Minimal runtime helper
 
 Initialize a deep-research scaffold with:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh \
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" \
   skills/deep-research-workflow/run_deep_research_workflow.sh init --dir /path/to/workspace
 ```
 
 For machine-checkable research runs, initialize structured ledgers too:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh \
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" \
   skills/deep-research-workflow/run_deep_research_workflow.sh init --structured --dir /path/to/workspace
 ```
 
@@ -62,35 +69,35 @@ For research where formal verification may help, initialize the optional v2
 formal lane:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh \
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" \
   skills/deep-research-workflow/run_deep_research_workflow.sh init --structured --schema-version 2 --formal --dir /path/to/workspace
 ```
 
 Validate the structured ledgers before delivery with:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh \
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" \
   skills/deep-research-workflow/run_deep_research_workflow.sh validate --dir /path/to/workspace/research
 ```
 
 Validate a v2/formal workspace with:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh \
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" \
   skills/deep-research-workflow/run_deep_research_workflow.sh validate --schema-version 2 --dir /path/to/workspace/research
 ```
 
 Verify the helper setup with:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh \
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" \
   skills/deep-research-workflow/run_deep_research_workflow.sh doctor
 ```
 
 Run the offline strict workflow smoke with:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh \
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" \
   skills/deep-research-workflow/run_deep_research_workflow.sh selftest
 ```
 
@@ -121,6 +128,9 @@ Prefer this skill when:
 - simple factual lookups
 - casual current-events questions where a normal browse-and-answer flow is sufficient
 - local-paper retrieval tasks already covered by `zotero` or `calibre`
+- requests that only ask to investigate, diagnose, review, audit, verify, or
+  report, unless the user explicitly asks for a phased workflow or durable
+  research artifacts
 
 ## Workflow
 
@@ -146,7 +156,7 @@ Outputs:
 
 Use these templates when helpful:
 
-- `~/.codex/templates/deep-research-sources.md`
+- installed template `deep-research-sources`
 
 ### Zotero cross-check
 
@@ -194,7 +204,7 @@ Outputs:
 Detailed handoff structure:
 
 - `references/source-handoff.md`
-- `~/.codex/templates/deep-research-analysis.md`
+- installed template `deep-research-analysis`
 
 ### Research quality guards
 
@@ -257,12 +267,12 @@ formal support on its own.
 Use the local helpers as optional gates:
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh \
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" \
   skills/lean-formalization-intake/run_lean_formalization_intake.sh assess --claim-id C1 --claim "..."
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh \
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" \
   skills/lean-strict-verification-gate/run_lean_strict_verification_gate.sh verify --input formal/artifacts/C1.lean --artifact-stage final_candidate --typecheck
 ```
 
@@ -303,6 +313,8 @@ Inputs:
 - preserved source ids and uncertainty notes
 - prior posts, templates, style guides, venue instructions, source ledgers, or
   supplied examples when the deliverable must match an existing format or voice
+- the active writing-style profile and overlays selected from
+  `writing-style-settings.md` and any domain overlay
 
 - produce a structured output
 - include only citations that survive from earlier phases
@@ -317,6 +329,8 @@ Outputs:
 - a final report
 - a scoped source list
 - optional `delivery.json` decision record
+- optional `writing_style.json` or embedded `writing_style_record` with
+  `style_profile_ref` and `style_applied`
 - optional `F*` figure references with artifact paths
 - explicit follow-up items when needed
 
@@ -324,7 +338,7 @@ Output structure guidance:
 
 - `references/output-structure.md`
 - `references/research-quality-guards.md`
-- `~/.codex/templates/deep-research-report.md`
+- installed template `deep-research-report`
 
 ## Skill handoffs
 
@@ -373,6 +387,10 @@ Output structure guidance:
 - [ ] Missing coverage is disclosed explicitly
 - [ ] Prior posts, templates, style guides, or supplied examples were inspected
       before format-matched writing, or their absence was disclosed
+- [ ] `writing-style-settings.md` was loaded before final writing
+- [ ] Mathematical or LaTeX output loaded `math-manuscript-style.md`
+- [ ] Finalizable writing records `style_profile_ref`, `active_overlays`,
+      `active_requirement_ids`, and `style_applied`
 - [ ] Dropped or excluded sources are explained
 - [ ] Nontrivial runs include guard outputs with `guard_output_id`
 - [ ] Supported `pass` or `warn` guard outputs cite source or evidence IDs

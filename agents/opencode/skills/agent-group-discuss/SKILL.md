@@ -60,6 +60,15 @@ If the user gives no preference, default to:
 - interaction: auto
 - role/model selection: automatic
 
+For writing-producing discussions, reviews, final reports, or research
+syntheses, every role prompt and final synthesis must include a writing-style
+block referencing `writing-style-settings.md`. Add `math-manuscript-style.md`
+when the task involves mathematical manuscripts, TCS, graph theory, formal
+proofs, or LaTeX prose. Final artifacts must record `style_profile_ref`,
+`active_overlays`, `active_requirement_ids`, and `style_applied`. A bare
+`style_applied: true` assertion is not sufficient without the policy-load and
+requirement-selection evidence recorded by the workflow.
+
 ## Routing to structured workflows
 
 If the user explicitly wants a more structured, reproducible workflow, prefer `prose` instead.
@@ -84,6 +93,14 @@ Before any actual multi-agent run:
 
 Do not infer consent from silence.
 If the user already gave an explicit affirmative in the same request after seeing the plan, that counts.
+
+## Scope boundary
+
+For discussion, review, investigation, diagnosis, audit, or report-only
+requests, the orchestration ends with the requested discussion summary, review
+findings, or report. Do not continue into remediation, file edits, artifact
+patches, retrieval beyond what is necessary for the review, commits, or cleanup
+unless the user explicitly asks for those actions.
 
 ## Codex tool mapping
 
@@ -201,7 +218,7 @@ Each `codex_spawned` participant gets a `model` and `reasoning_effort` through
 `spawn_agent`.
 Refer to `MODEL_TIERS.md` for the runtime freshness check and role-to-model
 routing policy, and `EXECUTION.md` for per-template execution defaults. The
-active Codex runtime/tool definitions are the source of truth for available
+active host runtime/tool definitions are the source of truth for available
 models; update stale checked-in defaults before launching a run from this repo.
 External CLI participants use probed capability profiles and adapter guidance
 from `references/external-cli-agents.md`; do not route them through

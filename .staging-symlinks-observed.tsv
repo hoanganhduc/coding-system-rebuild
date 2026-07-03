@@ -114,6 +114,11 @@
 .claude/skills/tikz-draw/references/tikz-design-process-improvement-plan.md	{{ HOME }}/ai-agents-skills/canonical/skills/tikz-draw/references/tikz-design-process-improvement-plan.md	delegated
 .claude/skills/tikz-draw/references/tikz-measurement.md	{{ HOME }}/ai-agents-skills/canonical/skills/tikz-draw/references/tikz-measurement.md	delegated
 .claude/skills/tikz-draw/references/tikz-prevention.md	{{ HOME }}/ai-agents-skills/canonical/skills/tikz-draw/references/tikz-prevention.md	delegated
+.claude/skills/url-to-screenshot-runtime/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/url-to-screenshot-runtime/SKILL.md	delegated
+.claude/skills/url-to-screenshot/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/url-to-screenshot/SKILL.md	delegated
+.claude/skills/url-to-screenshot/references/browsers-and-platforms.md	{{ HOME }}/ai-agents-skills/canonical/skills/url-to-screenshot/references/browsers-and-platforms.md	delegated
+.claude/skills/url-to-screenshot/references/engine-and-cdp.md	{{ HOME }}/ai-agents-skills/canonical/skills/url-to-screenshot/references/engine-and-cdp.md	delegated
+.claude/skills/url-to-screenshot/references/verification-gates.md	{{ HOME }}/ai-agents-skills/canonical/skills/url-to-screenshot/references/verification-gates.md	delegated
 .claude/skills/vnthuquan/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/vnthuquan/SKILL.md	delegated
 .claude/skills/vnthuquan/agents/openai.yaml	{{ HOME }}/ai-agents-skills/canonical/skills/vnthuquan/agents/openai.yaml	delegated
 .claude/skills/vnthuquan/references/workflows.md	{{ HOME }}/ai-agents-skills/canonical/skills/vnthuquan/references/workflows.md	delegated

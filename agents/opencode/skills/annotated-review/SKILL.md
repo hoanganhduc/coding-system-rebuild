@@ -19,10 +19,10 @@ path.
 
 ## Windows Runtime Commands
 
-On native Windows, use the managed Windows runner and the native runtime command target. For Codex-only installs the runtime is usually `%USERPROFILE%\.codex\runtime`; for multi-agent installs it is usually `%LOCALAPPDATA%\ai-agents-skills\runtime`. Set `$runtime` to the installed runtime root, then run:
+On native Windows, use the managed Windows runner and the native runtime command target. Set `$runtime` to the installed runtime root. Multi-agent installs usually use `%LOCALAPPDATA%\ai-agents-skills\runtime`. Then run:
 
 ```powershell
-$runtime = if ($env:AAS_RUNTIME_ROOT) { $env:AAS_RUNTIME_ROOT } elseif (Test-Path "$env:USERPROFILE\.codex\runtime") { "$env:USERPROFILE\.codex\runtime" } else { "$env:LOCALAPPDATA\ai-agents-skills\runtime" }
+$runtime = if ($env:AAS_RUNTIME_ROOT) { $env:AAS_RUNTIME_ROOT } else { "$env:LOCALAPPDATA\ai-agents-skills\runtime" }
 & "$runtime\run_skill.bat" "skills/annotated-review/run_review.bat" <args>
 ```
 
@@ -84,14 +84,14 @@ libraries.
 
 ## Base path
 
-- `~/.codex/runtime/workspace/skills/annotated-review/`
+- `$AAS_RUNTIME_WORKSPACE/skills/annotated-review/`
 
-Use the Codex runtime runner rather than invoking `run_review.sh` directly. The runner sets
+Use the managed runtime runner rather than invoking `run_review.sh` directly. The runner sets
 the same workspace environment Claude uses.
 
 Shared runner:
 
-- `bash ~/.codex/runtime/run_skill.sh`
+- `bash "$AAS_RUNTIME_ROOT/run_skill.sh"`
 
 ## Workflow imported from the bot
 
@@ -110,24 +110,32 @@ Shared runner:
   `zotero` -> `calibre` -> online fallback.
 - Do not use this skill for review-only requests; reserve it for requests that
   explicitly mention both annotate/annotation and review.
+- Before producing review prose or a stored note, load
+  `writing-style-settings.md` and record the active style profile. For
+  mathematical, TCS, graph-theoretic, Lean, or LaTeX manuscripts, also load
+  `math-manuscript-style.md`.
 
 ## Execution patterns
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/annotated-review/run_review.sh --precompile --source <path>
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/annotated-review/run_review.sh --precompile --source <path>
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/annotated-review/run_review.sh --review-file /tmp/review.json --pdf <file>
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/annotated-review/run_review.sh --review-file /tmp/review.json --pdf <file>
 ```
 
 ```bash
-bash ~/.codex/runtime/run_skill.sh skills/annotated-review/run_review.sh --review-file /tmp/review.json --source <dir> --zotero-key <key>
+bash "$AAS_RUNTIME_ROOT/run_skill.sh" skills/annotated-review/run_review.sh --review-file /tmp/review.json --source <dir> --zotero-key <key>
 ```
 
 ## Output rule
 
 Companion review artifacts are still useful even if LaTeX compilation fails. Report the best available artifact and any compile error explicitly.
+Final review or annotation artifacts should include `style_profile_ref`,
+`active_overlays`, `active_requirement_ids`, and `style_applied`; a bare
+`style_applied: true` value is not enough unless it is backed by the workflow's
+record of the loaded policy and selected requirements.
 
 ## Recommended templates
 
