@@ -40,3 +40,4 @@ OpenClaw-slice decisions continue in the OpenClaw rebuild plan §6, not here.
 2026-07-03  Owner-data snapshot (openclaw-bot/backup.sh) automated inside auto-backup.sh: age-gated 6 days, 5GB disk guard, same passphrase file as the zip, verify + keep-newest-2 retention — the June-05 snapshot had gone 27 days stale
 2026-07-03  zip-password.txt is now provisioned by init-private (openssl rand, chmod 600) and read by secrets-pack as fallback; one password protects zip + snapshot. Pre-2026-07-03 zips keep their original interactive password
 2026-07-03  .codewhale/slop_ledger classified exclude-generated (empty runtime dir; had fail-closed the 2026-06-29 auto-backup)
+2026-07-03  Research data trees under ~/.openclaw/workspace/data/projects pushed to private remote hoanganhduc/research-projects-data (expanded from DTS-only repo; embedded AxiomMath clones recorded by origin+SHA in REMOTES.txt) — primary durability for ~940MB of no-remote research data
