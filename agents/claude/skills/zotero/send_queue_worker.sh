@@ -8,7 +8,9 @@ set -euo pipefail
 # Run as: systemctl --user start send-queue-worker
 # Or manually: ./send_queue_worker.sh
 
-WORKSPACE="${OPENCLAW_WORKSPACE:-{{ HOME }}/.openclaw/workspace}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_WORKSPACE="$(cd "$SCRIPT_DIR/../.." && pwd)"
+WORKSPACE="${AAS_RUNTIME_WORKSPACE:-${OPENCLAW_WORKSPACE:-$DEFAULT_WORKSPACE}}"
 QUEUE_DIR="$WORKSPACE/data/send-queue"
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 

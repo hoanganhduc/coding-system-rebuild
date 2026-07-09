@@ -178,10 +178,6 @@
 
 <!-- ai-agents-skills:vnu-eoffice:end -->
 
-<!-- ai-agents-skills:zotero:start -->
-- `zotero`: Zotero paper search, retrieval, ingest, and collection workflow.
-
-<!-- ai-agents-skills:zotero:end -->
 
 <!-- ai-agents-skills:repo-management:start -->
 ## ai-agents-skills management notice
@@ -271,3 +267,8 @@ Generated target: antigravity.
 - `workspace-rearranger`: Plan safe workspace organization with dry-run first, explicit apply, and no silent deletion.
 
 <!-- ai-agents-skills:workspace-rearranger:end -->
+
+<!-- ai-agents-skills:zotero:start -->
+- `zotero`: Zotero paper search, retrieval, ingest, and collection workflow.
+
+<!-- ai-agents-skills:zotero:end -->

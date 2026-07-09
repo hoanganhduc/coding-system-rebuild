@@ -7,6 +7,12 @@ CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 export OPENCLAW_WORKSPACE="${OPENCLAW_WORKSPACE:-$CLAUDE_HOME}"
 export PYTHONPATH="$CLAUDE_HOME/.local:${HOME}/.local/lib/python3.12/site-packages:$PYTHONPATH"
 export OPENCLAW_SECRETS_FILE="${OPENCLAW_SECRETS_FILE:-$CLAUDE_HOME/secrets.json}"
+# ai-agents-skills convention secrets var: point AAS-aware skills (e.g. zotero, whose
+# newer config prefers AAS_SECRETS_FILE) at the unified secrets file. Unconditional
+# override so a session-set skill-specific value (e.g. send-email's) cannot hijack it.
+# Scoped to this subprocess; send-email uses its own runner + SEND_EMAIL_SECRETS_FILE,
+# so it is unaffected.
+export AAS_SECRETS_FILE="$OPENCLAW_SECRETS_FILE"
 export PATH="$HOME/.local/bin:$CLAUDE_HOME/.local/bin:$CLAUDE_HOME/.local/venv_getscipapers/bin:$HOME/.venvs/bin:$PATH"
 
 cd "$CLAUDE_HOME" || exit 1

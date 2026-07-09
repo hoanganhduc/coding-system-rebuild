@@ -209,7 +209,7 @@ entries:
   - id: copilot-exclude
     root: .copilot
     match: ["command-history-state.json", "logs", "restart", "session-state",
-            "session-store.db"]
+            "session-store.db", "session-store.db-shm", "session-store.db-wal"]
     class: exclude-generated
 
   # ---------------------------------------------------------------- opencode
@@ -250,7 +250,7 @@ entries:
 
   - id: codewhale-exclude
     root: .codewhale
-    match: ["audit.log", "slop_ledger"]
+    match: ["audit.log", "slop_ledger", "sessions"]
     class: exclude-generated
 
   # ---------------------------------------------------------------- deepseek

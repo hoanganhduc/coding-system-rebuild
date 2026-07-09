@@ -121,9 +121,9 @@ def _load_credentials(creds_value):
     if os.path.exists(creds_value):
         return service_account.Credentials.from_service_account_file(creds_value, scopes=SCOPES)
 
-    raise FileNotFoundError(
-        f"GDrive credentials: not a valid JSON string and file not found at '{creds_value}'"
-    )
+    if creds_value.strip().startswith("{"):
+        raise FileNotFoundError("GDrive credentials: invalid inline JSON credentials")
+    raise FileNotFoundError("GDrive credentials: configured credential file was not found")
 
 
 def _escape(s):

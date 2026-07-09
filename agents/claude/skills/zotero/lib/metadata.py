@@ -1,10 +1,12 @@
-"""Translation Server client with auto-detect for DOI/arXiv/URL/ISBN."""
+"""Metadata resolver with Translation Server + direct DOI/arXiv/ISBN fallback."""
 
-import re
+import html
 import json
+import os
+import re
 import subprocess
-
-import requests
+from xml.etree import ElementTree
+from urllib.parse import quote
 
 # Patterns for input type detection
 DOI_PATTERN = re.compile(r"^10\.\d{4,9}/[^\s]+$")
@@ -14,6 +16,17 @@ ARXIV_URL_PATTERN = re.compile(r"https?://arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5}
 ARXIV_OLD_PATTERN = re.compile(r"^(?:arXiv:)?([a-z-]+/\d{7}(?:v\d+)?)$", re.IGNORECASE)
 ISBN_PATTERN = re.compile(r"^(?:ISBN[:\s-]?)?([\d-]{10,17}[X]?)$", re.IGNORECASE)
 URL_PATTERN = re.compile(r"^https?://")
+
+
+def _requests():
+    try:
+        import requests
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Zotero metadata network lookups require requests. "
+            "Install the Zotero runtime dependencies first."
+        ) from exc
+    return requests
 
 
 def detect_input_type(identifier):
@@ -64,26 +77,90 @@ def detect_input_type(identifier):
     return "unknown", identifier
 
 
-def fetch_metadata(identifier, translation_server="http://localhost:1969"):
-    """Fetch Zotero-native metadata via Translation Server.
-
-    Returns (metadata_dict, input_type, normalized_id) or raises.
-    """
-    input_type, normalized = detect_input_type(identifier)
-
-    # Build the URL to send to Translation Server
+def _build_lookup_url(input_type, normalized):
     if input_type == "doi":
-        lookup_url = f"https://doi.org/{normalized}"
-    elif input_type == "arxiv":
-        lookup_url = f"https://arxiv.org/abs/{normalized}"
-    elif input_type == "isbn":
-        lookup_url = f"https://www.worldcat.org/isbn/{normalized}"
-    elif input_type == "url":
-        lookup_url = normalized
-    else:
-        raise ValueError(f"Cannot determine identifier type for: {identifier}")
+        return f"https://doi.org/{normalized}"
+    if input_type == "arxiv":
+        return f"https://arxiv.org/abs/{normalized}"
+    if input_type == "isbn":
+        return f"https://www.worldcat.org/isbn/{normalized}"
+    if input_type == "url":
+        return normalized
+    raise ValueError(f"Cannot determine identifier type for: {normalized}")
 
-    # Health check (try configured URL, fall back to localhost if host.docker.internal fails)
+
+def _split_name(name):
+    parts = [p for p in (name or "").strip().split() if p]
+    if not parts:
+        return {"name": ""}
+    if len(parts) == 1:
+        return {"name": parts[0]}
+    return {"firstName": " ".join(parts[:-1]), "lastName": parts[-1]}
+
+
+def _author_list(entries):
+    creators = []
+    for entry in entries or []:
+        if isinstance(entry, dict):
+            given = (entry.get("given") or "").strip()
+            family = (entry.get("family") or "").strip()
+            literal = (entry.get("name") or "").strip()
+            if family or given:
+                creator = {"creatorType": "author"}
+                if given:
+                    creator["firstName"] = given
+                if family:
+                    creator["lastName"] = family
+                creators.append(creator)
+                continue
+            if literal:
+                creator = _split_name(literal)
+                creator["creatorType"] = "author"
+                creators.append(creator)
+                continue
+        elif entry:
+            creator = _split_name(str(entry))
+            creator["creatorType"] = "author"
+            creators.append(creator)
+    return creators
+
+
+def _format_date_parts(parts):
+    if not parts:
+        return ""
+    nums = [str(p) for p in parts if p not in (None, "")]
+    out = []
+    for idx, num in enumerate(nums[:3]):
+        out.append(num if idx == 0 else num.zfill(2))
+    return "-".join(out)
+
+
+def _crossref_date(message):
+    for key in ("published-print", "published-online", "issued", "created"):
+        date_parts = (((message.get(key) or {}).get("date-parts") or [[]])[0])
+        if date_parts:
+            return _format_date_parts(date_parts)
+    return ""
+
+
+def _crossref_item_type(message):
+    mapping = {
+        "journal-article": "journalArticle",
+        "proceedings-article": "conferencePaper",
+        "proceedings": "conferencePaper",
+        "book": "book",
+        "book-chapter": "bookSection",
+        "book-part": "bookSection",
+        "posted-content": "manuscript",
+        "report": "report",
+        "dissertation": "thesis",
+        "reference-entry": "encyclopediaArticle",
+    }
+    return mapping.get((message.get("type") or "").lower(), "journalArticle")
+
+
+def _fetch_via_translation_server(lookup_url, translation_server):
+    requests = _requests()
     server_ok = False
     try:
         requests.get(translation_server, timeout=5)
@@ -100,10 +177,9 @@ def fetch_metadata(identifier, translation_server="http://localhost:1969"):
     if not server_ok:
         raise ConnectionError(
             f"Translation Server unreachable at {translation_server}. "
-            "Run on host: cd ~/.openclaw/workspace/skills/zotero && docker compose up -d"
+            "Direct DOI/arXiv/ISBN fallback will be used when possible."
         )
 
-    # Fetch metadata
     headers = {"Content-Type": "text/plain"}
     try:
         resp = requests.post(
@@ -123,174 +199,272 @@ def fetch_metadata(identifier, translation_server="http://localhost:1969"):
     items = resp.json()
     if not items:
         raise ValueError(f"Translation Server returned empty result for {lookup_url}")
+    return items[0]
 
-    metadata = items[0]
 
-    # Extract DOI and arXiv ID from metadata if present
+def _fetch_doi_direct(doi):
+    requests = _requests()
+    url = f"https://api.crossref.org/works/{quote(doi, safe='')}"
+    resp = requests.get(
+        url,
+        timeout=20,
+        headers={"User-Agent": "Codex-Zotero-Skill/1.0"},
+    )
+    if resp.status_code == 404:
+        raise ValueError(f"Crossref could not find DOI: {doi}")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Crossref returned {resp.status_code} for DOI {doi}")
+
+    message = (resp.json() or {}).get("message") or {}
+    title = ((message.get("title") or [""]) or [""])[0]
+    container = ((message.get("container-title") or [""]) or [""])[0]
+    short_container = ((message.get("short-container-title") or [""]) or [""])[0]
+    item_type = _crossref_item_type(message)
+    metadata = {
+        "itemType": item_type,
+        "title": title,
+        "creators": _author_list(message.get("author")),
+        "date": _crossref_date(message),
+        "DOI": (message.get("DOI") or doi),
+        "url": message.get("URL") or f"https://doi.org/{doi}",
+        "publisher": message.get("publisher", ""),
+        "volume": message.get("volume", ""),
+        "issue": message.get("issue", ""),
+        "pages": message.get("page", ""),
+        "journalAbbreviation": short_container,
+    }
+    if item_type == "bookSection":
+        metadata["bookTitle"] = container
+    else:
+        metadata["publicationTitle"] = container
+    return metadata
+
+
+def _fetch_arxiv_direct(arxiv_id):
+    requests = _requests()
+    url = f"https://export.arxiv.org/api/query?id_list={quote(arxiv_id, safe='')}"
+    resp = None
+    api_error = None
+    try:
+        resp = requests.get(url, timeout=20, headers={"User-Agent": "Codex-Zotero-Skill/1.0"})
+    except requests.RequestException as exc:
+        api_error = exc
+
+    if resp is not None and resp.status_code == 200:
+        ns = {
+            "atom": "http://www.w3.org/2005/Atom",
+            "arxiv": "http://arxiv.org/schemas/atom",
+        }
+        root = ElementTree.fromstring(resp.text)
+        entry = root.find("atom:entry", ns)
+        if entry is None:
+            raise ValueError(f"arXiv returned no entry for {arxiv_id}")
+
+        title = (entry.findtext("atom:title", default="", namespaces=ns) or "").strip()
+        summary = (entry.findtext("atom:summary", default="", namespaces=ns) or "").strip()
+        published = (entry.findtext("atom:published", default="", namespaces=ns) or "").strip()
+        doi = (entry.findtext("arxiv:doi", default="", namespaces=ns) or "").strip()
+        creators = []
+        for author in entry.findall("atom:author", ns):
+            name = (author.findtext("atom:name", default="", namespaces=ns) or "").strip()
+            if name:
+                creator = _split_name(name)
+                creator["creatorType"] = "author"
+                creators.append(creator)
+
+        return {
+            "itemType": "manuscript",
+            "title": title,
+            "creators": creators,
+            "date": published[:10],
+            "DOI": doi or f"10.48550/arXiv.{arxiv_id}",
+            "url": f"https://arxiv.org/abs/{arxiv_id}",
+            "abstractNote": summary,
+            "archive": "arXiv",
+            "archiveID": arxiv_id,
+        }
+
+    try:
+        page = requests.get(
+            f"https://arxiv.org/abs/{quote(arxiv_id, safe='')}",
+            timeout=20,
+            headers={"User-Agent": "Codex-Zotero-Skill/1.0"},
+        )
+    except requests.RequestException as exc:
+        if api_error is not None:
+            raise RuntimeError(
+                f"arXiv API failed ({api_error}) and abs page fallback failed ({exc}) for {arxiv_id}"
+            ) from exc
+        raise RuntimeError(f"arXiv abs page fallback failed ({exc}) for {arxiv_id}") from exc
+    if page.status_code != 200:
+        api_status = resp.status_code if resp is not None else f"error: {api_error}"
+        raise RuntimeError(f"arXiv returned {api_status} for API and {page.status_code} for abs page ({arxiv_id})")
+
+    def _meta_all(name):
+        pattern = re.compile(
+            rf'<meta\s+name="{re.escape(name)}"\s+content="([^"]*)"',
+            re.IGNORECASE,
+        )
+        return [html.unescape(m) for m in pattern.findall(page.text)]
+
+    def _meta_one(name):
+        values = _meta_all(name)
+        return values[0].strip() if values else ""
+
+    creators = []
+    for name in _meta_all("citation_author"):
+        creator = _split_name(name)
+        creator["creatorType"] = "author"
+        creators.append(creator)
+
+    return {
+        "itemType": "manuscript",
+        "title": _meta_one("citation_title"),
+        "creators": creators,
+        "date": _meta_one("citation_date"),
+        "DOI": _meta_one("citation_doi") or f"10.48550/arXiv.{arxiv_id}",
+        "url": _meta_one("citation_abstract_html_url") or f"https://arxiv.org/abs/{arxiv_id}",
+        "abstractNote": _meta_one("citation_abstract"),
+        "archive": "arXiv",
+        "archiveID": arxiv_id,
+    }
+
+
+def _fetch_isbn_direct(isbn):
+    requests = _requests()
+    url = (
+        "https://openlibrary.org/api/books"
+        f"?bibkeys=ISBN:{quote(isbn, safe='')}&format=json&jscmd=data"
+    )
+    resp = requests.get(url, timeout=20, headers={"User-Agent": "Codex-Zotero-Skill/1.0"})
+    if resp.status_code != 200:
+        raise RuntimeError(f"Open Library returned {resp.status_code} for ISBN {isbn}")
+
+    data = resp.json() or {}
+    book = data.get(f"ISBN:{isbn}")
+    if not book:
+        raise ValueError(f"Open Library returned no record for ISBN {isbn}")
+
+    return {
+        "itemType": "book",
+        "title": book.get("title", ""),
+        "creators": _author_list([a.get("name", "") for a in book.get("authors", [])]),
+        "date": book.get("publish_date", ""),
+        "publisher": ", ".join(p.get("name", "") for p in book.get("publishers", []) if p.get("name")),
+        "url": book.get("url", ""),
+        "ISBN": isbn,
+    }
+
+
+def _fetch_direct(input_type, normalized):
+    if input_type == "doi":
+        return _fetch_doi_direct(normalized)
+    if input_type == "arxiv":
+        return _fetch_arxiv_direct(normalized)
+    if input_type == "isbn":
+        return _fetch_isbn_direct(normalized)
+    raise NotImplementedError(f"No direct metadata fallback for input type: {input_type}")
+
+
+def _finalize_metadata(metadata, input_type, normalized):
     doi = metadata.get("DOI", "")
     arxiv_id = ""
     if input_type == "arxiv":
         arxiv_id = normalized
+        if not doi:
+            metadata["DOI"] = f"10.48550/arXiv.{normalized}"
     elif doi and doi.startswith("10.48550/arXiv."):
         arxiv_id = doi.replace("10.48550/arXiv.", "")
 
-    # Normalize itemType: preprints, manuscripts, author self-published → "Manuscript"
-    item_type = metadata.get("itemType", "")
-    if item_type == "preprint" or input_type == "arxiv":
+    if metadata.get("itemType") == "preprint" or input_type == "arxiv":
         metadata["itemType"] = "manuscript"
 
     metadata["_input_type"] = input_type
     metadata["_normalized_id"] = normalized
     metadata["_arxiv_id"] = arxiv_id
-
-    return metadata, input_type, normalized
-
-
-# ---------------------------------------------------------------------------
-# Auto DOI extraction from PDF via getscipapers CLI
-# ---------------------------------------------------------------------------
-
-_DOI_OUTPUT_RE = re.compile(r"Extracted DOI from PDF:\s*(\S+)")
+    return metadata
 
 
-def extract_doi_from_pdf(pdf_path, timeout=30):
-    """Extract DOI from a PDF via getscipapers CLI.
+def _windows_to_wsl_path(path):
+    normalized = os.path.abspath(path).replace("\\", "/")
+    if len(normalized) >= 2 and normalized[1] == ":":
+        drive = normalized[0].lower()
+        return f"/mnt/{drive}{normalized[2:]}"
+    return normalized
 
-    Shells out to ``getscipapers getpapers --extract-doi-from-pdf`` with a
-    timeout.  Returns the DOI string or None.
-    """
+
+def _fetch_url_via_wsl(url, config):
+    distro = config.get("wsl_translation_distro", "Ubuntu-24.04")
+    helper_windows = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "wsl_url_translate.sh")
+    )
+    helper_wsl = _windows_to_wsl_path(helper_windows)
+    env_repo = config.get("wsl_translation_repo", "~/zotero-translation-server")
+    command = [
+        "wsl",
+        "-d",
+        distro,
+        "--",
+        "env",
+        f"ZOTERO_WSL_TRANSLATION_REPO={env_repo}",
+        "bash",
+        helper_wsl,
+        url,
+    ]
     try:
         result = subprocess.run(
-            ["getscipapers", "getpapers", "--extract-doi-from-pdf", pdf_path],
-            capture_output=True, text=True, timeout=timeout,
+            command,
+            capture_output=True,
+            text=True,
+            timeout=240,
+            check=False,
         )
-        for line in result.stdout.splitlines():
-            m = _DOI_OUTPUT_RE.search(line)
-            if m:
-                return m.group(1).rstrip(".")
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-    return None
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"WSL URL translation timed out for {url}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Failed to invoke WSL URL translation helper: {exc}") from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"WSL URL translation failed for {url}: {detail}")
+
+    try:
+        items = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("WSL URL translation returned invalid JSON") from exc
+
+    if not items:
+        raise ValueError(f"WSL URL translation returned empty result for {url}")
+    if not isinstance(items, list):
+        raise RuntimeError(f"WSL URL translation returned unexpected payload for {url}")
+    return items[0]
 
 
-# CrossRef type → Zotero itemType
-_CROSSREF_TYPE_MAP = {
-    "journal-article": "journalArticle",
-    "proceedings-article": "conferencePaper",
-    "book": "book",
-    "book-chapter": "bookSection",
-    "monograph": "book",
-    "reference-book": "book",
-    "posted-content": "manuscript",
-    "report": "report",
-    "dissertation": "thesis",
-    "dataset": "document",
-    "peer-review": "journalArticle",
-    "edited-book": "book",
-    "reference-entry": "encyclopediaArticle",
-}
+def fetch_metadata(identifier, translation_server="http://localhost:1969", config=None):
+    """Fetch metadata via Translation Server, then direct fallback if needed.
 
-_JATS_TAG_RE = re.compile(r"</?jats:[^>]+>")
-
-
-def crossref_to_zotero(data):
-    """Convert a CrossRef works response (the *message* dict) to Zotero metadata."""
-    # itemType
-    cr_type = data.get("type", "")
-    item_type = _CROSSREF_TYPE_MAP.get(cr_type, "journalArticle")
-    if item_type == "manuscript" or cr_type == "posted-content":
-        item_type = "manuscript"
-
-    # title
-    titles = data.get("title") or []
-    title = titles[0] if titles else "Unknown"
-
-    # creators
-    creators = []
-    for author in data.get("author") or []:
-        given = author.get("given", "")
-        family = author.get("family", "")
-        if given and family:
-            creators.append({"creatorType": "author", "firstName": given, "lastName": family})
-        elif family:
-            creators.append({"creatorType": "author", "name": family})
-
-    # date
-    date = ""
-    parts = (data.get("issued") or {}).get("date-parts") or []
-    if parts and parts[0]:
-        dp = parts[0]
-        if len(dp) >= 3:
-            date = f"{dp[0]}-{dp[1]:02d}-{dp[2]:02d}"
-        elif len(dp) >= 2:
-            date = f"{dp[0]}-{dp[1]:02d}"
-        elif len(dp) >= 1:
-            date = str(dp[0])
-
-    # container / publication
-    containers = data.get("container-title") or []
-    publication = containers[0] if containers else ""
-
-    # abstract (strip JATS XML tags)
-    abstract = data.get("abstract") or ""
-    if abstract:
-        abstract = _JATS_TAG_RE.sub("", abstract).strip()
-
-    meta = {
-        "itemType": item_type,
-        "title": title,
-        "creators": creators,
-        "date": date,
-        "DOI": data.get("DOI", ""),
-        "abstractNote": abstract,
-        "publicationTitle": publication,
-        "volume": data.get("volume", ""),
-        "issue": data.get("issue", ""),
-        "pages": data.get("page", ""),
-        "url": data.get("URL", ""),
-        "language": data.get("language", ""),
-    }
-
-    # Optional fields
-    issns = data.get("ISSN") or []
-    if issns:
-        meta["ISSN"] = issns[0]
-    isbns = data.get("ISBN") or []
-    if isbns:
-        meta["ISBN"] = isbns[0]
-    if data.get("publisher"):
-        meta["publisher"] = data["publisher"]
-
-    return meta
-
-
-def fetch_metadata_for_pdf(pdf_path, translation_server="http://localhost:1969"):
-    """Auto-extract DOI from a PDF and fetch rich metadata.
-
-    Returns ``(metadata_dict, doi_string)`` or ``(None, None)`` when DOI
-    extraction fails entirely.  If the DOI is found but metadata cannot be
-    fetched, returns ``(None, doi)``.
+    Returns (metadata_dict, input_type, normalized_id) or raises.
     """
-    doi = extract_doi_from_pdf(pdf_path)
-    if not doi:
-        return None, None
+    config = config or {}
+    input_type, normalized = detect_input_type(identifier)
+    lookup_url = _build_lookup_url(input_type, normalized)
+    translation_error = None
 
-    # Primary path: Translation Server
+    if input_type == "url":
+        try:
+            metadata = _fetch_url_via_wsl(normalized, config)
+            return _finalize_metadata(metadata, input_type, normalized), input_type, normalized
+        except (ValueError, RuntimeError, TimeoutError, ConnectionError) as exc:
+            translation_error = exc
+
     try:
-        metadata, _input_type, _normalized = fetch_metadata(doi, translation_server)
-        return metadata, doi
-    except (ConnectionError, ValueError, RuntimeError, TimeoutError):
-        pass
+        metadata = _fetch_via_translation_server(lookup_url, translation_server)
+        return _finalize_metadata(metadata, input_type, normalized), input_type, normalized
+    except (ConnectionError, ValueError, RuntimeError, TimeoutError) as exc:
+        translation_error = exc
 
-    # Fallback: CrossRef API directly
-    try:
-        from getscipapers_hoanganhduc.getpapers import fetch_crossref_data
-        from getscipapers_hoanganhduc import configuration as gsp_config
-        gsp_config.load_credentials(interactive=False)
-        cr_data = fetch_crossref_data(doi)
-        if cr_data:
-            return crossref_to_zotero(cr_data), doi
-    except Exception:
-        pass
+    if input_type in {"doi", "arxiv", "isbn"}:
+        metadata = _fetch_direct(input_type, normalized)
+        return _finalize_metadata(metadata, input_type, normalized), input_type, normalized
 
-    return None, doi
+    raise translation_error

@@ -9,6 +9,7 @@ import subprocess
 def run_doctor(config):
     checks = []
     checks.append(_check_translation_server(config))
+    checks.append(_check_url_metadata(config))
     checks.append(_check_zotero_api(config))
     checks.append(_check_webdav(config))
     checks.append(_check_gdrive(config))
@@ -28,8 +29,34 @@ def _check_translation_server(config):
         return {"name": "Translation Server", "ok": False,
                 "message": f"Server returned {r.status_code}. Try: docker compose up -d"}
     except Exception as e:
-        return {"name": "Translation Server", "ok": False,
-                "message": f"Unreachable at {url}. Run on host: cd ~/.openclaw/workspace/skills/zotero && docker compose up -d"}
+        return {"name": "Translation Server", "ok": True,
+                "message": (
+                    f"Unreachable at {url}. "
+                    "Direct DOI/arXiv/ISBN fallback is enabled; generic URL metadata can also use "
+                    "the WSL helper path when configured."
+                )}
+
+
+def _check_url_metadata(config):
+    try:
+        from lib.metadata import fetch_metadata
+        item, input_type, _normalized = fetch_metadata(
+            "https://en.wikipedia.org/wiki/Zotero",
+            config.get("translation_server", "http://localhost:1969"),
+            config,
+        )
+        title = (item or {}).get("title", "").strip() or "metadata returned"
+        return {
+            "name": "URL metadata translation",
+            "ok": True,
+            "message": f"Generic URL metadata works via {input_type} input ({title})",
+        }
+    except Exception as e:
+        return {
+            "name": "URL metadata translation",
+            "ok": False,
+            "message": str(e),
+        }
 
 
 def _check_zotero_api(config):

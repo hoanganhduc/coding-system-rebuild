@@ -1,4 +1,4 @@
-@anthropic-ai/claude-code@2.1.199
+@anthropic-ai/claude-code@2.1.205
 @github/copilot@1.0.68
 @google/gemini-cli@0.49.0
 @openai/codex@0.142.5

@@ -11,7 +11,10 @@ import os
 import subprocess
 import sys
 
-WORKSPACE = os.environ.get("OPENCLAW_WORKSPACE", "{{ HOME }}/.openclaw/workspace")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.config import default_workspace
+
+WORKSPACE = default_workspace()
 ZOT_PY = os.path.join(WORKSPACE, "skills", "zotero", "zot.py")
 GSP_HELPER = os.path.join(WORKSPACE, "skills", "getscipapers_requester", "gsp_openclaw_helper.py")
 WATCH_KEYS_FILE = os.path.join(WORKSPACE, "data", "research", "zotero", "watch-keys.json")

@@ -650,10 +650,6 @@ For repository, issue, pull request, and CI tasks:
 
 <!-- ai-agents-skills:vnu-eoffice:end -->
 
-<!-- ai-agents-skills:zotero:start -->
-- `zotero`: Zotero paper search, retrieval, ingest, and collection workflow.
-
-<!-- ai-agents-skills:zotero:end -->
 
 <!-- ai-agents-skills:repo-management:start -->
 ## ai-agents-skills management notice

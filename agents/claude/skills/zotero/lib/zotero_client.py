@@ -1,9 +1,23 @@
 """Pyzotero wrapper with exponential backoff and retry."""
 
+import re
 import time
 import json
 from pyzotero import zotero
 from pyzotero.zotero_errors import HTTPError
+
+DOI_RE = re.compile(r"^(?:doi:\s*)?(?:https?://(?:dx\.)?doi\.org/)?(10\.\d{4,9}/\S+)$", re.I)
+
+
+def normalize_doi_query(query):
+    """Return a normalized DOI if query is DOI-like, otherwise None."""
+    if not query:
+        return None
+    value = query.strip().strip("<>")
+    match = DOI_RE.match(value)
+    if not match:
+        return None
+    return match.group(1).rstrip(".,;").lower()
 
 
 class ZoteroClient:
@@ -36,6 +50,10 @@ class ZoteroClient:
 
     def search(self, query, limit=25):
         """Search library by query string. Returns list of item dicts."""
+        doi = normalize_doi_query(query)
+        if doi:
+            item = self.search_by_doi(doi)
+            return [item] if item else []
         items = self._retry(self.zot.top, q=query, limit=limit)
         return items
 
@@ -45,6 +63,8 @@ class ZoteroClient:
         Zotero's q= search doesn't index DOI fields, so we search by title
         (if provided) or by DOI string, then filter by exact DOI match.
         """
+        doi = normalize_doi_query(doi) or doi.strip().lower()
+
         # Strategy 1: if we have a title hint, search by that (most reliable)
         if title_hint:
             # Use first few significant words of title
@@ -52,26 +72,42 @@ class ZoteroClient:
             query = " ".join(words) if words else title_hint[:30]
             items = self._retry(self.zot.top, q=query, limit=25)
             for item in items:
-                item_doi = item["data"].get("DOI", "")
-                if item_doi and item_doi.lower() == doi.lower():
+                if _item_has_doi(item, doi):
                     return item
 
         # Strategy 2: search by DOI string with qmode=everything
         items = self._retry(self.zot.top, q=doi, qmode="everything", limit=10)
         for item in items:
-            item_doi = item["data"].get("DOI", "")
-            if item_doi and item_doi.lower() == doi.lower():
+            if _item_has_doi(item, doi):
                 return item
 
         # Strategy 3: search by DOI suffix (last part after /)
         doi_suffix = doi.split("/")[-1] if "/" in doi else doi
         items = self._retry(self.zot.top, q=doi_suffix, limit=10)
         for item in items:
-            item_doi = item["data"].get("DOI", "")
-            if item_doi and item_doi.lower() == doi.lower():
+            if _item_has_doi(item, doi):
+                return item
+
+        # Strategy 4: exact DOI scan over top-level items. Zotero API q=
+        # search does not reliably index DOI fields, so this is the only
+        # reliable library-presence check for bare DOI queries.
+        for item in self.iter_top_items():
+            if _item_has_doi(item, doi):
                 return item
 
         return None
+
+    def iter_top_items(self, page_size=100):
+        start = 0
+        while True:
+            items = self._retry(self.zot.top, limit=page_size, start=start)
+            if not items:
+                break
+            for item in items:
+                yield item
+            if len(items) < page_size:
+                break
+            start += page_size
 
     def count_items(self):
         """Return total number of items in library."""
@@ -136,22 +172,9 @@ class ZoteroClient:
         return self._retry(self.zot.collection_items, collection_key, limit=limit)
 
     def trash_item(self, item):
-        """Move an item to trash via direct PATCH (sets deleted=1).
-
-        Bypasses pyzotero's check_items which rejects the 'deleted' field.
-        """
-        import requests as _req
-        key = item["key"]
-        version = item["version"]
-        url = f"https://api.zotero.org/users/{self.zot.library_id}/items/{key}"
-        headers = {
-            "Zotero-API-Key": self.zot.api_key,
-            "If-Unmodified-Since-Version": str(version),
-            "Content-Type": "application/json",
-        }
-        resp = _req.patch(url, headers=headers, json={"deleted": 1})
-        resp.raise_for_status()
-        return resp
+        """Move an item to trash (sets deleted=1)."""
+        item["data"]["deleted"] = 1
+        return self._retry(self.zot.update_item, item)
 
     def remove_from_collection(self, collection_key, item):
         """Remove an item from a collection without trashing it."""
@@ -177,6 +200,11 @@ def _extract_status(exc):
         if str(code) in msg:
             return code
     return None
+
+
+def _item_has_doi(item, doi):
+    item_doi = item.get("data", {}).get("DOI", "")
+    return bool(item_doi) and item_doi.strip().lower() == doi
 
 
 def _extract_retry_after(exc):

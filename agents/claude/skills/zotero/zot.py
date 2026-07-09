@@ -5,20 +5,33 @@ import argparse
 import json
 import sys
 import os
+import shutil
+import sqlite3
+from pathlib import Path
+from urllib.parse import quote
 
 # Deps are installed via pip into workspace/.local/ (persisted, in sandbox sys.path).
 # Add skill dir to path for lib/ imports.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from lib.config import load_config
+from lib.config import load_config, default_workspace
 from lib.zotero_client import ZoteroClient
+
+
+LOCAL_ZOTERO_DB_RELATIVE_PATHS = [
+    ("Zotero", "zotero.sqlite"),
+    ("ZoteroSync", "zotero.sqlite"),
+    ("Google Drive", "DATA", "Zotero", "zotero.sqlite"),
+    ("AppData", "Roaming", "Zotero", "Zotero", "zotero.sqlite"),
+    ("AppData", "Roaming", "Jurism", "Zotero", "zotero.sqlite"),
+]
 
 
 def _trigger_ingest(item_data):
     """Fire-and-forget: ingest Zotero item into memory. Does not block."""
     import subprocess
     script = os.path.join(
-        os.environ.get("OPENCLAW_WORKSPACE", "{{ HOME }}/.openclaw/workspace"),
+        default_workspace(),
         "scripts", "ingest_library.py",
     )
     if not os.path.exists(script):
@@ -29,42 +42,316 @@ def _trigger_ingest(item_data):
     )
 
 
+def _config_path_list(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(v) for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [p.strip() for p in value.split(os.pathsep) if p.strip()]
+    return []
+
+
+def _home_dirs():
+    homes = []
+    for key in ("USERPROFILE", "HOME"):
+        value = os.environ.get(key)
+        if value:
+            homes.append(value)
+    homes.append(str(Path.home()))
+    return _dedupe_paths(homes, existing_only=False)
+
+
+def _expand_path(path):
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(str(path))))
+
+
+def _dedupe_paths(paths, existing_only=True):
+    seen = set()
+    result = []
+    for path in paths:
+        if not path:
+            continue
+        expanded = _expand_path(path)
+        key = os.path.normcase(expanded)
+        if key in seen:
+            continue
+        if existing_only and not os.path.exists(expanded):
+            continue
+        seen.add(key)
+        result.append(expanded)
+    return result
+
+
+def _copy_to_path_unless_same_file(source_path, target_path):
+    """Copy source_path to target_path unless both names already refer to the same file."""
+    source_path = os.path.abspath(source_path)
+    target_path = os.path.abspath(target_path)
+    if os.path.exists(source_path) and os.path.exists(target_path):
+        try:
+            if os.path.samefile(source_path, target_path):
+                return target_path
+        except OSError:
+            pass
+    shutil.copy2(source_path, target_path)
+    return target_path
+
+
+def _candidate_zotero_db_paths(config, existing_only=True):
+    paths = []
+    paths.extend(_config_path_list(config.get("local_zotero_db_paths")))
+    paths.extend(_config_path_list(config.get("zotero_db_paths")))
+    for home in _home_dirs():
+        for parts in LOCAL_ZOTERO_DB_RELATIVE_PATHS:
+            paths.append(os.path.join(home, *parts))
+    return _dedupe_paths(paths, existing_only=existing_only)
+
+
+def _candidate_storage_dirs(config):
+    paths = []
+    paths.extend(_config_path_list(config.get("local_storage_dirs")))
+    paths.extend(_config_path_list(config.get("zotero_storage_dirs")))
+    for db_path in _candidate_zotero_db_paths(config, existing_only=True):
+        paths.append(os.path.join(os.path.dirname(db_path), "storage"))
+    return _dedupe_paths(paths, existing_only=True)
+
+
+def _sqlite_uri(path):
+    return f"file:{quote(Path(path).as_posix(), safe='/:')}?mode=ro"
+
+
+def _quick_check(conn):
+    try:
+        row = conn.execute("PRAGMA quick_check").fetchone()
+        value = str(row[0]) if row else ""
+        return {"status": "ok" if value.lower() == "ok" else "malformed", "quick_check": value}
+    except sqlite3.DatabaseError as exc:
+        return {"status": "error", "quick_check": str(exc)}
+
+
+def _local_authors(conn, item_id):
+    rows = conn.execute(
+        """
+        SELECT c.firstName, c.lastName, ic.orderIndex
+        FROM itemCreators ic
+        JOIN creators c ON c.creatorID = ic.creatorID
+        WHERE ic.itemID = ?
+        ORDER BY ic.orderIndex
+        """,
+        (item_id,),
+    ).fetchall()
+    authors = []
+    for first, last, _ in rows:
+        if first and last:
+            authors.append({"creatorType": "author", "firstName": first, "lastName": last})
+        elif last:
+            authors.append({"creatorType": "author", "name": last})
+        elif first:
+            authors.append({"creatorType": "author", "name": first})
+    return authors
+
+
+def _search_local_zotero_db(path, query, limit):
+    diag = {"path": path, "exists": os.path.exists(path)}
+    if not diag["exists"]:
+        return [], diag
+
+    words = [w.lower() for w in query.split() if w.strip()]
+    if not words:
+        diag["status"] = "skipped"
+        diag["message"] = "empty query"
+        return [], diag
+
+    items = []
+    try:
+        conn = sqlite3.connect(_sqlite_uri(path), uri=True, timeout=2)
+        conn.row_factory = sqlite3.Row
+        qc = _quick_check(conn)
+        diag.update(qc)
+        rows = conn.execute(
+            """
+            SELECT
+                i.itemID,
+                i.key,
+                it.typeName,
+                MAX(CASE WHEN f.fieldName = 'title' THEN v.value END) AS title,
+                MAX(CASE WHEN f.fieldName = 'date' THEN v.value END) AS date,
+                MAX(CASE WHEN f.fieldName = 'DOI' THEN v.value END) AS doi
+            FROM items i
+            JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+            LEFT JOIN itemData d ON d.itemID = i.itemID
+            LEFT JOIN fields f ON f.fieldID = d.fieldID
+            LEFT JOIN itemDataValues v ON v.valueID = d.valueID
+            WHERE it.typeName NOT IN ('attachment', 'note')
+            GROUP BY i.itemID, i.key, it.typeName
+            ORDER BY i.dateModified DESC
+            """
+        )
+        for row in rows:
+            authors = _local_authors(conn, row["itemID"])
+            author_text = " ".join(
+                (a.get("name") or f"{a.get('lastName', '')} {a.get('firstName', '')}").lower()
+                for a in authors
+            )
+            searchable = " ".join(
+                str(part or "").lower()
+                for part in (row["title"], row["doi"], author_text)
+            )
+            if not all(word in searchable for word in words):
+                continue
+            items.append({
+                "key": row["key"],
+                "data": {
+                    "itemType": row["typeName"] or "",
+                    "title": row["title"] or "",
+                    "date": row["date"] or "",
+                    "DOI": row["doi"] or "",
+                    "creators": authors,
+                    "collections": [],
+                },
+                "_source": "local-db",
+                "_sqlite_status": diag.get("status"),
+                "_sqlite_path": path,
+                "_degraded": diag.get("status") != "ok",
+            })
+            if len(items) >= limit:
+                break
+        diag["matched"] = len(items)
+        conn.close()
+        return items, diag
+    except sqlite3.DatabaseError as exc:
+        diag.update({"status": "error", "message": str(exc)})
+        return [], diag
+
+
+def _search_local_zotero_dbs(config, query, limit):
+    results = []
+    diagnostics = []
+    seen = set()
+    for db_path in _candidate_zotero_db_paths(config, existing_only=True):
+        items, diag = _search_local_zotero_db(db_path, query, max(limit - len(results), 0))
+        diagnostics.append(diag)
+        for item in items:
+            key = item.get("key")
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(item)
+            if len(results) >= limit:
+                break
+        if len(results) >= limit:
+            break
+    return results, diagnostics
+
+
+def _safe_attachment_names(att_data):
+    names = []
+    for key in ("filename", "title"):
+        value = att_data.get(key)
+        if value:
+            names.append(value)
+    path_value = att_data.get("path")
+    if isinstance(path_value, str) and path_value.startswith("storage:"):
+        names.append(path_value.split(":", 1)[1])
+
+    safe = []
+    for name in names:
+        basename = os.path.basename(str(name).replace("\\", "/"))
+        if basename and basename not in safe:
+            safe.append(basename)
+    return safe
+
+
+def _is_pdf_file(path):
+    if not os.path.isfile(path):
+        return False
+    if not path.lower().endswith(".pdf"):
+        return False
+    try:
+        with open(path, "rb") as f:
+            return f.read(5) == b"%PDF-"
+    except OSError:
+        return False
+
+
+def _find_local_attachment_pdf(config, attachment):
+    att_key = attachment.get("key")
+    if not att_key:
+        return None
+    att_data = attachment.get("data", {})
+    names = _safe_attachment_names(att_data)
+
+    for storage_dir in _candidate_storage_dirs(config):
+        folder = os.path.join(storage_dir, att_key)
+        if not os.path.isdir(folder):
+            continue
+        for name in names:
+            candidate = os.path.join(folder, name)
+            if _is_pdf_file(candidate):
+                return {"path": candidate, "storage_dir": storage_dir, "attachment_key": att_key}
+        try:
+            for name in sorted(os.listdir(folder)):
+                candidate = os.path.join(folder, name)
+                if _is_pdf_file(candidate):
+                    return {"path": candidate, "storage_dir": storage_dir, "attachment_key": att_key}
+        except OSError:
+            continue
+    return None
+
+
 def cmd_search(args):
     from lib.cache import update_cache_from_search, search_cache
 
-    config = load_config(require=["ZOTERO_API_KEY"])
-    client = ZoteroClient(config)
+    diagnostics = None
+    search_source = "zotero-api"
 
-    if args.bibtex:
-        items = client.search(args.query, limit=args.limit)
-        for item in items:
-            key = item["key"]
-            try:
-                bib = client.zot.item(key, format="bibtex")
-                print(bib)
-            except Exception as e:
-                print(f"% Error fetching bibtex for {key}: {e}", file=sys.stderr)
+    if args.local_db and args.bibtex:
+        _output({"status": "error", "action": "search", "message": "--bibtex requires Zotero API search", "code": "LOCAL_DB_BIBTEX_UNSUPPORTED"})
         return
 
-    # Try API first, fall back to cache
-    try:
-        items = client.search(args.query, limit=args.limit)
-        # Update cache with results
-        update_cache_from_search(config, items)
-    except Exception as e:
-        _progress(f"API unreachable: {e} — searching cache")
-        items, age = search_cache(config, args.query)
-        if items:
-            age_str = f"{age:.0f}h ago" if age else "unknown age"
-            _progress(f"Found {len(items)} results in cache ({age_str})")
-        else:
-            _output({"status": "error", "action": "search",
-                      "message": f"API unreachable and no cache available: {e}",
-                      "code": "API_UNREACHABLE_USING_CACHE"})
+    if args.local_db:
+        config = load_config()
+        items, diagnostics = _search_local_zotero_dbs(config, args.query, args.limit)
+        search_source = "local-db"
+    else:
+        config = load_config(require=["ZOTERO_API_KEY"])
+        client = ZoteroClient(config)
+
+        if args.bibtex:
+            items = client.search(args.query, limit=args.limit)
+            for item in items:
+                key = item["key"]
+                try:
+                    bib = client.zot.item(key, format="bibtex")
+                    print(bib)
+                except Exception as e:
+                    print(f"% Error fetching bibtex for {key}: {e}", file=sys.stderr)
             return
 
+        # Try API first, fall back to cache
+        try:
+            items = client.search(args.query, limit=args.limit)
+            # Update cache with results
+            update_cache_from_search(config, items)
+        except Exception as e:
+            _progress(f"API unreachable: {e} — searching cache")
+            items, age = search_cache(config, args.query)
+            search_source = "cache"
+            if items:
+                age_str = f"{age:.0f}h ago" if age else "unknown age"
+                _progress(f"Found {len(items)} results in cache ({age_str})")
+            else:
+                _output({"status": "error", "action": "search",
+                          "message": f"API unreachable and no cache available: {e}",
+                          "code": "API_UNREACHABLE_USING_CACHE"})
+                return
+
     if not items:
-        _output({"status": "ok", "action": "search", "results": [], "message": "No results found"})
+        payload = {"status": "ok", "action": "search", "source": search_source,
+                   "results": [], "message": "No results found"}
+        if diagnostics is not None:
+            payload["diagnostics"] = diagnostics
+        _output(payload)
         return
 
     results = []
@@ -84,10 +371,16 @@ def cmd_search(args):
             "doi": d.get("DOI", ""),
             "type": d.get("itemType", ""),
             "collections": d.get("collections", []),
+            "source": item.get("_source", search_source),
+            "degraded": bool(item.get("_degraded", False)),
         })
 
     if args.json:
-        _output({"status": "ok", "action": "search", "results": results, "count": len(results)})
+        payload = {"status": "ok", "action": "search", "source": search_source,
+                   "results": results, "count": len(results)}
+        if diagnostics is not None:
+            payload["diagnostics"] = diagnostics
+        _output(payload)
     else:
         for i, r in enumerate(results, 1):
             authors_str = "; ".join(r["authors"][:3])
@@ -97,11 +390,19 @@ def cmd_search(args):
             print(f"   {authors_str} ({r['year']})")
             if r["doi"]:
                 print(f"   DOI: {r['doi']}")
+            if r["source"] != "zotero-api":
+                note = f"   Source: {r['source']}"
+                if r["degraded"]:
+                    note += " (degraded)"
+                print(note)
             print()
 
 
 def cmd_add(args):
-    import fcntl
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None  # Windows: skip file locking
     from lib.metadata import fetch_metadata, detect_input_type
 
     config = load_config(require=["ZOTERO_API_KEY"])
@@ -126,7 +427,9 @@ def cmd_add(args):
 
     try:
         metadata, input_type, normalized = fetch_metadata(
-            args.identifier, config.get("translation_server", "http://localhost:1969")
+            args.identifier,
+            config.get("translation_server", "http://localhost:1969"),
+            config,
         )
     except ConnectionError as e:
         _output({"status": "error", "action": "add", "message": str(e), "code": "TRANSLATION_SERVER_DOWN"})
@@ -190,15 +493,17 @@ def cmd_add(args):
 
     # Duplicate check with file lock
     if doi and not args.force:
+        lock_fd = None
         lock_path = os.path.join(config["staging_dir"], f"{_hash_id(doi)}.lock")
         os.makedirs(config["staging_dir"], exist_ok=True)
-        try:
-            lock_fd = open(lock_path, "w")
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError):
-            _output({"status": "error", "action": "add",
-                      "message": "Another zot add for this DOI is in progress", "code": "DUPLICATE_DOI"})
-            sys.exit(1)
+        if fcntl:
+            try:
+                lock_fd = open(lock_path, "w")
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError):
+                _output({"status": "error", "action": "add",
+                          "message": "Another zot add for this DOI is in progress", "code": "DUPLICATE_DOI"})
+                sys.exit(1)
 
         try:
             existing = client.search_by_doi(doi, title_hint=title)
@@ -211,12 +516,13 @@ def cmd_add(args):
                 })
                 return
         finally:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                lock_fd.close()
-                os.remove(lock_path)
-            except OSError:
-                pass
+            if fcntl and lock_fd:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    lock_fd.close()
+                    os.remove(lock_path)
+                except OSError:
+                    pass
 
     # Resolve collection keys
     collection_keys = []
@@ -261,6 +567,8 @@ def cmd_add(args):
     version = "metadata_only"
     verified = False
     pdf_source = None
+    attachment_error = None
+    attachment_error_code = None
 
     if not args.no_pdf:
         from lib.downloader import download as download_pdf
@@ -286,7 +594,7 @@ def cmd_add(args):
             # WebDAV upload (if configured)
             if config.get("webdav_url") and config.get("WEBDAV_PASSWORD"):
                 _progress("5/5 Uploading to WebDAV...")
-                from lib.webdav import WebDAVClient
+                from lib.webdav import WebDAVClient, populate_imported_file_attachment
 
                 # Create attachment child item (need key for zip filename)
                 att_template = client.zot.item_template("attachment", "imported_file")
@@ -294,6 +602,7 @@ def cmd_add(args):
                 att_template["filename"] = os.path.basename(new_path)
                 att_template["parentItem"] = item_key
                 att_template["contentType"] = "application/pdf"
+                populate_imported_file_attachment(att_template, new_path)
                 att_result = client._retry(client.zot.create_items, [att_template])
 
                 att_item = None
@@ -314,6 +623,8 @@ def cmd_add(args):
                             pass
                     except Exception as e:
                         # Rollback: delete attachment item
+                        attachment_error = str(e)
+                        attachment_error_code = "WEBDAV_UPLOAD_FAILED"
                         _progress(f"WebDAV upload failed: {e} — rolling back attachment")
                         try:
                             full_att = client.get_item(att_key)
@@ -323,6 +634,8 @@ def cmd_add(args):
                             _log_orphan(config, att_key, str(e))
                             _progress(f"Rollback also failed: {re} — logged orphan {att_key}")
                 else:
+                    attachment_error = "Failed to create attachment item"
+                    attachment_error_code = "ATTACHMENT_CREATE_FAILED"
                     _progress("Failed to create attachment item — PDF not uploaded")
             else:
                 _progress("5/5 PDF ready (WebDAV not configured)")
@@ -341,6 +654,13 @@ def cmd_add(args):
 
     if pdf_source:
         output["source"] = pdf_source
+    if attachment_error:
+        output.update({
+            "status": "partial",
+            "code": attachment_error_code,
+            "attachment_error": attachment_error,
+            "message": "Item created, but the PDF attachment was not uploaded",
+        })
 
     # Append to local cache
     try:
@@ -353,6 +673,8 @@ def cmd_add(args):
 
     _output(output)
     _trigger_ingest({**metadata, "key": item_key})
+    if attachment_error:
+        sys.exit(1)
 
 
 def _cmd_add_batch(args, config, client):
@@ -502,34 +824,39 @@ def cmd_add_file(args):
 
     # Step 2: Get metadata
     metadata = None
+    doi_source = "none"
     if args.identifier:
         _progress("2/5 Fetching metadata...")
         from lib.metadata import fetch_metadata
         try:
             metadata, input_type, normalized = fetch_metadata(
-                args.identifier, config.get("translation_server", "http://localhost:1969")
+                args.identifier,
+                config.get("translation_server", "http://localhost:1969"),
+                config,
             )
+            doi_source = "identifier"
         except (ConnectionError, ValueError, RuntimeError, TimeoutError) as e:
             _progress(f"Metadata fetch failed: {e} — creating minimal item")
 
+    # Auto-extract DOI from PDF content via getscipapers
+    if metadata is None and is_pdf_file and not getattr(args, 'no_doi_extract', False):
+        extracted_doi = _try_extract_doi(file_path)
+        if extracted_doi:
+            _progress(f"2/5 Found DOI: {extracted_doi} — fetching metadata...")
+            from lib.metadata import fetch_metadata
+            try:
+                metadata, _, _ = fetch_metadata(
+                    extracted_doi,
+                    config.get("translation_server", "http://localhost:1969"),
+                    config,
+                )
+                doi_source = "pdf_content"
+            except (ConnectionError, ValueError, RuntimeError, TimeoutError) as e:
+                _progress(f"Metadata fetch failed: {e} — using minimal extraction")
+
     if metadata is None:
         _progress("2/5 Extracting metadata from file...")
-        if is_pdf_file and not args.no_auto_doi:
-            from lib.metadata import fetch_metadata_for_pdf
-            _progress("2/5 Extracting DOI from PDF...")
-            try:
-                auto_meta, auto_doi = fetch_metadata_for_pdf(
-                    file_path, config.get("translation_server", "http://localhost:1969"))
-            except Exception:
-                auto_meta, auto_doi = None, None
-            if auto_meta:
-                metadata = auto_meta
-                _progress(f"2/5 Found DOI: {auto_meta.get('DOI', auto_doi)}")
-            else:
-                metadata = _extract_pdf_metadata(file_path)
-                if auto_doi and not metadata.get("DOI"):
-                    metadata["DOI"] = auto_doi
-        elif is_pdf_file:
+        if is_pdf_file:
             metadata = _extract_pdf_metadata(file_path)
         else:
             metadata = _extract_file_metadata(file_path, content_type)
@@ -597,18 +924,21 @@ def cmd_add_file(args):
     staging = config["staging_dir"]
     os.makedirs(staging, exist_ok=True)
     staged_path = os.path.join(staging, new_name)
-    shutil.copy2(file_path, staged_path)
+    _copy_to_path_unless_same_file(file_path, staged_path)
+    attachment_error = None
+    attachment_error_code = None
 
     # WebDAV upload
     if config.get("webdav_url") and config.get("WEBDAV_PASSWORD"):
         _progress("5/5 Uploading to WebDAV...")
-        from lib.webdav import WebDAVClient
+        from lib.webdav import WebDAVClient, populate_imported_file_attachment
 
         att_template = client.zot.item_template("attachment", "imported_file")
         att_template["title"] = new_name
         att_template["filename"] = new_name
         att_template["parentItem"] = item_key
         att_template["contentType"] = content_type
+        populate_imported_file_attachment(att_template, staged_path)
         att_result = client._retry(client.zot.create_items, [att_template])
 
         att_key = None
@@ -626,6 +956,8 @@ def cmd_add_file(args):
                 except OSError:
                     pass
             except Exception as e:
+                attachment_error = str(e)
+                attachment_error_code = "WEBDAV_UPLOAD_FAILED"
                 _progress(f"WebDAV upload failed: {e} — rolling back attachment")
                 try:
                     full_att = client.get_item(att_key)
@@ -634,23 +966,37 @@ def cmd_add_file(args):
                     _log_orphan(config, att_key, str(e))
                     _progress(f"Rollback also failed: {re} — logged orphan {att_key}")
         else:
+            attachment_error = "Failed to create attachment item"
+            attachment_error_code = "ATTACHMENT_CREATE_FAILED"
             _progress("Failed to create attachment item — file not uploaded")
     else:
         _progress("5/5 File staged (WebDAV not configured)")
 
     coll_names = [_resolve_key_to_name(k, client) for k in collection_keys] if collection_keys else []
 
-    _output({
+    output = {
         "status": "ok", "action": "add-file", "title": title, "key": item_key,
         "content_type": content_type,
         "verified": verify_result["status"] == "accept",
         "page_count": verify_result.get("page_count"),
         "collections": coll_names,
         "filename": new_name,
+        "doi_source": doi_source,
         "message": f"Item created from local file ({content_type})",
-    })
+    }
+    if attachment_error:
+        output.update({
+            "status": "partial",
+            "code": attachment_error_code,
+            "attachment_error": attachment_error,
+            "message": "Item created, but the file attachment was not uploaded",
+        })
+
+    _output(output)
 
     _trigger_ingest({**metadata, "key": item_key})
+    if attachment_error:
+        sys.exit(1)
 
 
 # Keep add-pdf as an alias for backwards compatibility
@@ -795,6 +1141,32 @@ def _extract_pdf_metadata(pdf_path):
     return metadata
 
 
+def _try_extract_doi(pdf_path):
+    """Attempt to extract a DOI from PDF content using getscipapers CLI.
+
+    Returns a DOI string or None.
+    """
+    import shutil
+    import subprocess
+    if not shutil.which("getscipapers"):
+        _progress("DOI extraction: getscipapers not in PATH, skipping")
+        return None
+    try:
+        _progress("2/5 Extracting DOI from PDF content...")
+        result = subprocess.run(
+            ["getscipapers", "getpapers", "--extract-doi-from-pdf", pdf_path, "--no-download"],
+            capture_output=True, text=True, timeout=60
+        )
+        for line in result.stdout.splitlines():
+            if "Extracted DOI from PDF:" in line:
+                doi = line.split("Extracted DOI from PDF:")[-1].strip()
+                if doi:
+                    return doi
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _progress(f"DOI extraction failed: {e}")
+    return None
+
+
 def _build_add_message(version, verified, source, collections, no_pdf):
     parts = ["Item created"]
     if no_pdf:
@@ -912,13 +1284,23 @@ def cmd_get(args):
     # Search for the paper
     items = client.search(args.query, limit=25)
     if not items:
-        _output({"status": "error", "action": "get", "message": "No results found", "code": "PDF_NOT_FOUND"})
+        _output({
+            "status": "error",
+            "action": "get",
+            "message": "No Zotero item found for query",
+            "code": "ITEM_NOT_FOUND",
+        })
         return
 
     # Filter to items with potential attachments (not notes, not attachments themselves)
     parent_items = [i for i in items if i["data"].get("itemType") not in ("note", "attachment")]
     if not parent_items:
-        _output({"status": "error", "action": "get", "message": "No matching items found", "code": "PDF_NOT_FOUND"})
+        _output({
+            "status": "error",
+            "action": "get",
+            "message": "No parent Zotero items found for query",
+            "code": "ITEM_NOT_FOUND",
+        })
         return
 
     # Multiple results → show list (unless --index given)
@@ -963,6 +1345,20 @@ def cmd_get(args):
     att = attachments[0]
     att_key = att["key"]
 
+    if getattr(args, "local_storage", True):
+        local_pdf = _find_local_attachment_pdf(config, att)
+        if local_pdf:
+            _output_get_success(
+                args,
+                local_pdf["path"],
+                title,
+                parent_key,
+                selected["data"],
+                source="local-storage",
+                attachment_key=att_key,
+            )
+            return
+
     # Download from WebDAV
     if not config.get("webdav_url") or not config.get("WEBDAV_PASSWORD"):
         _output({"status": "error", "action": "get", "message": "WebDAV not configured", "code": "WEBDAV_ERROR"})
@@ -983,16 +1379,32 @@ def cmd_get(args):
         _output({"status": "error", "action": "get", "message": f"Attachment {att_key}.zip not found on WebDAV", "code": "WEBDAV_ERROR"})
         return
 
+    _output_get_success(
+        args,
+        pdf_path,
+        title,
+        parent_key,
+        selected["data"],
+        source="webdav",
+        attachment_key=att_key,
+    )
+
+
+def _output_get_success(args, pdf_path, title, parent_key, item_data, source, attachment_key=None):
     # --send: automatically send the file after download
     if getattr(args, "send", None):
         channel, target = args.send
         send_result = _send_file(pdf_path, channel, target, title)
-        _output({"status": "ok", "action": "get", "file_path": pdf_path, "title": title,
-                  "key": parent_key, "send": send_result})
+        payload = {"status": "ok", "action": "get", "file_path": pdf_path, "title": title,
+                   "key": parent_key, "source": source, "send": send_result}
     else:
-        _output({"status": "ok", "action": "get", "file_path": pdf_path, "title": title, "key": parent_key})
+        payload = {"status": "ok", "action": "get", "file_path": pdf_path, "title": title,
+                   "key": parent_key, "source": source}
+    if attachment_key:
+        payload["attachment_key"] = attachment_key
+    _output(payload)
 
-    _trigger_ingest(selected["data"])
+    _trigger_ingest(item_data)
 
 
 def _send_file(file_path, channel, target, title):
@@ -1035,6 +1447,8 @@ def cmd_update(args):
     if attach_any:
         from lib.renamer import rename as rename_meta, rename_non_pdf
         from lib.filetype import detect_content_type, is_pdf
+        attachment_error = None
+        attachment_error_code = None
 
         if local_file:
             # Local file path — detect type from the actual file
@@ -1057,7 +1471,6 @@ def cmd_update(args):
 
         if local_file:
             # Use local file
-            import shutil
             if not os.path.exists(local_file):
                 _output({"status": "error", "action": "update", "key": args.key,
                           "message": f"File not found: {local_file}", "code": "FILE_NOT_FOUND"})
@@ -1092,7 +1505,7 @@ def cmd_update(args):
             staging = config["staging_dir"]
             os.makedirs(staging, exist_ok=True)
             new_path = os.path.join(staging, new_name)
-            shutil.copy2(local_file, new_path)
+            _copy_to_path_unless_same_file(local_file, new_path)
 
             version = "local"
             verified = True
@@ -1144,13 +1557,14 @@ def cmd_update(args):
         # WebDAV upload (shared for both local and download paths)
         if config.get("webdav_url") and config.get("WEBDAV_PASSWORD"):
             _progress("Uploading to WebDAV...")
-            from lib.webdav import WebDAVClient
+            from lib.webdav import WebDAVClient, populate_imported_file_attachment
 
             att_template = client.zot.item_template("attachment", "imported_file")
             att_template["title"] = os.path.basename(new_path)
             att_template["filename"] = os.path.basename(new_path)
             att_template["parentItem"] = args.key
             att_template["contentType"] = content_type
+            populate_imported_file_attachment(att_template, new_path)
             att_result = client._retry(client.zot.create_items, [att_template])
 
             att_key = None
@@ -1167,12 +1581,24 @@ def cmd_update(args):
                     except OSError:
                         pass
                 except Exception as e:
+                    attachment_error = str(e)
+                    attachment_error_code = "WEBDAV_UPLOAD_FAILED"
                     _progress(f"WebDAV upload failed: {e} — rolling back")
                     try:
                         full_att = client.get_item(att_key)
                         client.delete_item(full_att)
                     except Exception:
                         _log_orphan(config, att_key, str(e))
+            else:
+                attachment_error = "Failed to create attachment item"
+                attachment_error_code = "ATTACHMENT_CREATE_FAILED"
+
+        if attachment_error:
+            _output({"status": "error", "action": "update", "key": args.key, "title": title,
+                      "version": version, "verified": verified, "content_type": content_type,
+                      "code": attachment_error_code, "attachment_error": attachment_error,
+                      "message": "File attachment failed; attachment item was rolled back"})
+            sys.exit(1)
 
         _output({"status": "ok", "action": "update", "key": args.key, "title": title,
                   "version": version, "verified": verified, "content_type": content_type,
@@ -1622,6 +2048,8 @@ def main():
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--limit", type=int, default=25)
     p_search.add_argument("--bibtex", action="store_true", help="Output BibTeX format")
+    p_search.add_argument("--local-db", action="store_true",
+                          help="Search discovered zotero.sqlite files read-only instead of the Zotero API")
 
     # add
     p_add = sub.add_parser("add", help="Add paper to Zotero", parents=[common])
@@ -1648,16 +2076,18 @@ def main():
         p_af.add_argument("--no-collection", action="store_true")
         p_af.add_argument("--force", action="store_true", help="Add even if duplicate DOI found")
         p_af.add_argument("--accept-short", action="store_true", help="Accept 1-2 page PDFs")
-        p_af.add_argument("--no-auto-doi", action="store_true",
-                          help="Skip automatic DOI extraction from PDF")
+        p_af.add_argument("--no-doi-extract", action="store_true", help="Skip automatic DOI extraction from PDF content")
 
     # get
     p_get = sub.add_parser("get", help="Retrieve paper from library", parents=[common])
     p_get.add_argument("query", help="Search query")
     p_get.add_argument("--link", action="store_true", help="Get Google Drive share link")
     p_get.add_argument("--index", type=int, help="Select from multiple results")
+    p_get.add_argument("--no-local-storage", action="store_false", dest="local_storage",
+                       help="Skip local Zotero storage lookup and download from WebDAV")
     p_get.add_argument("--send", nargs=2, metavar=("CHANNEL", "TARGET"),
                         help="Send file after download: --send telegram <chat_id>")
+    p_get.set_defaults(local_storage=True)
 
     # update
     p_update = sub.add_parser("update", help="Update existing item", parents=[common])
@@ -1711,6 +2141,11 @@ def main():
     p_notes.add_argument("--tag", metavar="TAG", default=None, help="Filter notes by tag")
 
     args = parser.parse_args()
+    argv = sys.argv[1:]
+    if "--dry-run" in argv:
+        args.dry_run = True
+    if "--json" in argv:
+        args.json = True
 
     if not args.command:
         parser.print_help()

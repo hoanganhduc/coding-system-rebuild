@@ -15,12 +15,12 @@ import subprocess
 import sys
 import time
 
-WORKSPACE = os.environ.get("OPENCLAW_WORKSPACE", "{{ HOME }}/.openclaw/workspace")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.config import load_config, default_workspace
+
+WORKSPACE = default_workspace()
 ZOT_PY = os.path.join(WORKSPACE, "skills", "zotero", "zot.py")
 DIGEST_BRIDGE = os.path.join(WORKSPACE, "skills", "digest-bridge", "digest_bridge.py")
-
-sys.path.insert(0, os.path.join(WORKSPACE, "skills", "zotero"))
-from lib.config import load_config
 
 
 def main():

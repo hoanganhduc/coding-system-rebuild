@@ -1,21 +1,34 @@
 ---
-name: "zotero"
-description: "Zotero paper search, retrieval, ingest, and collection workflow."
-metadata:
-  short-description: "Zotero paper search, retrieval, ingest, and collection workflow."
+name: zotero
+description: DeepSeek adapter for the Codex Zotero-first paper and library workflow.
 ---
 
-<!-- Managed by ai-agents-skills. Generated target: deepseek. Install mode: reference. -->
+# Zotero
 
-# zotero
+Source Codex skill: `~/.codex/skills/zotero/SKILL.md`
 
-This is a thin adapter for agents that cannot load symlinked skills.
+Runtime command family: `bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh ...`
 
-Canonical skill source:
+Before acting, inspect the source Codex skill.
 
-- `~/ai-agents-skills/canonical/skills/zotero/SKILL.md`
+Common commands:
 
-Before using this skill, read the canonical source file above and follow
-its instructions. Related reference files live next to that source file
-in the same skill directory.
+```bash
+bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh --json get "<query>"
+```
 
+```bash
+bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh add "<DOI or arXiv or URL>" --collection "<name>"
+```
+
+```bash
+bash ~/.codex/runtime/run_skill.sh skills/zotero/run_zot.sh update <key> --item-type manuscript
+```
+
+DeepSeek-specific behavior:
+
+- `/skill zotero` activates this adapter for the next request.
+- Use Zotero first for paper requests.
+- If results are ambiguous, show numbered candidates and wait for the selected index.
+- Use `calibre` second for review tasks needing a document when Zotero does not satisfy the request.
+- Use `getscipapers_requester` only as the external fallback.

@@ -1,8 +1,5 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "alwaysThinkingEnabled": true,
-  "disableSkillShellExecution": true,
-  "effortLevel": "xhigh",
   "env": {
     "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
     "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
@@ -11,132 +8,8 @@
     "DISABLE_TELEMETRY": "1",
     "MAX_THINKING_TOKENS": "63999"
   },
-  "feedbackSurveyRate": 0,
-  "hooks": {
-    "PostCompact": [
-      {
-        "hooks": [
-          {
-            "command": "bash ~/.claude/hooks/post-compact-context.sh",
-            "timeout": 5,
-            "type": "command"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "bash ~/.claude/hooks/self-improvement/error-detector.sh",
-            "timeout": 5,
-            "type": "command"
-          }
-        ],
-        "matcher": "Bash"
-      },
-      {
-        "hooks": [
-          {
-            "command": "node ~/.claude/hooks/context-monitor.js",
-            "timeout": 3,
-            "type": "command"
-          }
-        ],
-        "matcher": "Bash"
-      }
-    ],
-    "PreCompact": [
-      {
-        "hooks": [
-          {
-            "command": "bash ~/.claude/hooks/pre-compact-guard.sh",
-            "timeout": 5,
-            "type": "command"
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "bash ~/.claude/hooks/safety-check.sh",
-            "timeout": 3,
-            "type": "command"
-          }
-        ],
-        "matcher": "Bash"
-      },
-      {
-        "hooks": [
-          {
-            "command": "node ~/.claude/hooks/prompt-guard.js",
-            "timeout": 3,
-            "type": "command"
-          }
-        ],
-        "matcher": "Edit|Write"
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "command": "find /tmp -maxdepth 1 \\( -name .claude-session-titled-\\* -o -name claude-ctx-\\*.json -o -name claude-ctx-alert-\\*.json -o -name claude-statusline-debug-\\*.jsonl -o -name claude-sess-\\*-git-baseline.txt \\) -mtime +1 -delete 2>/dev/null; tail -100 /tmp/claude-compact.log > /tmp/claude-compact.log.tmp 2>/dev/null && mv /tmp/claude-compact.log.tmp /tmp/claude-compact.log 2>/dev/null; true",
-            "timeout": 3,
-            "type": "command"
-          },
-          {
-            "command": "bash ~/.openclaw/workspace/scripts/capture-session-git.sh",
-            "timeout": 5,
-            "type": "command"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "command": "bash ~/.openclaw/workspace/scripts/check-rebuild-plan.sh",
-            "timeout": 10,
-            "type": "command"
-          },
-          {
-            "prompt": "Briefly review all file changes made in this session. Flag any obvious bugs, security issues, or incomplete implementations. If no files were changed, say nothing.",
-            "timeout": 30,
-            "type": "agent"
-          }
-        ]
-      },
-      {
-        "_id": "autoloop-stop",
-        "_managedBy": "ai-agents-skills",
-        "hooks": [
-          {
-            "command": "python3 \"{{ HOME }}/.local/share/ai-agents-skills/runtime/workspace/skills/autonomous-research-loop-runtime/autonomous_research_loop_runtime.py\" hook-check",
-            "type": "command"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "command": "bash ~/.claude/hooks/self-improvement/activator.sh",
-            "timeout": 5,
-            "type": "command"
-          }
-        ]
-      }
-    ]
-  },
   "includeGitInstructions": false,
-  "model": "claude-fable-5[1m]",
   "permissions": {
-    "defaultMode": "bypassPermissions",
     "deny": [
       "Bash(rm -rf /)",
       "Bash(rm -rf /*)",
@@ -165,15 +38,139 @@
       "Write({{ HOME }}/.claude/.credentials.json)",
       "Edit(/**/.env)",
       "Write(/**/.env)"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "hooks": {
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/post-compact-context.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/self-improvement/error-detector.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/context-monitor.js",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/pre-compact-guard.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/safety-check.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/prompt-guard.js",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "find /tmp -maxdepth 1 \\( -name .claude-session-titled-\\* -o -name claude-ctx-\\*.json -o -name claude-ctx-alert-\\*.json -o -name claude-statusline-debug-\\*.jsonl -o -name claude-sess-\\*-git-baseline.txt \\) -mtime +1 -delete 2>/dev/null; tail -100 /tmp/claude-compact.log > /tmp/claude-compact.log.tmp 2>/dev/null && mv /tmp/claude-compact.log.tmp /tmp/claude-compact.log 2>/dev/null; true",
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "bash ~/.openclaw/workspace/scripts/capture-session-git.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.openclaw/workspace/scripts/check-rebuild-plan.sh",
+            "timeout": 10
+          },
+          {
+            "type": "agent",
+            "prompt": "Briefly review all file changes made in this session. Flag any obvious bugs, security issues, or incomplete implementations. If no files were changed, say nothing.",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"{{ HOME }}/.local/share/ai-agents-skills/runtime/workspace/skills/autonomous-research-loop-runtime/autonomous_research_loop_runtime.py\" hook-check"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/self-improvement/activator.sh",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   },
+  "disableSkillShellExecution": true,
+  "statusLine": {
+    "type": "command",
+    "command": "node ~/.claude/hooks/statusline.js",
+    "refreshInterval": 10
+  },
+  "feedbackSurveyRate": 0,
+  "alwaysThinkingEnabled": true,
+  "effortLevel": "xhigh",
+  "tui": "fullscreen",
   "showThinkingSummaries": true,
   "skipDangerousModePermissionPrompt": true,
-  "statusLine": {
-    "command": "node ~/.claude/hooks/statusline.js",
-    "refreshInterval": 10,
-    "type": "command"
-  },
-  "theme": "dark",
-  "tui": "fullscreen"
+  "theme": "dark"
 }

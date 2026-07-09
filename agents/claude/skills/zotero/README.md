@@ -44,13 +44,19 @@ zot clean-staging
 ## Architecture
 
 ```
-DOI/arXiv/ISBN/URL
-  → Translation Server (metadata)
+DOI/arXiv/ISBN
+  → Translation Server when reachable
+  → otherwise direct DOI/arXiv/ISBN fallback
+Generic URL
+  → WSL helper when configured and available
+  → otherwise Translation Server /web endpoint
+Resolved metadata
   → Duplicate check (DOI-only)
   → PDF download chain (getscipapers → Semantic Scholar → arXiv)
   → PDF verification (magic bytes, page count, aspect ratio, title match)
   → ZotFile rename ({Author}_{Year}_{Title} [Type].pdf)
   → Create attachment item (Zotero API)
+  → Store file-sync metadata (md5, mtime)
   → Zip + upload to WebDAV
   → Zotero desktop syncs on next refresh
 ```
@@ -61,7 +67,7 @@ DOI/arXiv/ISBN/URL
 |-----------|---------|
 | `zot.py` | CLI entry point |
 | `lib/config.py` | Config loader (SecretRef-aware) |
-| `lib/metadata.py` | Translation Server client (auto-detect DOI/arXiv/ISBN/URL) |
+| `lib/metadata.py` | Metadata resolver with Translation Server, WSL URL, and direct DOI/arXiv/ISBN fallback paths |
 | `lib/zotero_client.py` | pyzotero wrapper (exponential backoff on 429/5xx) |
 | `lib/downloader.py` | PDF download chain (branched by input type) |
 | `lib/verifier.py` | PDF validation (reject stubs, slides, wrong papers) |
@@ -73,7 +79,7 @@ DOI/arXiv/ISBN/URL
 
 ## Configuration
 
-**Secrets** (`~/.openclaw/secrets.json`):
+**Secrets** (`OPENCLAW_SECRETS_FILE` or `AAS_SECRETS_FILE`; by default the runtime looks for `.secrets.json` in the installed runtime workspace):
 - `ZOTERO_API_KEY` — from https://www.zotero.org/settings/keys
 - `WEBDAV_PASSWORD` — WebDAV apps password
 - `GDRIVE_CREDENTIALS` — Google service account JSON string
@@ -83,16 +89,37 @@ DOI/arXiv/ISBN/URL
 - `webdav_url`, `webdav_user` — WebDAV endpoint
 - `gdrive_folder_id` — Google Drive folder for Zotero PDFs
 - `zotfile_pattern` — PDF rename pattern (default: `{%a_}{%y_}{%t} {[%T]}`)
-- `translation_server` — Translation Server URL (default: `http://localhost:1969`)
+- `translation_server` — Translation Server URL for DOI/arXiv/ISBN and generic URL metadata
+- `wsl_translation_distro` — WSL distro used for URL metadata fallback (default: `Ubuntu-24.04`)
+- `wsl_translation_repo` — WSL-local translation-server source checkout for URL metadata fallback (default: `~/zotero-translation-server`)
+
+## Dependency behavior
+
+`lib/metadata.py` can be imported and can detect input types without
+`requests`, which keeps offline and unit checks lightweight. Live metadata
+lookups for DOI/arXiv/ISBN/URL still require `requests` from
+`requirements.txt`. CLI startup imports `pyzotero` through
+`lib/zotero_client.py`, so operational CLI use requires the runtime
+dependencies to be installed.
+
+## Windows runtime note
+
+For generic URLs, the runtime tries the WSL helper route first when it is
+available, then falls back to the configured Translation Server `/web` endpoint.
+The WSL route uses `scripts/wsl_url_translate.sh` and a WSL-local source checkout
+at `~/zotero-translation-server`.
+
+The Docker-based translation-server path in this skill directory is kept only as a legacy/optional
+path. It is not required for the Windows runtime wrapper.
 
 ## Testing
 
 ```bash
-# Unit + mocked tests (no credentials needed)
-python3 -m pytest tests/ -v
+# From the repository root: unit + mocked tests (no credentials needed)
+python3 -m unittest tests.test_zotero_webdav_metadata -v
 
-# Live integration tests (requires credentials)
-python3 -m pytest tests/ --live -v
+# Full repository test suite
+make test
 ```
 
 ## Cron Jobs
