@@ -1,6 +1,6 @@
 personality = "pragmatic"
-model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "max"
 approvals_reviewer = "user"
 plan_mode_reasoning_effort = "xhigh"
 
@@ -31,6 +31,7 @@ enabled = true
 
 [tui.model_availability_nux]
 "gpt-5.5" = 4
+"gpt-5.6-sol" = 1
 
 [hooks.state]
 

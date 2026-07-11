@@ -98,6 +98,15 @@ launch_socks(){
 force=""
 case "${1:-}" in
   -h|--help|help) usage; exit 0 ;;
+  inspect|--version|version)
+    # region-independent, local-only grok subcommands: run bare grok, no tunnel
+    # (so `grok-remote inspect --json` works even with no home PC awake).
+    exec "$GROK_BIN" "$@" ;;
+  --)
+    # everything after `--` is passed verbatim to grok THROUGH the tunnel.
+    shift
+    tunnel_up || pick_and_connect || { no_host_help; exit 1; }
+    launch_socks "$@" ;;
   status)
     if tunnel_up; then . "$STATE"; ok "up via $LABEL ($DEST)"; log "egress IP: $(egress_ip)";
     else log "tunnel down"; fi; exit 0 ;;

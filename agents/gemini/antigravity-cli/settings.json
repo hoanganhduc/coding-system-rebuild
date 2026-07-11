@@ -1,1 +1,6 @@
-{}
+{
+  "model": "Gemini 3.1 Pro (High)",
+  "trustedWorkspaces": [
+    "{{ HOME }}"
+  ]
+}

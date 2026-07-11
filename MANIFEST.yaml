@@ -186,7 +186,7 @@ entries:
     root: .codex
     match: ["AGENTS.md.bak-*", "config.toml.bak-*", ".backup", ".personality_migration",
             ".tmp", "cache", "goals_1.sqlite*", "history.jsonl", "installation_id",
-            "log", "logs_2.sqlite*", "memories", "memories_1.sqlite*",
+            "log", "logs_2.sqlite*", "mcp-oauth-locks", "memories", "memories_1.sqlite*",
             "models_cache.json", "runs", "runtime", "sessions", "shell_snapshots",
             "state", "state_5.sqlite*", "tmp"]
     class: exclude-generated

@@ -157,3 +157,9 @@ export PATH=$PATH:{{ HOME }}/.npm-global/bin
 export PATH="{{ HOME }}/.local/bin:$PATH"
 # coding-system: personal/secret exports live in ~/.secrets.env (restored from the encrypted archive)
 [ -f ~/.secrets.env ] && . ~/.secrets.env
+
+
+# >>> grok installer >>>
+export PATH="$HOME/.grok/bin:$PATH"
+[[ -r "$HOME/.grok/completions/bash/grok.bash" ]] && source "$HOME/.grok/completions/bash/grok.bash"
+# <<< grok installer <<<
