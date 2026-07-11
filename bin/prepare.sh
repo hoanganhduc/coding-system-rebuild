@@ -4,7 +4,7 @@
 #
 # Toggles: SKIP_APT SKIP_LATEX SKIP_CALIBRE SKIP_CHROMIUM SKIP_TAILSCALE SKIP_NODE
 #          SKIP_NPM_GLOBALS SKIP_PIPX SKIP_RUST SKIP_BUN SKIP_LEAN SKIP_MODAL
-#          SKIP_DOCKER SKIP_DOCKER_IMAGES
+#          SKIP_DOCKER SKIP_DOCKER_IMAGES SKIP_GROK
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG="$REPO/system/packages"
@@ -67,6 +67,13 @@ if ! skip SKIP_NPM_GLOBALS; then
       npm install -g "$name@$ver"
     fi
   done < "$PKG/npm-globals.txt"
+fi
+
+step "grok CLI (xAI Grok Build TUI — official installer, not in package repos)"
+if ! skip SKIP_GROK; then
+  # captured at 0.2.93; the installer pulls latest and grok self-updates thereafter
+  command -v grok >/dev/null || [[ -x "$HOME/.grok/bin/grok" ]] || \
+    curl -fsSL https://x.ai/cli/install.sh | bash
 fi
 
 step "pipx tools"

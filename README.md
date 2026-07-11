@@ -10,7 +10,7 @@
 
 Backup/restore system for a complete multi-agent coding/research machine:
 **Claude Code, Codex, GitHub Copilot CLI, OpenCode, CodeWhale + DeepSeek CLI,
-Gemini/AntiGravity CLI, and OpenClaw**, plus the system layer they run on
+Gemini/AntiGravity CLI, Grok, and OpenClaw**, plus the system layer they run on
 (npm globals, Python environments, Docker images, systemd user services, cron,
 shell environment, TeX Live, Calibre, Lean/elan, Rust/Bun toolchains).
 

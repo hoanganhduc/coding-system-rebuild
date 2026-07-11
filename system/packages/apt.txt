@@ -16,6 +16,8 @@ git
 make
 docker.io
 gh
+# grok-proxy VPN Gate fallback (network-namespace-isolated OpenVPN to a VN exit):
+openvpn
 # xtradeb PPA required for the next three on stock Ubuntu 24.04 (see prepare.sh):
 chromium
 chromium-driver

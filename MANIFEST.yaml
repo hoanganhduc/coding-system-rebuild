@@ -32,9 +32,11 @@ roots:
   - .codewhale
   - .deepseek
   - .gemini
+  - .grok
   - .ai-agents-skills
   - .config/systemd/user
   - .local/bin
+  - grok-proxy
 
 entries:
   # ---------------------------------------------------------------- HOME extras
@@ -330,6 +332,39 @@ entries:
     class: exclude-generated
     note: gemini CLI project registry, volatile runtime state like config/projects/
 
+  # ---------------------------------------------------------------- .grok (xAI Grok CLI)
+  - id: grok-config
+    root: .grok
+    match: ["config.toml"]
+    class: public-template
+    dest: agents/grok/config.toml.template
+    template: [home-substitute]
+    note: CLI settings (internal installer + xAI marketplace source); no secrets
+
+  - id: grok-auth
+    root: .grok
+    match: ["auth.json"]
+    class: private-archive
+    note: >
+      OIDC session (grok login). Deliberately NO emit-keys: the single top-level
+      key is the issuer + user-uuid, a personal identifier — keep it out of the
+      public tree. Rides in the secrets zip; re-auth with `grok` if absent.
+
+  - id: grok-exclude
+    root: .grok
+    match: [".config-init.lock", ".metadata_version", "CHANGELOG.json",
+            "CHANGELOG.md", "README.md", "active_sessions.json",
+            "active_sessions.lock", "agent_id", "auth.json.lock", "bin",
+            "bundled", "completions", "docs", "downloads", "logs",
+            "managed_config.lock", "marketplace-cache", "models_cache.json",
+            "projects", "sessions", "skills", "slash-mru.json", "tip_cursor.json",
+            "upload_queue", "version.json"]
+    class: exclude-generated
+    note: >
+      bin (ELF), bundled/completions/docs/skills are distribution content the
+      x.ai installer re-fetches; the rest is per-run state. If the user ever
+      authors custom grok skills under skills/, capture them in a new entry.
+
   # ---------------------------------------------------------------- ai-agents-skills state home
   - id: aas-state-exclude
     root: .ai-agents-skills
@@ -375,3 +410,32 @@ entries:
       pipx symlinks (aider), ELF binaries (agy, deepseek, deepseek-tui — per-arch
       reinstall), and the zot symlink (recorded in symlinks.tsv). Entries above
       take precedence; sync matches in manifest order.
+      NB: the `grok` symlink (-> .grok/bin/grok, ELF) is claimed here and NOT
+      recorded/copied — the x.ai installer recreates it (see prepare.sh).
+
+  # ---------------------------------------------------------------- grok-proxy toolkit
+  - id: grokproxy-scripts
+    root: grok-proxy
+    match: ["grok-remote", "vpngate-connect.sh", "dist"]
+    class: public-copy
+    dest_dir: system/grok-proxy
+    note: >
+      SOCKS-over-Tailscale egress wrapper + VPN Gate network-namespace fallback +
+      the Windows/Arch SSH-server setup scripts. Reusable and topology-generic
+      (only the 100.64.0.0/10 CGNAT range appears); the dist scripts embed the
+      proxy PUBLIC key, which is safe to publish.
+
+  - id: grokproxy-private
+    root: grok-proxy
+    match: ["README.md", "hosts.conf", "id_grokproxy", "id_grokproxy.pub"]
+    class: private-archive
+    note: >
+      README + hosts.conf carry specific tailnet IPs / usernames and the personal
+      topology; id_grokproxy is the dedicated SSH PRIVATE key. All ride in the
+      secrets zip (secrets-manifest), never the public tree.
+
+  - id: grokproxy-exclude
+    root: grok-proxy
+    match: [".tunnel.*", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*"]
+    class: exclude-generated
+    note: SSH control sockets + tunnel/leader runtime state

@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# grok-remote — run the grok CLI through a SOCKS proxy that egresses from one of
+# your home Tailscale machines (Option A). grok.com then sees your home region and
+# offers region-gated models such as grok-4.5.
+#
+#   grok-remote [grok-args...]    bring up a tunnel and launch grok through it
+#   grok-remote status           show tunnel state + the public IP grok will use
+#   grok-remote ip               print that egress public IP and exit
+#   grok-remote stop             tear the tunnel down
+#   grok-remote --host LABEL ...  force a specific host from hosts.conf
+#   grok-remote --vpn [args...]   skip home PCs, use the VPN Gate fallback (needs sudo)
+#
+# The proxy is an ordinary `ssh -D` SOCKS tunnel; the home PC only has to run an
+# SSH server (see dist/setup-grok-proxy-*.{bat,sh}).
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONF="$DIR/hosts.conf"
+KEY="$DIR/id_grokproxy"
+STATE="$DIR/.tunnel.state"
+CTL="$DIR/.tunnel.ctl"
+LEADER="$DIR/.grok-leader.sock"        # dedicated leader so the proxy env always applies
+PORT="${GROK_PROXY_PORT:-1080}"
+GROK_BIN="${GROK_BIN:-$HOME/.local/bin/grok}"
+NOPROXY="localhost,127.0.0.1,::1,100.64.0.0/10,.ts.net"
+
+c_cyan=$'\033[36m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_rst=$'\033[0m'
+log(){ printf '%s[grok-proxy]%s %s\n' "$c_cyan" "$c_rst" "$*" >&2; }
+ok(){  printf '%s[grok-proxy]%s %s\n' "$c_grn"  "$c_rst" "$*" >&2; }
+die(){ printf '%s[grok-proxy]%s %s\n' "$c_red"  "$c_rst" "$*" >&2; exit 1; }
+
+usage(){ sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+# Reachable TCP port test that needs no extra tools (nc is absent on this VM).
+tcp_ok(){ timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; }
+
+tunnel_up(){
+  [[ -S "$CTL" && -f "$STATE" ]] || return 1
+  # shellcheck disable=SC1090
+  . "$STATE"
+  ssh -S "$CTL" -O check -p "${SPORT:-22}" "$DEST" >/dev/null 2>&1
+}
+
+pick_and_connect(){
+  local force="${1:-}" label ip user sport
+  [[ -f "$CONF" ]] || die "missing $CONF"
+  while read -r label ip user sport; do
+    [[ -z "${label:-}" || "$label" == \#* ]] && continue
+    [[ -n "$force" && "$label" != "$force" ]] && continue
+    [[ "$user" == CHANGE_ME* ]] && { log "skip '$label' — set its ssh_user in hosts.conf"; continue; }
+    : "${sport:=22}"
+    log "trying $label ($user@$ip:$sport) ..."
+    if ! tcp_ok "$ip" "$sport"; then log "$label not reachable over Tailscale"; continue; fi
+    log "$label reachable — opening SOCKS proxy on 127.0.0.1:$PORT"
+    rm -f "$CTL"
+    if ssh -M -S "$CTL" -fnN \
+         -o ControlPersist=300 \
+         -o ExitOnForwardFailure=yes \
+         -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+         -o StrictHostKeyChecking=accept-new \
+         -o ConnectTimeout=8 -o BatchMode=yes \
+         -i "$KEY" -p "$sport" -D "127.0.0.1:$PORT" "$user@$ip"; then
+      printf 'DEST=%q\nSPORT=%q\nLABEL=%q\n' "$user@$ip" "$sport" "$label" > "$STATE"
+      ok "tunnel up via $label"
+      return 0
+    fi
+    log "ssh to $label failed — is this VM's key authorized there yet?"
+  done < "$CONF"
+  return 1
+}
+
+egress_ip(){ ALL_PROXY="socks5h://127.0.0.1:$PORT" curl -s --max-time 20 https://api.ipify.org || true; }
+
+cmd_stop(){
+  if [[ -S "$CTL" && -f "$STATE" ]]; then
+    # shellcheck disable=SC1090
+    . "$STATE"; ssh -S "$CTL" -O exit -p "${SPORT:-22}" "$DEST" >/dev/null 2>&1 || true
+  fi
+  rm -f "$CTL" "$STATE"; ok "tunnel stopped"
+}
+
+no_host_help(){ cat >&2 <<EOF
+${c_red}[grok-proxy]${c_rst} No home PC reachable over Tailscale.
+  - Wake the PC and confirm 'tailscale status' shows it online.
+  - Run the setup script on it and put the printed username in:
+      $CONF
+  - Or use the VPN Gate fallback:  grok-remote --vpn
+EOF
+}
+
+launch_socks(){
+  log "egress IP: $(egress_ip)   (this is what grok.com will see)"
+  log "launching grok through 127.0.0.1:$PORT"
+  ALL_PROXY="socks5h://127.0.0.1:$PORT" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
+    exec "$GROK_BIN" --leader-socket "$LEADER" "$@"
+}
+
+force=""
+case "${1:-}" in
+  -h|--help|help) usage; exit 0 ;;
+  status)
+    if tunnel_up; then . "$STATE"; ok "up via $LABEL ($DEST)"; log "egress IP: $(egress_ip)";
+    else log "tunnel down"; fi; exit 0 ;;
+  ip)  tunnel_up || pick_and_connect || die "no egress available"; egress_ip; echo; exit 0 ;;
+  stop) cmd_stop; exit 0 ;;
+  --vpn) shift
+         exec sudo "$DIR/vpngate-connect.sh" run -- \
+              "$GROK_BIN" --leader-socket "$HOME/.grok/leader-vpngate.sock" "$@" ;;
+  --host) force="${2:-}"; shift 2 || true ;;
+esac
+
+tunnel_up || pick_and_connect "$force" || { no_host_help; exit 1; }
+launch_socks "$@"
