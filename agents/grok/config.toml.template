@@ -7,3 +7,12 @@ official_marketplace_auto_installed = true
 [[marketplace.sources]]
 name = "xAI Official"
 git = "https://github.com/xai-org/plugin-marketplace.git"
+
+[models]
+default = "grok-build"
+
+[ui]
+max_thoughts_width = 120
+fork_secondary_model = "grok-build"
+yolo = false
+compact_mode = false

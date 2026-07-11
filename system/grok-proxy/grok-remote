@@ -14,7 +14,10 @@
 # SSH server (see dist/setup-grok-proxy-*.{bat,sh}).
 set -euo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks so DIR is the real grok-proxy dir even when invoked via a PATH
+# symlink (e.g. ~/.local/bin/grok-remote -> ~/grok-proxy/grok-remote).
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+DIR="$(cd "$(dirname "$SELF")" && pwd)"
 CONF="$DIR/hosts.conf"
 KEY="$DIR/id_grokproxy"
 STATE="$DIR/.tunnel.state"

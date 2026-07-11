@@ -352,18 +352,17 @@ entries:
 
   - id: grok-exclude
     root: .grok
-    match: [".config-init.lock", ".metadata_version", "CHANGELOG.json",
-            "CHANGELOG.md", "README.md", "active_sessions.json",
-            "active_sessions.lock", "agent_id", "auth.json.lock", "bin",
-            "bundled", "completions", "docs", "downloads", "logs",
-            "managed_config.lock", "marketplace-cache", "models_cache.json",
-            "projects", "sessions", "skills", "slash-mru.json", "tip_cursor.json",
-            "upload_queue", "version.json"]
+    match: ["*"]
     class: exclude-generated
     note: >
-      bin (ELF), bundled/completions/docs/skills are distribution content the
-      x.ai installer re-fetches; the rest is per-run state. If the user ever
-      authors custom grok skills under skills/, capture them in a new entry.
+      catch-all LAST for the .grok root: grok-config (config.toml) and grok-auth
+      (auth.json) match first, so this sweeps everything else — x.ai-installer
+      distribution content (bin ELF, bundled/completions/docs/skills, that the
+      installer re-fetches) and churny per-run state (sessions, marketplace-cache,
+      campaigns_state.json{,.lock}, worktrees.db, installed-plugins, *.lock, ...),
+      none of it restore material. A catch-all (like the .local/bin root) avoids
+      fail-closing the backup every time grok writes a new state file. If the user
+      ever authors custom grok skills, add a specific entry BEFORE this one.
 
   # ---------------------------------------------------------------- ai-agents-skills state home
   - id: aas-state-exclude
