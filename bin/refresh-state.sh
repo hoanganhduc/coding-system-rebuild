@@ -51,8 +51,13 @@ done
 
 echo "-- docker image drift check (docker-images.txt is hand-curated)"
 if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+  host_arch="$(uname -m)"; case "$host_arch" in aarch64|arm64) host_arch=arm64;; x86_64|amd64) host_arch=amd64;; esac
   while IFS='|' read -r img cond; do
     [[ -z "$img" || "$img" == \#* ]] && continue
+    cond="${cond//[[:space:]]/}"
+    # Pins are multi-arch; only flag the one matching this host's arch (a $HOST_arch-only VM will
+    # legitimately not have the other-arch image).
+    [[ -n "$cond" && "$cond" != any && "$cond" != "$host_arch" ]] && continue
     docker image inspect "$img" >/dev/null 2>&1 || echo "WARN: pinned image not present locally: $img"
   done < "$PKG/docker-images.txt"
 fi

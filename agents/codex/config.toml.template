@@ -8,6 +8,9 @@ plan_mode_reasoning_effort = "xhigh"
 hooks = true
 multi_agent = true
 
+[shell_environment_policy]
+exclude = ["AAS_ALLOW_EXTERNAL_SECRETS_FILE", "AAS_SECRETS_FILE"]
+
 [mcp_servers.openaiDeveloperDocs]
 url = "https://developers.openai.com/mcp"
 

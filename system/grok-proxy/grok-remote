@@ -1,125 +1,323 @@
 #!/usr/bin/env bash
-# grok-remote — run the grok CLI through a SOCKS proxy that egresses from one of
-# your home Tailscale machines (Option A). grok.com then sees your home region and
-# offers region-gated models such as grok-4.5.
+# grok-remote — run the grok CLI through an egress that actually offers the model you want.
 #
-#   grok-remote [grok-args...]    bring up a tunnel and launch grok through it
-#   grok-remote status           show tunnel state + the public IP grok will use
-#   grok-remote ip               print that egress public IP and exit
-#   grok-remote stop             tear the tunnel down
-#   grok-remote --host LABEL ...  force a specific host from hosts.conf
-#   grok-remote --vpn [args...]   skip home PCs, use the VPN Gate fallback (needs sudo)
+# grok.com gates models on the region of the requesting IP, and this VM sits in a blocked one.
+# grok-remote finds an egress that unlocks models this VM cannot otherwise see, launches grok on
+# the model you chose, and holds the egress up for as long as grok runs, failing over underneath
+# the session when one dies:
 #
-# The proxy is an ordinary `ssh -D` SOCKS tunnel; the home PC only has to run an
-# SSH server (see dist/setup-grok-proxy-*.{bat,sh}).
-set -euo pipefail
+#     home PC over Tailscale  >  VPN Gate server  >  next VPN Gate server ...   [direct = fallback]
+#
+#   grok-remote [grok-args...]   pick an egress, launch grok through it, supervise it
+#   grok-remote status           active rung, the IP grok.com sees, and the remembered model
+#   grok-remote ip               print that egress IP and exit
+#   grok-remote stop             tear the egress down
+#   grok-remote --host LABEL     force one home PC from hosts.conf
+#   grok-remote --vpn            skip the home PCs; start on VPN Gate
+#   grok-remote --no-direct      never fall back to the direct connection
+#   grok-remote --pick-model     re-open the model menu even if nothing has changed
+#
+# No model name is hardcoded: a rung is accepted when it offers something the direct connection
+# does not. Your model choice is remembered, and you are only asked again when the egress starts
+# offering something new. The ladder, the probes and the watchdog live in egress.sh; socks-netns.py
+# lets the VPN rung bind the same local SOCKS port the ssh rung uses, which is what makes a rung
+# swappable underneath a running grok.
+set -uo pipefail
 
-# Resolve symlinks so DIR is the real grok-proxy dir even when invoked via a PATH
-# symlink (e.g. ~/.local/bin/grok-remote -> ~/grok-proxy/grok-remote).
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 DIR="$(cd "$(dirname "$SELF")" && pwd)"
-CONF="$DIR/hosts.conf"
-KEY="$DIR/id_grokproxy"
-STATE="$DIR/.tunnel.state"
-CTL="$DIR/.tunnel.ctl"
-LEADER="$DIR/.grok-leader.sock"        # dedicated leader so the proxy env always applies
-PORT="${GROK_PROXY_PORT:-1080}"
-GROK_BIN="${GROK_BIN:-$HOME/.local/bin/grok}"
-NOPROXY="localhost,127.0.0.1,::1,100.64.0.0/10,.ts.net"
+# shellcheck source=egress.sh
+. "$DIR/egress.sh"
 
-c_cyan=$'\033[36m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_rst=$'\033[0m'
-log(){ printf '%s[grok-proxy]%s %s\n' "$c_cyan" "$c_rst" "$*" >&2; }
-ok(){  printf '%s[grok-proxy]%s %s\n' "$c_grn"  "$c_rst" "$*" >&2; }
-die(){ printf '%s[grok-proxy]%s %s\n' "$c_red"  "$c_rst" "$*" >&2; exit 1; }
+LEADER="$DIR/.grok-leader.sock"   # dedicated leader, so the proxy env always applies
+CHOICE="$DIR/.model.choice"       # the model you last settled on (empty = let grok decide)
+SEEN="$DIR/.model.seen"           # the unlocked set you were last offered
+FORCE_PICK=0
 
-usage(){ sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage(){ sed -n '2,24p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
-# Reachable TCP port test that needs no extra tools (nc is absent on this VM).
-tcp_ok(){ timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; }
-
-tunnel_up(){
-  [[ -S "$CTL" && -f "$STATE" ]] || return 1
-  # shellcheck disable=SC1090
-  . "$STATE"
-  ssh -S "$CTL" -O check -p "${SPORT:-22}" "$DEST" >/dev/null 2>&1
-}
-
-pick_and_connect(){
-  local force="${1:-}" label ip user sport
-  [[ -f "$CONF" ]] || die "missing $CONF"
-  while read -r label ip user sport; do
-    [[ -z "${label:-}" || "$label" == \#* ]] && continue
-    [[ -n "$force" && "$label" != "$force" ]] && continue
-    [[ "$user" == CHANGE_ME* ]] && { log "skip '$label' — set its ssh_user in hosts.conf"; continue; }
-    : "${sport:=22}"
-    log "trying $label ($user@$ip:$sport) ..."
-    if ! tcp_ok "$ip" "$sport"; then log "$label not reachable over Tailscale"; continue; fi
-    log "$label reachable — opening SOCKS proxy on 127.0.0.1:$PORT"
-    rm -f "$CTL"
-    if ssh -M -S "$CTL" -fnN \
-         -o ControlPersist=300 \
-         -o ExitOnForwardFailure=yes \
-         -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-         -o StrictHostKeyChecking=accept-new \
-         -o ConnectTimeout=8 -o BatchMode=yes \
-         -i "$KEY" -p "$sport" -D "127.0.0.1:$PORT" "$user@$ip"; then
-      printf 'DEST=%q\nSPORT=%q\nLABEL=%q\n' "$user@$ip" "$sport" "$label" > "$STATE"
-      ok "tunnel up via $label"
-      return 0
-    fi
-    log "ssh to $label failed — is this VM's key authorized there yet?"
-  done < "$CONF"
-  return 1
-}
-
-egress_ip(){ ALL_PROXY="socks5h://127.0.0.1:$PORT" curl -s --max-time 20 https://api.ipify.org || true; }
-
-cmd_stop(){
-  if [[ -S "$CTL" && -f "$STATE" ]]; then
-    # shellcheck disable=SC1090
-    . "$STATE"; ssh -S "$CTL" -O exit -p "${SPORT:-22}" "$DEST" >/dev/null 2>&1 || true
-  fi
-  rm -f "$CTL" "$STATE"; ok "tunnel stopped"
-}
-
-no_host_help(){ cat >&2 <<EOF
-${c_red}[grok-proxy]${c_rst} No home PC reachable over Tailscale.
-  - Wake the PC and confirm 'tailscale status' shows it online.
-  - Run the setup script on it and put the printed username in:
-      $CONF
-  - Or use the VPN Gate fallback:  grok-remote --vpn
+no_egress_help(){ cat >&2 <<EOF
+${c_red}[egress]${c_rst} No egress unlocks anything beyond what this VM already sees.
+  - Wake a home PC, confirm 'tailscale status' shows it online, and make sure its
+    ssh_user is filled in in $CONF
+  - Or force the VPN Gate fallback:   grok-remote --vpn
+  - Or accept the direct connection:  drop --no-direct
 EOF
 }
 
-launch_socks(){
-  log "egress IP: $(egress_ip)   (this is what grok.com will see)"
-  log "launching grok through 127.0.0.1:$PORT"
-  ALL_PROXY="socks5h://127.0.0.1:$PORT" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
-    exec "$GROK_BIN" --leader-socket "$LEADER" "$@"
+proxy_for(){ [[ "$1" == direct ]] && printf '' || printf '%s' "$PROXY"; }
+
+cmd_status(){
+  local r; r="$(active_rung)"
+  [[ -z "$r" ]] && { eg_log "no egress selected"; return 0; }
+  if rung_alive "$r"; then
+    eg_ok "active rung: $r"
+    eg_log "grok.com sees: $(egress_ip "$(proxy_for "$r")")"
+    [[ -s "$UNLOCKED" && "$r" != direct ]] && eg_log "unlocked: $(paste -sd, "$UNLOCKED")"
+    [[ -s "$CHOICE" ]] && eg_log "remembered model: $(cat "$CHOICE")   (--pick-model to change)"
+  else
+    eg_warn "active rung: $r (DOWN — the next grok-remote run will rebuild it)"
+  fi
 }
 
-force=""
-case "${1:-}" in
-  -h|--help|help) usage; exit 0 ;;
-  inspect|--version|version)
-    # region-independent, local-only grok subcommands: run bare grok, no tunnel
-    # (so `grok-remote inspect --json` works even with no home PC awake).
-    exec "$GROK_BIN" "$@" ;;
-  --)
-    # everything after `--` is passed verbatim to grok THROUGH the tunnel.
-    shift
-    tunnel_up || pick_and_connect || { no_host_help; exit 1; }
-    launch_socks "$@" ;;
-  status)
-    if tunnel_up; then . "$STATE"; ok "up via $LABEL ($DEST)"; log "egress IP: $(egress_ip)";
-    else log "tunnel down"; fi; exit 0 ;;
-  ip)  tunnel_up || pick_and_connect || die "no egress available"; egress_ip; echo; exit 0 ;;
-  stop) cmd_stop; exit 0 ;;
-  --vpn) shift
-         exec sudo "$DIR/vpngate-connect.sh" run -- \
-              "$GROK_BIN" --leader-socket "$HOME/.grok/leader-vpngate.sock" "$@" ;;
-  --host) force="${2:-}"; shift 2 || true ;;
-esac
+# ---------------------------------------------------------------- model selection
 
-tunnel_up || pick_and_connect "$force" || { no_host_help; exit 1; }
-launch_socks "$@"
+grok_subcommands(){ "$GROK_BIN" --help 2>/dev/null | awk '/^Commands:/{f=1;next} f&&/^  [a-z]/{print $1}'; }
+is_subcommand(){ [[ -n "${1:-}" ]] && grok_subcommands | grep -qx -- "$1"; }
+
+caller_picked_model(){
+  local a
+  for a in "$@"; do
+    case "$a" in -m|--model|--model=*|-m?*) return 0 ;; esac
+  done
+  return 1
+}
+
+caller_model(){
+  local a prev=""
+  for a in "$@"; do
+    case "$prev" in -m|--model) printf '%s' "$a"; return 0 ;; esac
+    case "$a" in
+      --model=*) printf '%s' "${a#--model=}"; return 0 ;;
+      -m?*)      printf '%s' "${a#-m}"; return 0 ;;
+    esac
+    prev="$a"
+  done
+}
+
+# Only ever block on a human when there is a human there. Headless runs must not hang on a prompt.
+interactive(){
+  [[ "${GROK_MODEL_PROMPT:-1}" == 1 ]] || return 1
+  [[ -t 0 ]] || return 1
+  local a
+  for a in "$@"; do
+    case "$a" in -p|-p?*|--single|--single=*|--prompt-file|--prompt-file=*|--prompt-json|--prompt-json=*) return 1 ;; esac
+  done
+  return 0
+}
+
+# The menu. Your current choice is the default, so Enter keeps it.
+pick_model(){
+  local -a opts=("$@")
+  local cur i def=1 ans
+  cur="$(cat "$CHOICE" 2>/dev/null)"
+  for i in "${!opts[@]}"; do [[ "${opts[$i]}" == "$cur" ]] && def=$((i+1)); done
+  {
+    printf '\n%s[egress]%s this egress unlocks models you cannot get otherwise:\n' "$c_cyan" "$c_rst"
+    for i in "${!opts[@]}"; do
+      printf '   %d) %s%s\n' "$((i+1))" "${opts[$i]}" "$([[ "${opts[$i]}" == "$cur" ]] && printf ' (current)')"
+    done
+    printf '   0) let grok decide (%s)\n' "$(grok_default_model)"
+    printf ' pick [%d]: ' "$def"
+  } >&2
+  read -r ans || ans=""
+  [[ -z "$ans" ]] && ans="$def"
+  if [[ "$ans" == 0 ]]; then : > "$CHOICE"; return 0; fi
+  if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= ${#opts[@]} )); then
+    printf '%s\n' "${opts[$((ans-1))]}" > "$CHOICE"; return 0
+  fi
+  eg_warn "not a valid choice — leaving the model to grok"
+  : > "$CHOICE"
+}
+
+grok_default_model(){ sed -n 's/^default *= *"\(.*\)"/\1/p' "$HOME/.grok/config.toml" 2>/dev/null | head -1; }
+
+# grok keeps using its own default even when a rung has unlocked a better model, so hand it the one
+# you want explicitly. The choice is remembered: you are asked again only when this egress starts
+# offering something it has never offered before (or you ask for the menu with --pick-model).
+# Ranking the models for you is not an option -- any numeric sort would crown grok-420-computer-v0.
+model_args(){
+  local rung="$1"; shift
+  local -a unlocked=() new=()
+  local choice m
+
+  [[ "$rung" == direct ]] && return 0
+  [[ -s "$UNLOCKED" ]] || return 0
+  mapfile -t unlocked < "$UNLOCKED"
+
+  # An explicit -m wins, and is remembered: `grok-remote -m X` is also how you change your mind.
+  if caller_picked_model "$@"; then
+    m="$(caller_model "$@")"
+    if [[ -n "$m" ]]; then
+      printf '%s\n' "$m" > "$CHOICE"
+      # Record what this egress currently offers as already seen, so a later interactive run does not
+      # re-open the menu just because you named a model on the command line this time.
+      printf '%s\n' "${unlocked[@]}" | sort -u > "$SEEN"
+      eg_log "model: $m (yours — remembered for next time)" >&2
+    else
+      # A bare -m with no id: nothing to pin or remember — let grok fall back to its own default.
+      eg_warn "-m without a model id — letting grok choose" >&2
+    fi
+    return 0
+  fi
+  is_subcommand "${1:-}" && return 0
+
+  choice="$(cat "$CHOICE" 2>/dev/null)"
+  # A remembered choice only counts while this egress still offers it.
+  if [[ -n "$choice" ]] && ! printf '%s\n' "${unlocked[@]}" | grep -qxF -- "$choice"; then
+    eg_warn "the model you chose ($choice) is not offered here — asking again"
+    choice=""; rm -f "$SEEN"
+  fi
+
+  mapfile -t new < <(comm -23 <(printf '%s\n' "${unlocked[@]}" | sort -u) <(sort -u "$SEEN" 2>/dev/null))
+
+  if (( ${#new[@]} > 0 || FORCE_PICK )); then
+    if (( ${#unlocked[@]} == 1 )); then
+      choice="${unlocked[0]}"                       # unambiguous: nothing to ask
+      printf '%s\n' "$choice" > "$CHOICE"
+      printf '%s\n' "${unlocked[@]}" | sort -u > "$SEEN"
+    elif interactive "$@"; then
+      (( ${#new[@]} > 0 && ${#new[@]} < ${#unlocked[@]} )) \
+        && eg_ok "new since last time: $(printf '%s,' "${new[@]}" | sed 's/,$//')"
+      pick_model "${unlocked[@]}"
+      printf '%s\n' "${unlocked[@]}" | sort -u > "$SEEN"
+      choice="$(cat "$CHOICE" 2>/dev/null)"
+    else
+      # Headless: never block on a prompt. Keep the model you already chose if this egress still
+      # offers it -- a new model appearing must not silently drop you back to grok's default. Do
+      # not record these as seen either: the next interactive run still owes you the menu.
+      if [[ -z "$choice" ]]; then
+        eg_ok "unlocked: $(paste -sd, "$UNLOCKED")   (run interactively to choose, or pass -m)"
+        return 0
+      fi
+      eg_log "new on offer: $(printf '%s,' "${new[@]}" | sed 's/,$//') — keeping $choice for now" >&2
+    fi
+  fi
+
+  if [[ -n "$choice" ]]; then
+    printf '%s\n%s\n' "-m" "$choice"
+    if (( ${#unlocked[@]} > 1 )); then
+      eg_ok "model: $choice (remembered — --pick-model to change)" >&2
+    else
+      eg_ok "model: $choice — the one this egress unlocked" >&2
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------- launch
+
+# Global, not local to launch(): the EXIT trap fires after launch() has returned, so a local would
+# be out of scope by then and `set -u` would blow up inside the trap.
+WATCHDOG_PID=""
+GROK_PID=""
+stop_watchdog(){ [[ -n "$WATCHDOG_PID" ]] && kill "$WATCHDOG_PID" 2>/dev/null; WATCHDOG_PID=""; }
+# grok runs backgrounded so `wait` stays interruptible by traps; forward an external TERM to it.
+forward_term(){ [[ -n "$GROK_PID" ]] && kill -TERM "$GROK_PID" 2>/dev/null; }
+
+# Deliberately not `exec`: the watchdog has to outlive the selection and keep repairing the egress
+# for as long as grok is alive. grok tolerates the port vanishing for a few seconds -- it fails
+# closed, retries, and resumes -- so a rung swap never reaches the session.
+launch(){
+  local rung; rung="$(active_rung)"
+  eg_ok "egress: $rung  (grok.com will see $(egress_ip "$(proxy_for "$rung")"))"
+  [[ "$rung" == direct ]] && eg_warn "no tunnel in use — only the models this region is given"
+
+  local -a marg=()
+  mapfile -t marg < <(model_args "$rung" "$@")
+
+  # The session is pinned to one model, so the failover must be too: demoting to a rung that does
+  # not offer it would break the running session with "unknown model id".
+  if (( ${#marg[@]} == 2 )); then
+    REQUIRE_MODEL="${marg[1]}"
+    eg_log "failover will only accept a rung that still offers $REQUIRE_MODEL"
+  elif caller_picked_model "$@"; then
+    # model_args returns early on the caller's own -m, so marg never carries it; pin from the caller's
+    # argv directly, or the watchdog could fail over to a rung that no longer offers that model.
+    local cm; cm="$(caller_model "$@")"
+    if [[ -n "$cm" ]]; then
+      REQUIRE_MODEL="$cm"
+      eg_log "failover will only accept a rung that still offers $REQUIRE_MODEL"
+    fi
+  fi
+
+  watch_egress &
+  WATCHDOG_PID=$!
+  # Run grok backgrounded and wait on it, so an external `kill -TERM` on this wrapper is forwarded to
+  # grok at once. A foreground external command would defer the trap until grok exits on its own,
+  # leaving it orphaned. Ctrl-C is deliberately left to the terminal: the whole process group gets
+  # SIGINT, so grok cancels its turn while this wrapper ignores it and the session survives.
+  trap stop_watchdog EXIT
+  trap forward_term TERM
+  trap ':' INT
+
+  # `<&0` keeps grok on the real stdin/tty -- an async command's stdin otherwise defaults to
+  # /dev/null. With job control off grok stays in this shell's process group, the terminal's
+  # foreground group, so it reads input and paints the TUI without SIGTTIN/SIGTTOU. Resetting
+  # INT/QUIT in the subshell hands grok clean default handlers to install its own over.
+  local rc=0
+  if [[ "$rung" == direct ]]; then
+    ( trap - INT QUIT; exec "$GROK_BIN" --leader-socket "$LEADER" "${marg[@]}" "$@" ) <&0 &
+  else
+    ( trap - INT QUIT
+      ALL_PROXY="$PROXY" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
+        exec "$GROK_BIN" --leader-socket "$LEADER" "${marg[@]}" "$@" ) <&0 &
+  fi
+  GROK_PID=$!
+
+  # A trap firing while grok is still up makes `wait` return 128+signo; resume waiting until grok
+  # itself exits, so we return its real status (headless -p keeps propagating grok's exit code).
+  wait "$GROK_PID"; rc=$?
+  while (( rc > 128 )) && kill -0 "$GROK_PID" 2>/dev/null; do
+    wait "$GROK_PID"; rc=$?
+  done
+  GROK_PID=""
+
+  stop_watchdog
+  return "$rc"
+}
+
+main(){
+  case "${1:-}" in
+    -h|--help|help) usage; exit 0 ;;
+    inspect|--version|version)
+      # region-independent, local-only grok subcommands: run bare grok, pick no egress
+      exec "$GROK_BIN" "$@" ;;
+    status) cmd_status; exit 0 ;;
+    ip)     rung_alive "$(active_rung)" || select_egress >/dev/null || { no_egress_help; exit 1; }
+            egress_ip "$(proxy_for "$(active_rung)")"; echo; exit 0 ;;
+    stop)   teardown_all; eg_ok "egress torn down"; exit 0 ;;
+  esac
+
+  local force_host="" force_vpn=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host)       force_host="${2:-}"; shift 2 ;;
+      --vpn)        force_vpn=1; shift ;;
+      --no-direct)  ALLOW_DIRECT=0; shift ;;
+      --pick-model) FORCE_PICK=1; shift ;;
+      --)           shift; break ;;
+      *)            break ;;                      # the rest belongs to grok
+    esac
+  done
+
+  # Region-independent, local-only grok subcommands need no egress, so run bare grok. This is an
+  # ALLOWLIST: agent, models, dashboard, sessions, mcp, memory, ... all reach the model API and must
+  # route through the egress like any session, so only names verified against `grok --help` as purely
+  # local are exempt here (the earlier case already handles inspect/version).
+  case "${1:-}" in
+    completions|help|worktree|leader) exec "$GROK_BIN" "$@" ;;
+  esac
+
+  if [[ -n "$(active_rung)" ]] && rung_alive "$(active_rung)"; then
+    # Reusing a live egress keeps its cached baseline (egress.sh ages it out on GROK_BASELINE_TTL);
+    # only a fresh selection re-measures, so the rm below lives in the non-reuse branches. Re-measuring
+    # is what lets a model that becomes available everywhere join the baseline instead of looking like
+    # something a tunnel unlocked.
+    eg_log "reusing the egress already up: $(active_rung)"
+  elif [[ -n "$force_host" ]]; then
+    rm -f "$BASELINE"
+    rung_up "local:$force_host" && rung_probe "local:$force_host" \
+      || { eg_err "forced host '$force_host' unlocks nothing"; rung_down "local:$force_host"; clear_active; exit 1; }
+  elif (( force_vpn )); then
+    rm -f "$BASELINE"
+    learn_baseline; try_vpn_sequence || { vpn_down; clear_active; no_egress_help; exit 1; }
+  else
+    rm -f "$BASELINE"
+    select_egress || { no_egress_help; exit 1; }
+  fi
+
+  launch "$@"
+}
+
+# Guarded so the tests can source this file and exercise the model logic directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi

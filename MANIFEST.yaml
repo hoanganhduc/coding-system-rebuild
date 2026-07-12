@@ -105,7 +105,7 @@ entries:
     match: ["skills"]
     class: public-copy
     dest_dir: agents/claude
-    exclude: ["**/__pycache__/**", "**/*.pyc", "**/tmp/**", "**/.pytest_cache/**",
+    exclude: ["**/*.bak", "**/*.bak-*", "**/*.bak.*", "**/__pycache__/**", "**/*.pyc", "**/tmp/**", "**/.pytest_cache/**",
               "skills/*/tests/tmp/**", "skills/modal-research-compute/**"]
     note: >
       _run.sh and skill scripts are user-owned real files. SKILL.md symlinks into
@@ -159,21 +159,21 @@ entries:
             "templates", "get-shit-done", "gsd-file-manifest.json", "version.json"]
     class: public-copy
     dest_dir: agents/codex
-    exclude: ["**/__pycache__/**", "**/*.pyc"]
+    exclude: ["**/*.bak", "**/*.bak-*", "**/*.bak.*", "**/__pycache__/**", "**/*.pyc"]
 
   - id: codex-skills
     root: .codex
     match: ["skills"]
     class: public-copy
     dest_dir: agents/codex
-    exclude: ["**/__pycache__/**", "**/*.pyc", "**/tmp/**"]
+    exclude: ["**/*.bak", "**/*.bak-*", "**/*.bak.*", "**/__pycache__/**", "**/*.pyc", "**/tmp/**"]
 
   - id: codex-plugins
     root: .codex
     match: ["plugins"]
     class: public-copy
     dest_dir: agents/codex
-    exclude: ["plugins/.remote-plugin-install-staging/**", "**/node_modules/**"]
+    exclude: ["plugins/.remote-plugin-install-staging/**", "plugins/cache/**", "**/node_modules/**"]
 
   - id: codex-auth
     root: .codex
@@ -328,9 +328,9 @@ entries:
 
   - id: gemini-runtime-state-exclude
     root: .gemini
-    match: ["projects.json"]
+    match: ["projects.json", "history", "tmp"]
     class: exclude-generated
-    note: gemini CLI project registry, volatile runtime state like config/projects/
+    note: gemini CLI project registry + volatile per-project session history/tmp (config/projects/, history/, tmp/)
 
   # ---------------------------------------------------------------- .grok (xAI Grok CLI)
   - id: grok-config
@@ -415,7 +415,7 @@ entries:
   # ---------------------------------------------------------------- grok-proxy toolkit
   - id: grokproxy-scripts
     root: grok-proxy
-    match: ["grok-remote", "vpngate-connect.sh", "dist"]
+    match: ["grok-remote", "egress.sh", "socks-netns.py", "sanitize.awk", "vpngate-connect.sh", "dist"]
     class: public-copy
     dest_dir: system/grok-proxy
     note: >
@@ -435,6 +435,6 @@ entries:
 
   - id: grokproxy-exclude
     root: grok-proxy
-    match: [".tunnel.*", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*"]
+    match: [".tunnel.*", ".egress.state", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", "__pycache__"]
     class: exclude-generated
-    note: SSH control sockets + tunnel/leader runtime state
+    note: SSH control sockets + tunnel/leader runtime state + per-run egress/model cache (regenerated)
