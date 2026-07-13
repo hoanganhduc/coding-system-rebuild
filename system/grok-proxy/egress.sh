@@ -175,12 +175,12 @@ tcp_ok(){ [[ "$2" =~ ^[0-9]+$ ]] && timeout 5 bash -c 'exec 3<>/dev/tcp/"$1"/"$2
 # One proxied (or direct) GET, shared by the egress probes. A rung passes its proxy as $1; direct passes
 # "" so the request leaves untunneled.
 eg_curl(){
-  local proxy="$1" url="$2"
+  local proxy="$1" url="$2" tmax="${3:-20}"
   if [[ -n "$proxy" ]]; then
     "${CLEAN_PROXY_ENV[@]}" ALL_PROXY="$proxy" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
-      curl -s --max-time 20 "$url" 2>/dev/null
+      curl -s --max-time "$tmax" "$url" 2>/dev/null
   else
-    "${CLEAN_PROXY_ENV[@]}" curl -s --max-time 15 "$url" 2>/dev/null
+    "${CLEAN_PROXY_ENV[@]}" curl -s --max-time "$tmax" "$url" 2>/dev/null
   fi
 }
 
@@ -407,14 +407,20 @@ iphone_exit_ip_for(){
   local pin="$1"
   iphone_status_json | jq -r --arg p "$pin" '
     def norm: ascii_downcase | rtrimstr(".");
-    [ (.Peer // {}) | .[]
-      | select( .ID == $p
-                or ((.HostName // "") | norm) == ($p | norm)
-                or ((.DNSName // "") | norm) == ($p | norm)
-                or ((.DNSName // "") | norm | split(".")[0]) == ($p | norm)
-                or any(.TailscaleIPs[]?; split("/")[0] == $p) )
-      | .TailscaleIPs[]? | split("/")[0] ]
-    | .[0] // empty' 2>/dev/null
+    def ip_of: .TailscaleIPs[]? | split("/")[0];
+    ( [ (.Peer // {}) | .[]
+        | select( .ID == $p
+                  or ((.HostName // "") | norm) == ($p | norm)
+                  or ((.DNSName // "") | norm) == ($p | norm)
+                  or ((.DNSName // "") | norm | split(".")[0]) == ($p | norm)
+                  or any(.TailscaleIPs[]?; split("/")[0] == $p) )
+        | ip_of ]
+      # The already-selected exit node is reported in ExitNodeStatus, not Peer -- fall back to it so a
+      # re-select (or a status that only echoes the current exit) still resolves to a usable IP.
+      + [ (.ExitNodeStatus // empty)
+          | select( .ID == $p or any(.TailscaleIPs[]?; split("/")[0] == $p) )
+          | ip_of ]
+    ) | .[0] // empty' 2>/dev/null
 }
 iphone_exit_online(){
   local node; node="$(iphone_node)"
@@ -721,11 +727,30 @@ build_ladder(){
 
 # The vpn entry is not one rung but a sequence: walk VPN Gate candidates until one both
 # comes up and offers the model.
+# A VPN Gate server can pass the one-shot probe and then die within seconds -- which grok experiences as
+# a slow login (its settings fetch retries) ending on the grok-build fallback. Before committing the
+# session to a server, confirm its egress holds across a few quick checks so a server that is already
+# degrading is skipped in favour of the next candidate. GROK_VPN_STABILITY_CHECKS=0 disables the gate.
+vpn_stable(){
+  local checks="${GROK_VPN_STABILITY_CHECKS:-3}" i ip
+  (( checks > 0 )) || return 0
+  for (( i = 1; i <= checks; i++ )); do
+    sleep 1
+    ip="$(eg_curl "$PROXY" https://1.1.1.1/cdn-cgi/trace 8 | sed -n 's/^ip=//p' | head -1)"
+    if [[ -z "$ip" ]]; then
+      eg_warn "  vpn: egress dropped mid-check ($i/$checks) — server is unstable, skipping it"
+      return 1
+    fi
+  done
+  eg_ok "  vpn: egress steady across $checks checks — committing"
+  return 0
+}
+
 try_vpn_sequence(){
   local verb=up i=0
   while (( i < VPN_MAX_TRIES )); do
     if ! vpn_up "$verb"; then eg_warn "  no further VPN Gate server came up"; return 1; fi
-    if rung_probe vpn; then return 0; fi
+    if rung_probe vpn && vpn_stable; then return 0; fi
     verb=next; i=$((i+1))
   done
   eg_warn "  exhausted $VPN_MAX_TRIES VPN Gate servers"
@@ -771,7 +796,7 @@ demote(){
     local verb=next i=0
     while (( i < VPN_MAX_TRIES )); do
       if ! vpn_up "$verb"; then break; fi
-      if rung_probe vpn; then return 0; fi
+      if rung_probe vpn && vpn_stable; then return 0; fi
       i=$((i+1))
     done
     eg_err "no VPN Gate server left"

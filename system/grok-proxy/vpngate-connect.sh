@@ -145,23 +145,28 @@ pin_remote(){
   REMOTE_PROTO="$proto"
 }
 
-# Parse the raw VPN Gate CSV into a clean cc<TAB>ip<TAB>score<TAB>b64 table. The CSV is
+# Parse the raw VPN Gate CSV into a clean cc<TAB>ip<TAB>score<TAB>uptime<TAB>b64 table. The CSV is
 # unquoted, so a comma inside CountryLong ("Korea, Republic of") or Message shifts naive
 # field positions, and a trailing comma empties the last field. We therefore take IP=$2 and
 # Score=$3 (before any comma-bearing field), CountryShort as the first two-letter field at
 # index >=7 whose next field is numeric, and the config as the last long base64 field.
 # Rows whose IP/Score do not validate (a comma in HostName misaligned them) are dropped.
 normalize_list(){
+  # Uptime (ms) is two fields after CountryShort (NumVpnSessions, then Uptime), so it is read relative to
+  # the located cc index -- safe, since the comma-bearing fields (CountryLong before, Operator/Message
+  # after) never fall between them. Missing/garbled uptime defaults to 0 (sorts last, as least-proven).
   awk -F',' 'NR>2 {
-      ip=$2; score=$3; cc=""; b64=""
+      ip=$2; score=$3; cc=""; b64=""; up=0
       for (i=7; i<NF; i++)
-        if ($i ~ /^[A-Z][A-Z]$/ && $(i+1) ~ /^[0-9]+$/) { cc=$i; break }
+        if ($i ~ /^[A-Z][A-Z]$/ && $(i+1) ~ /^[0-9]+$/) {
+          cc=$i; if ($(i+2) ~ /^[0-9]+$/) up=$(i+2); break
+        }
       for (i=NF; i>=1; i--)
         if ($i ~ /^[A-Za-z0-9+\/=]+$/ && length($i) > 100) { b64=$i; break }
       if (cc != "" && b64 != "" &&
           ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ &&
           score ~ /^[0-9]+$/)
-        print cc "\t" ip "\t" score "\t" b64
+        print cc "\t" ip "\t" score "\t" up "\t" b64
     }' "$WORK/list.csv" > "$WORK/parsed.tsv"
 }
 
@@ -190,7 +195,8 @@ country_order(){
 }
 
 # Decode the top servers of each chosen country and keep the ones we can actually
-# reach (TCP pre-tested; UDP kept optimistically), highest score first, capped at
+# reach (TCP pre-tested; UDP kept optimistically), longest uptime first (VPN Gate score
+# as the tiebreaker within an uptime hour) to prefer proven-stable servers, capped at
 # CAND_MAX. Writes cc<TAB>ip<TAB>port<TAB>proto<TAB>ovpn-path to $CANDF.
 build_candidates(){
   : > "$CANDF"; rm -f "$WORK"/cand-*.ovpn
@@ -199,7 +205,7 @@ build_candidates(){
   while read -r cc; do
     [[ -z "$cc" ]] && continue
     echo "[vpngate] scanning $cc ..." >&2
-    while IFS=$'\t' read -r score ip b64; do
+    while IFS=$'\t' read -r uph score ip b64; do
       [[ $n -ge $CAND_MAX ]] && break 2
       ovpn="$WORK/cand-$cc-$ip.ovpn"
       echo "$b64" | tr -d '\r\n' | base64 -d > "$ovpn" 2>/dev/null || continue
@@ -220,9 +226,9 @@ build_candidates(){
       fi
       printf '%s\t%s\t%s\t%s\t%s\n' "$cc" "$ip" "$port" "$proto" "$ovpn" >> "$CANDF"
       n=$((n+1))
-      echo "[vpngate]   candidate $n: $cc $ip:$port/$proto (score $score)" >&2
-    done < <(awk -F'\t' -v c="$cc" '$1==c {print $3"\t"$2"\t"$4}' \
-               "$WORK/parsed.tsv" | sort -k1,1 -nr | head -12)
+      echo "[vpngate]   candidate $n: $cc $ip:$port/$proto (score $score, uptime ${uph}h)" >&2
+    done < <(awk -F'\t' -v c="$cc" '$1==c {print int($4/3600000)"\t"$3"\t"$2"\t"$5}' \
+               "$WORK/parsed.tsv" | sort -t$'\t' -k1,1nr -k2,2nr | head -12)
   done < <(country_order)
   [[ -s "$CANDF" ]] || { echo "[vpngate] no reachable server in any allowed country" >&2; return 1; }
 }

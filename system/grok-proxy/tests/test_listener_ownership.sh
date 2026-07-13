@@ -41,7 +41,9 @@ printf '%s\n' n-test-phone > "$tmp/target/state/ready"
   iphone_up
   [[ "$(active_rung)" == iphone ]]
   iphone_alive
-  grep -q -- '--exit-node=n-test-phone' "$tmp/tailscale.log"
+  # iphone_select_exit resolves the pinned node id to its Tailscale IP (set --exit-node rejects a raw
+  # StableNodeID), so the sidecar is told the resolved 100.64.0.99, not the n-test-phone id.
+  grep -q -- '--exit-node=100.64.0.99' "$tmp/tailscale.log"
   grep -q -- '--shields-up=true' "$tmp/tailscale.log"
   grep -q -- "--socket=$tmp/target/state/tailscaled.sock" "$tmp/tailscale.log"
   pid="$(pid_from_file "$IPHONE_PID")"
