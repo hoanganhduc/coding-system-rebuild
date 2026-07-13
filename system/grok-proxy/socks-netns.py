@@ -68,9 +68,13 @@ MAX_CONNECTIONS = 256
 # Kernel TCP keepalive reaps a peer that has gone silently unreachable (e.g. a collapsed
 # tun) without a data-idle timeout, which would wrongly cut a long but byte-silent
 # reasoning stream: a live peer's kernel ACKs the probes regardless of application silence.
-KEEPALIVE_IDLE = 60
-KEEPALIVE_INTVL = 10
-KEEPALIVE_CNT = 6
+# Kept deliberately long: grok-4.5 high-effort streams can be byte-silent for minutes during
+# reasoning, and over a lossy VPN a short keepalive can drop such a live connection (its probes
+# get lost) -- surfacing as "error sending request" on the pooled reuse. Only a genuinely dead
+# peer (no probe answered for ~7 min) is reaped; grok's own ~5.5-min retry covers a real tun death.
+KEEPALIVE_IDLE = 300
+KEEPALIVE_INTVL = 15
+KEEPALIVE_CNT = 8
 
 # Cap concurrent relays so a flood of half-open handshakes cannot spawn unbounded threads.
 CONN_SEMAPHORE = threading.BoundedSemaphore(MAX_CONNECTIONS)

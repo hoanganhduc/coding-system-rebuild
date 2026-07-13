@@ -36,6 +36,7 @@ roots:
   - .ai-agents-skills
   - .config/systemd/user
   - .local/bin
+  - .local/state/grok-proxy/iphone
   - grok-proxy
 
 entries:
@@ -415,26 +416,44 @@ entries:
   # ---------------------------------------------------------------- grok-proxy toolkit
   - id: grokproxy-scripts
     root: grok-proxy
-    match: ["grok-remote", "egress.sh", "socks-netns.py", "sanitize.awk", "vpngate-connect.sh", "dist"]
+    match: ["README.md", "grok-remote", "egress.sh", "socks-netns.py", "sanitize.awk", "vpngate-connect.sh", "dist", "tests"]
     class: public-copy
     dest_dir: system/grok-proxy
     note: >
-      SOCKS-over-Tailscale egress wrapper + VPN Gate network-namespace fallback +
-      the Windows/Arch SSH-server setup scripts. Reusable and topology-generic
-      (only the 100.64.0.0/10 CGNAT range appears); the dist scripts embed the
-      proxy PUBLIC key, which is safe to publish.
+      Sanitized documentation + SOCKS-over-Tailscale egress wrapper + VPN Gate
+      network-namespace fallback + the Windows/Arch SSH-server setup scripts.
+      Reusable and topology-generic; the dist scripts embed the proxy PUBLIC key,
+      which is safe to publish.
 
   - id: grokproxy-private
     root: grok-proxy
-    match: ["README.md", "hosts.conf", "id_grokproxy", "id_grokproxy.pub"]
+    match: ["hosts.conf", "known_hosts", "id_grokproxy", "id_grokproxy.pub"]
     class: private-archive
     note: >
-      README + hosts.conf carry specific tailnet IPs / usernames and the personal
-      topology; id_grokproxy is the dedicated SSH PRIVATE key. All ride in the
-      secrets zip (secrets-manifest), never the public tree.
+      hosts.conf + known_hosts carry specific tailnet IPs / usernames, host keys,
+      and the personal topology; id_grokproxy is the dedicated SSH PRIVATE key.
+      All ride in the secrets zip (secrets-manifest), never the public tree.
 
   - id: grokproxy-exclude
     root: grok-proxy
-    match: [".tunnel.*", ".egress.state", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", "__pycache__"]
+    match: [".tunnel.*", ".egress.state", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-remote.lock", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", "__pycache__"]
     class: exclude-generated
     note: SSH control sockets + tunnel/leader runtime state + per-run egress/model cache (regenerated)
+
+  - id: grokproxy-iphone-private
+    root: .local/state/grok-proxy/iphone
+    match: ["tailscaled.state", "exit-node"]
+    class: private-archive
+    note: >
+      Persistent identity of the isolated userspace Tailscale sidecar plus the
+      selected phone node. The state contains node credentials and the selector
+      exposes private tailnet topology; both belong only in the encrypted archive.
+
+  - id: grokproxy-iphone-exclude
+    root: .local/state/grok-proxy/iphone
+    match: ["tailscaled.sock", "tailscaled.pid", "tailscaled.log", "ready", "*"]
+    class: exclude-generated
+    note: >
+      LocalAPI socket, process/log state, and live-readiness marker are regenerated.
+      After restore, rerun grok-remote iphone-setup to revalidate the phone before
+      the rung is admitted to the normal ladder.

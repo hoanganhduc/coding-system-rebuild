@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ -n "${FAKE_TAILSCALE_LOG:-}" ]] && printf '%q ' "$@" >> "$FAKE_TAILSCALE_LOG"
+[[ -n "${FAKE_TAILSCALE_LOG:-}" ]] && printf '\n' >> "$FAKE_TAILSCALE_LOG"
+
+for arg in "$@"; do
+  case "$arg" in
+    status)
+      status_json="${FAKE_TAILSCALE_STATUS_JSON:-}"
+      [[ -n "$status_json" ]] \
+        || status_json='{"BackendState":"Running","ExitNodeStatus":{"ID":"n-test-phone","Online":true,"TailscaleIPs":["100.64.0.99"]},"Peer":{}}'
+      printf '%s\n' "$status_json"
+      exit 0
+      ;;
+    set|up) exit 0 ;;
+  esac
+done
+
+echo "fake tailscale: unsupported arguments: $*" >&2
+exit 2

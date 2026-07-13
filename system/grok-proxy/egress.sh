@@ -3,6 +3,7 @@
 #
 #   direct        no proxy at all
 #   local:<label> ssh -D SOCKS through a home PC over Tailscale (hosts.conf order)
+#   iphone        a dedicated userspace Tailscale client using the iPhone as exit node
 #   vpn           a VPN Gate server in an allowed region, isolated in netns 'grokvpn'
 #
 # Every rung presents grok with the SAME endpoint -- a SOCKS5 proxy on 127.0.0.1:$PORT --
@@ -28,6 +29,7 @@ CONF="$EG_DIR/hosts.conf"
 KEY="$EG_DIR/id_grokproxy"
 CTL="$EG_DIR/.tunnel.ctl"
 STATE="$EG_DIR/.egress.state"
+SESSION_LOCK="${GROK_SESSION_LOCK:-$EG_DIR/.grok-remote.lock}"
 VPNGATE="${GROK_VPNGATE:-$EG_DIR/vpngate-connect.sh}"
 SOCKS_NETNS="$EG_DIR/socks-netns.py"
 SOCKS_PID="$EG_DIR/.socks-netns.pid"
@@ -39,6 +41,30 @@ PORT="${GROK_PROXY_PORT:-1080}"
 PROXY="socks5h://127.0.0.1:$PORT"
 NOPROXY="localhost,127.0.0.1,::1,100.64.0.0/10,.ts.net"
 GROK_BIN="${GROK_BIN:-$HOME/.local/bin/grok}"
+
+# The iPhone rung is a SECOND Tailscale identity in userspace-networking mode. It
+# never changes the host's tailscale0 interface or default routes; only clients of
+# its loopback SOCKS listener use the selected phone exit node. Credentials and
+# LocalAPI state live outside this project tree with private permissions.
+TAILSCALE_BIN="${GROK_TAILSCALE_BIN:-$(command -v tailscale 2>/dev/null || true)}"
+TAILSCALED_BIN="${GROK_TAILSCALED_BIN:-$(command -v tailscaled 2>/dev/null || true)}"
+PRIMARY_TAILSCALE_BIN="${GROK_PRIMARY_TAILSCALE_BIN:-$TAILSCALE_BIN}"
+IPHONE_STATE_DIR="${GROK_IPHONE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/grok-proxy/iphone}"
+IPHONE_STATE="$IPHONE_STATE_DIR/tailscaled.state"
+IPHONE_SOCKET="$IPHONE_STATE_DIR/tailscaled.sock"
+IPHONE_PID="$IPHONE_STATE_DIR/tailscaled.pid"
+IPHONE_LOG="$IPHONE_STATE_DIR/tailscaled.log"
+IPHONE_NODE_FILE="$IPHONE_STATE_DIR/exit-node"
+IPHONE_READY_FILE="$IPHONE_STATE_DIR/ready"
+IPHONE_HOSTNAME="${GROK_IPHONE_HOSTNAME:-grok-iphone-relay}"
+IPHONE_AUTHKEY_FILE="${GROK_IPHONE_AUTHKEY_FILE:-}"
+
+# Clear protocol-specific proxy variables before setting the one intended route.
+# curl prefers HTTPS_PROXY over ALL_PROXY, so inheriting a caller's environment
+# could otherwise make probes measure a different path than Grok uses.
+CLEAN_PROXY_ENV=(env
+  -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY -u FTP_PROXY
+  -u http_proxy -u https_proxy -u all_proxy -u no_proxy -u ftp_proxy)
 
 BASELINE="$EG_DIR/.baseline.models"               # what the VM is offered with no tunnel at all
 BASELINE_TTL="${GROK_BASELINE_TTL:-21600}"        # re-measure the baseline once it is older than this (s)
@@ -76,35 +102,107 @@ fi
 # ---------------------------------------------------------------- state
 
 set_active(){
-  # Atomic: write a temp file in the state dir, then rename onto $STATE. A reader that sources
-  # $STATE then always sees a complete record -- never a half-written one that reads an empty RUNG.
+  case "$1" in direct|iphone|vpn|local:?*) ;; *) return 1 ;; esac
+  [[ "$1" != *[$' \t\r\n']* ]] || return 1
+  [[ "${2:-}" != *[$' \t\r\n']* && "${3:-22}" =~ ^[0-9]+$ ]] || return 1
+  # Atomic: write a temp file in the state dir, then rename onto $STATE. A reader always sees a
+  # complete fixed-format record, never a half-written one or executable shell input.
   local tmp; tmp="$(mktemp "$STATE.XXXXXX")" || return 1
-  if printf 'RUNG=%q\nDEST=%q\nSPORT=%q\n' "$1" "${2:-}" "${3:-22}" > "$tmp"; then
+  if printf 'RUNG=%s\nDEST=%s\nSPORT=%s\n' "$1" "${2:-}" "${3:-22}" > "$tmp"; then
     mv -f "$tmp" "$STATE"
   else
     rm -f "$tmp"; return 1
   fi
 }
-active_rung(){ [[ -f "$STATE" ]] && ( . "$STATE"; printf '%s' "${RUNG:-}" ); }
-active_dest(){ [[ -f "$STATE" ]] && ( . "$STATE"; printf '%s' "${DEST:-}" ); }
+state_value(){
+  [[ -f "$STATE" ]] || return 1
+  sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -1
+}
+active_rung(){
+  local value; value="$(state_value RUNG)" || return 1
+  case "$value" in direct|iphone|vpn|local:?*) ;; *) return 1 ;; esac
+  [[ "$value" != *[$' \t\r\n']* ]] || return 1
+  printf '%s' "$value"
+}
+active_dest(){
+  local value; value="$(state_value DEST)" || return 1
+  [[ "$value" != *[$' \t\r\n']* ]] || return 1
+  printf '%s' "$value"
+}
 clear_active(){ rm -f "$STATE"; }
+
+pid_from_file(){
+  [[ -s "$1" ]] || return 1
+  local pid; pid="$(cat "$1" 2>/dev/null)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$pid"
+}
+
+pid_has_arg(){
+  local pid="$1" expected="$2" arg
+  [[ -r "/proc/$pid/cmdline" ]] || return 1
+  while IFS= read -r -d '' arg; do
+    [[ "$arg" == "$expected" ]] && return 0
+  done < "/proc/$pid/cmdline"
+  return 1
+}
+
+# `port_listening` alone is unsafe: any stale or hostile process could own the
+# shared endpoint. Activation requires the expected process to own the listener.
+# The pid listening on 127.0.0.1:$PORT, or empty. The socks rung binds the port as ROOT (socks-netns.py
+# stage 1 binds before it re-execs into the netns and drops privileges), so an unprivileged `ss` cannot
+# enumerate that socket; the iphone/ssh rungs bind it unprivileged. Try plain ss first so the sudo-free
+# rungs stay sudo-free, then fall back to `sudo -n ss` so the root-owned socks listener is still resolved.
+port_owner_pid(){
+  local out
+  out="$(ss -H -lntp "sport = :$PORT" 2>/dev/null \
+    | awk -v e="127.0.0.1:$PORT" '$4==e{if(match($0,/pid=[0-9]+/)){print substr($0,RSTART+4,RLENGTH-4);exit}}')"
+  [[ -n "$out" ]] || out="$(sudo -n ss -H -lntp "sport = :$PORT" 2>/dev/null \
+    | awk -v e="127.0.0.1:$PORT" '$4==e{if(match($0,/pid=[0-9]+/)){print substr($0,RSTART+4,RLENGTH-4);exit}}')"
+  printf '%s' "$out"
+}
+pid_owns_proxy_port(){
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  [[ "$(port_owner_pid)" == "$pid" ]]
+}
 
 # ---------------------------------------------------------------- probes
 
-port_listening(){ ss -lnt "sport = :$PORT" 2>/dev/null | grep -q LISTEN; }
+port_listening(){ ss -H -lnt "sport = :$PORT" 2>/dev/null | grep -q .; }
 tcp_ok(){ [[ "$2" =~ ^[0-9]+$ ]] && timeout 5 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' _ "$1" "$2" 2>/dev/null; }
 
-# Public IP seen through a rung. Empty means the rung has no working egress at all.
-egress_ip(){
-  local proxy="${1-$PROXY}"
-  if [[ -n "$proxy" ]]; then ALL_PROXY="$proxy" curl -s --max-time 20 https://api.ipify.org 2>/dev/null
-  else curl -s --max-time 15 https://api.ipify.org 2>/dev/null; fi
+# One proxied (or direct) GET, shared by the egress probes. A rung passes its proxy as $1; direct passes
+# "" so the request leaves untunneled.
+eg_curl(){
+  local proxy="$1" url="$2"
+  if [[ -n "$proxy" ]]; then
+    "${CLEAN_PROXY_ENV[@]}" ALL_PROXY="$proxy" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
+      curl -s --max-time 20 "$url" 2>/dev/null
+  else
+    "${CLEAN_PROXY_ENV[@]}" curl -s --max-time 15 "$url" 2>/dev/null
+  fi
 }
 
+# Public IP / country seen through a rung. Cloudflare's trace is the primary source: it stays reachable
+# through VPN egresses that block or rate-limit the dedicated echo services (api.ipify.org and ipinfo.io
+# are routinely refused from VPN Gate datacenter IPs), and it is the same infrastructure grok's own API
+# sits behind -- so it tests the path that actually matters. The dedicated services are only a fallback.
+# Empty from egress_ip means no working egress at all; egress_country may be empty just because the geo
+# lookup was blocked, which rung_probe treats as "unknown", not "dead".
+egress_ip(){
+  local proxy="${1-$PROXY}" trace ip
+  trace="$(eg_curl "$proxy" https://1.1.1.1/cdn-cgi/trace)"
+  ip="$(sed -n 's/^ip=//p' <<<"$trace" | head -1)"
+  [[ -n "$ip" ]] || ip="$(eg_curl "$proxy" https://api.ipify.org)"
+  printf '%s' "$ip"
+}
 egress_country(){
-  local proxy="${1-$PROXY}"
-  if [[ -n "$proxy" ]]; then ALL_PROXY="$proxy" curl -s --max-time 20 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]'
-  else curl -s --max-time 15 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]'; fi
+  local proxy="${1-$PROXY}" trace cc
+  trace="$(eg_curl "$proxy" https://1.1.1.1/cdn-cgi/trace)"
+  cc="$(sed -n 's/^loc=//p' <<<"$trace" | head -1 | tr -d '[:space:]')"
+  [[ -n "$cc" ]] || cc="$(eg_curl "$proxy" https://ipinfo.io/country | tr -d '[:space:]')"
+  printf '%s' "$cc"
 }
 
 country_allowed(){ [[ -n "$1" && " $GROK_BLOCKED_CC " != *" $1 "* ]]; }
@@ -124,9 +222,10 @@ models_via(){
   fi
   rm -f "$GROK_MODELS_CACHE"   # force a fresh fetch through THIS egress, not grok's cached list
   if [[ -n "$proxy" ]]; then
-    out="$(ALL_PROXY="$proxy" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" timeout 90 "$GROK_BIN" models 2>/dev/null)"
+    out="$("${CLEAN_PROXY_ENV[@]}" ALL_PROXY="$proxy" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
+      timeout 90 "$GROK_BIN" models 2>/dev/null)"
   else
-    out="$(timeout 90 "$GROK_BIN" models 2>/dev/null)"
+    out="$("${CLEAN_PROXY_ENV[@]}" timeout 90 "$GROK_BIN" models 2>/dev/null)"
   fi
   grep -oE '^[[:space:]]+[-*][[:space:]]+[^[:space:]]+' <<<"$out" | awk '{print $2}' | sort -u
 }
@@ -190,11 +289,15 @@ rung_probe(){
   local rung="$1" proxy="$PROXY" cc
   [[ "$rung" == direct ]] && proxy=""
   cc="$(egress_country "$proxy")"
-  if [[ -z "$cc" ]]; then eg_warn "  $rung: no working egress"; return 1; fi
-  if ! country_allowed "$cc"; then
+  # A known blocked region never serves the gated models, so skip the probe. But an UNKNOWN country (the
+  # geo lookup was blocked or rate-limited on this exit -- common on VPN Gate IPs) is NOT proof of a dead
+  # egress: the model probe is the authoritative test, so fall through to it rather than discarding a
+  # server that may well work. rung_unlocks rejects a genuinely unreachable API on its own.
+  if [[ -n "$cc" ]] && ! country_allowed "$cc"; then
     eg_warn "  $rung: exits in $cc — the EU / X-banned block never serves the gated models"; return 1
   fi
-  eg_log "  $rung: exits in $cc — asking grok what that unlocks"
+  if [[ -n "$cc" ]]; then eg_log "  $rung: exits in $cc — asking grok what that unlocks"
+  else eg_log "  $rung: egress country unknown — asking grok what it unlocks anyway"; fi
   rung_unlocks "$rung" "$proxy"
 }
 
@@ -223,7 +326,7 @@ local_up(){
         -o StrictHostKeyChecking="$skc" \
         -o UserKnownHostsFile="$khost" \
         -o ConnectTimeout=8 -o BatchMode=yes \
-        -i "$KEY" -p "$sport" -D "127.0.0.1:$PORT" "$user@$ip" || return 1
+        -i "$KEY" -p "$sport" -D "127.0.0.1:$PORT" "$user@$ip" 9>&- || return 1
     set_active "local:$label" "$user@$ip" "$sport"
     return 0
   done < <(local_hosts)
@@ -241,10 +344,285 @@ local_down(){
   rm -f "$CTL"
 }
 
+# ---------------------------------------------------------------- rung: iPhone Tailscale exit node
+
+iphone_prepare_state(){
+  ( umask 077; mkdir -p "$IPHONE_STATE_DIR" ) || return 1
+  chmod 700 "$IPHONE_STATE_DIR"
+}
+
+iphone_node(){
+  if [[ -s "$IPHONE_NODE_FILE" ]]; then
+    head -1 "$IPHONE_NODE_FILE"
+  elif [[ -n "${GROK_IPHONE_EXIT_NODE:-}" ]]; then
+    printf '%s' "$GROK_IPHONE_EXIT_NODE"
+  fi
+}
+
+iphone_configured(){
+  [[ -s "$IPHONE_NODE_FILE" && -s "$IPHONE_READY_FILE" ]] || return 1
+  [[ "$(head -1 "$IPHONE_NODE_FILE")" == "$(head -1 "$IPHONE_READY_FILE")" ]]
+}
+iphone_cli(){ "$TAILSCALE_BIN" --socket="$IPHONE_SOCKET" "$@"; }
+
+iphone_process_alive(){
+  local pid="${1:-}"
+  [[ -n "$pid" ]] || pid="$(pid_from_file "$IPHONE_PID")" || return 1
+  kill -0 "$pid" 2>/dev/null \
+    && pid_has_arg "$pid" "$TAILSCALED_BIN" \
+    && pid_has_arg "$pid" "--tun=userspace-networking" \
+    && pid_has_arg "$pid" "--socket=$IPHONE_SOCKET" \
+    && pid_has_arg "$pid" "--state=$IPHONE_STATE" \
+    && pid_has_arg "$pid" "--socks5-server=127.0.0.1:$PORT"
+}
+
+iphone_listener_alive(){
+  local pid; pid="$(pid_from_file "$IPHONE_PID")" || return 1
+  iphone_process_alive "$pid" && pid_owns_proxy_port "$pid"
+}
+
+iphone_status_json(){ iphone_cli status --json 2>/dev/null; }
+iphone_backend_running(){ iphone_status_json | jq -e '.BackendState == "Running"' >/dev/null 2>&1; }
+iphone_selected_exit_id(){
+  iphone_status_json | jq -er '.ExitNodeStatus.ID | select(type == "string" and length > 0)' 2>/dev/null
+}
+# Wait for the sidecar backend to leave transient startup states before a caller decides whether it needs
+# `up`. A freshly (re)started but already-enrolled backend is briefly in "Starting"/"NoState" and only
+# then reaches "Running"; checking immediately misreads that as "not authenticated". Prints the settled
+# BackendState ("Running" when healthy; a "needs action" state otherwise), breaking early on the states
+# that genuinely need enrollment so first-time login is not delayed.
+iphone_wait_backend(){
+  local i st=""
+  for i in $(seq 1 20); do
+    st="$(iphone_status_json | jq -r '.BackendState // ""' 2>/dev/null)"
+    case "$st" in Running|NeedsLogin|NeedsMachineAuth|Stopped) break ;; esac
+    sleep 0.25
+  done
+  printf '%s' "$st"
+}
+# Resolve a pinned exit-node identifier to a value `tailscale set --exit-node` accepts. setup pins the
+# phone's StableNodeID (stable across hostname changes), but --exit-node takes only an IP or hostname --
+# so map the pin (StableNodeID, hostname, DNSName, or IP) to the peer's current Tailscale IP via status.
+iphone_exit_ip_for(){
+  local pin="$1"
+  iphone_status_json | jq -r --arg p "$pin" '
+    def norm: ascii_downcase | rtrimstr(".");
+    [ (.Peer // {}) | .[]
+      | select( .ID == $p
+                or ((.HostName // "") | norm) == ($p | norm)
+                or ((.DNSName // "") | norm) == ($p | norm)
+                or ((.DNSName // "") | norm | split(".")[0]) == ($p | norm)
+                or any(.TailscaleIPs[]?; split("/")[0] == $p) )
+      | .TailscaleIPs[]? | split("/")[0] ]
+    | .[0] // empty' 2>/dev/null
+}
+iphone_exit_online(){
+  local node; node="$(iphone_node)"
+  iphone_status_json | jq -e --arg node "$node" '
+    def normalized_name:
+      ascii_downcase | rtrimstr(".");
+    . as $status
+    | .BackendState == "Running"
+      and (.ExitNodeStatus.Online // false) == true
+      and (
+        .ExitNodeStatus.ID == $node
+        or any(.ExitNodeStatus.TailscaleIPs[]?; split("/")[0] == $node)
+        or any(.Peer[]?;
+          .ID == $status.ExitNodeStatus.ID
+          and (
+            ((.HostName // "") | normalized_name) == ($node | normalized_name)
+            or ((.DNSName // "") | normalized_name) == ($node | normalized_name)
+            or ((.DNSName // "") | normalized_name | split(".")[0]) == ($node | normalized_name)
+            or any(.TailscaleIPs[]?; split("/")[0] == $node)
+          )
+        )
+      )' >/dev/null 2>&1
+}
+
+iphone_down(){
+  local pid=""
+  pid="$(pid_from_file "$IPHONE_PID")" || true
+  if [[ -n "$pid" ]] && iphone_process_alive "$pid"; then
+    kill "$pid" 2>/dev/null || true
+    local i
+    for i in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+  fi
+  rm -f "$IPHONE_PID" "$IPHONE_SOCKET"
+}
+
+iphone_start(){
+  [[ -n "$TAILSCALE_BIN" && -x "$TAILSCALE_BIN" ]] \
+    || { eg_warn "  tailscale CLI is not installed"; return 1; }
+  [[ -n "$TAILSCALED_BIN" && -x "$TAILSCALED_BIN" ]] \
+    || { eg_warn "  tailscaled is not installed"; return 1; }
+  command -v jq >/dev/null 2>&1 || { eg_warn "  jq is required for the iPhone rung"; return 1; }
+  iphone_prepare_state || return 1
+  if iphone_listener_alive && [[ -S "$IPHONE_SOCKET" ]]; then return 0; fi
+  iphone_down
+  ( umask 077; : > "$IPHONE_LOG" ) || return 1
+  (
+    umask 077
+    exec 9>&-
+    exec "$TAILSCALED_BIN" \
+      --tun=userspace-networking \
+      --port=0 \
+      --state="$IPHONE_STATE" \
+      --statedir="$IPHONE_STATE_DIR" \
+      --socket="$IPHONE_SOCKET" \
+      --socks5-server="127.0.0.1:$PORT"
+  ) >>"$IPHONE_LOG" 2>&1 &
+  local pid=$!
+  ( umask 077; printf '%s\n' "$pid" > "$IPHONE_PID" )
+  chmod 600 "$IPHONE_PID" "$IPHONE_LOG" 2>/dev/null || true
+  local i
+  for i in $(seq 1 40); do
+    if [[ -S "$IPHONE_SOCKET" ]] && iphone_listener_alive; then return 0; fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  eg_warn "  iPhone Tailscale sidecar did not acquire 127.0.0.1:$PORT"
+  tail -n 4 "$IPHONE_LOG" 2>/dev/null | sed 's/^/[tailscaled] /' >&2
+  iphone_down
+  return 1
+}
+
+iphone_select_exit(){
+  local node ip="" i; node="$(iphone_node)"
+  [[ -n "$node" ]] || { eg_warn "  no iPhone exit node configured — run: grok-remote iphone-setup"; return 1; }
+  # The pin is usually a StableNodeID, which `set --exit-node` rejects ("must be IP or hostname"). Resolve
+  # it to the peer's Tailscale IP, retrying briefly so a just-started sidecar can sync the netmap first.
+  for i in $(seq 1 20); do ip="$(iphone_exit_ip_for "$node")"; [[ -n "$ip" ]] && break; sleep 0.25; done
+  [[ -n "$ip" ]] || { eg_warn "  iPhone exit node '$node' is not in the sidecar tailnet (offline, unapproved, or not yet synced)"; return 1; }
+  iphone_cli set --exit-node="$ip" --exit-node-allow-lan-access=false --shields-up=true >/dev/null \
+    || { eg_warn "  cannot select iPhone exit node '$node' -> $ip (offline, unapproved, or ACL denied)"; return 1; }
+  for i in $(seq 1 20); do iphone_exit_online && return 0; sleep 0.25; done
+  eg_warn "  iPhone exit node '$node' is selected but not online"
+  return 1
+}
+
+iphone_up(){
+  iphone_configured || return 1
+  iphone_start || return 1
+  # Let the just-started backend settle before judging it: an already-enrolled sidecar is briefly in
+  # "Starting" and reading it too early wrongly reports "not authenticated".
+  if [[ "$(iphone_wait_backend)" != Running ]]; then
+    eg_warn "  iPhone sidecar is not authenticated — run: grok-remote iphone-setup"
+    iphone_down
+    return 1
+  fi
+  iphone_select_exit || { iphone_down; return 1; }
+  set_active iphone "$(iphone_node)"
+}
+
+iphone_alive(){ iphone_listener_alive && iphone_exit_online; }
+
+iphone_detect_node(){
+  [[ -n "$PRIMARY_TAILSCALE_BIN" && -x "$PRIMARY_TAILSCALE_BIN" ]] || return 1
+  local -a nodes=()
+  mapfile -t nodes < <("$PRIMARY_TAILSCALE_BIN" status --json 2>/dev/null | jq -r \
+    '.Peer[] | select((.OS // "" | ascii_downcase) == "ios") | .TailscaleIPs[0] // empty')
+  if (( ${#nodes[@]} != 1 )); then
+    eg_err "expected exactly one iOS peer in the primary tailnet; found ${#nodes[@]} — pass its IP or name explicitly"
+    return 1
+  fi
+  printf '%s' "${nodes[0]}"
+}
+
+iphone_save_node(){
+  local node="$1" tmp old=""
+  iphone_prepare_state || return 1
+  old="$(head -1 "$IPHONE_NODE_FILE" 2>/dev/null || true)"
+  tmp="$(mktemp "$IPHONE_NODE_FILE.XXXXXX")" || return 1
+  printf '%s\n' "$node" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$IPHONE_NODE_FILE"
+  [[ -z "$old" || "$old" == "$node" ]] || rm -f "$IPHONE_READY_FILE"
+}
+
+# One-time enrollment of the sidecar identity. Authentication is interactive by
+# default; automation accepts only an auth-key FILE so the secret never appears in
+# argv or shell history. This never changes the primary Tailscale daemon.
+iphone_setup(){
+  local node="${1:-}" rc=0
+  [[ -n "$node" ]] || node="$(iphone_node)"
+  [[ -n "$node" ]] || node="$(iphone_detect_node)" || return 1
+  [[ "$node" != *[$' \t\r\n']* ]] || { eg_err "iPhone exit-node IP/name cannot contain whitespace"; return 1; }
+  port_listening && { eg_err "port $PORT is in use — run 'grok-remote stop' before iphone-setup"; return 1; }
+  iphone_save_node "$node" || return 1
+  iphone_start || return 1
+  # A re-enrolled sidecar reconnects from persisted state and reaches "Running" on its own; deciding it
+  # needs `up` before it settles would re-run `up` needlessly (or bail for a TTY it does not need).
+  local st; st="$(iphone_wait_backend)"
+  if [[ "$st" != Running ]]; then
+    # --reset makes `up` declarative-idempotent: on a phone switch the sidecar's persisted state still
+    # carries the previous phone's --exit-node (a non-default pref), and a bare `up` that does not
+    # re-mention it fails with "must mention all non-default flags". --reset clears unspecified prefs to
+    # their defaults (the stale exit-node included) and applies exactly these; iphone_select_exit sets the
+    # new exit-node right after. The node key is untouched, so an enrolled sidecar is never re-logged-in.
+    local -a up_args=(up --reset --hostname="$IPHONE_HOSTNAME" --accept-dns=true --accept-routes=false --shields-up=true)
+    if [[ -n "$IPHONE_AUTHKEY_FILE" ]]; then
+      local key_mode=""
+      [[ -f "$IPHONE_AUTHKEY_FILE" && ! -L "$IPHONE_AUTHKEY_FILE" && -r "$IPHONE_AUTHKEY_FILE" ]] \
+        || { eg_err "GROK_IPHONE_AUTHKEY_FILE must be a readable regular file"; iphone_down; return 1; }
+      key_mode="$(stat -c '%a' "$IPHONE_AUTHKEY_FILE" 2>/dev/null || true)"
+      if [[ ! "$key_mode" =~ ^[0-7]{3,4}$ ]] || (( (8#$key_mode & 8#77) != 0 )); then
+        eg_err "GROK_IPHONE_AUTHKEY_FILE must not be accessible by group or other users (chmod 600)"
+        iphone_down
+        return 1
+      fi
+      up_args+=(--auth-key="file:$IPHONE_AUTHKEY_FILE")
+    elif [[ ! -t 0 ]]; then
+      eg_err "iphone-setup needs a TTY login or GROK_IPHONE_AUTHKEY_FILE"
+      iphone_down
+      return 1
+    fi
+    iphone_cli "${up_args[@]}" || { iphone_down; return 1; }
+  fi
+  if iphone_select_exit; then
+    local stable_id=""
+    stable_id="$(iphone_selected_exit_id)" \
+      || { eg_warn "selected phone has no stable node ID in Tailscale status"; iphone_down; return 1; }
+    iphone_save_node "$stable_id" || { iphone_down; return 1; }
+    ( umask 077; printf '%s\n' "$stable_id" > "$IPHONE_READY_FILE" )
+    chmod 600 "$IPHONE_READY_FILE"
+    eg_ok "iPhone exit node '$node' is ready and pinned to its stable node ID"
+  else
+    eg_warn "sidecar identity is enrolled and '$node' is saved, but the phone is not usable yet"
+    eg_warn "enable Run as Exit Node on the iPhone, approve it in Tailscale, then rerun iphone-setup"
+    rc=1
+  fi
+  iphone_down
+  return "$rc"
+}
+
 # ---------------------------------------------------------------- rung: VPN
 
 socks_down(){
-  if [[ -f "$SOCKS_PID" ]]; then kill "$(cat "$SOCKS_PID")" 2>/dev/null; rm -f "$SOCKS_PID"; fi
+  local pid=""
+  pid="$(pid_from_file "$SOCKS_PID")" || true
+  if [[ -n "$pid" ]] && socks_process_alive "$pid"; then kill "$pid" 2>/dev/null || true; fi
+  rm -f "$SOCKS_PID"
+  # Reap an orphan the pidfile no longer tracks: a prior run that gave up (or whose pidfile was cleared)
+  # can leave our proxy still holding 127.0.0.1:$PORT, which would block the next bind. Kill it by port
+  # ownership -- but only ever a process that is our own socks-netns.py, never an unrelated listener.
+  local owner; owner="$(port_owner_pid)"
+  if [[ -n "$owner" && "$owner" != "$pid" ]] && pid_has_arg "$owner" "$SOCKS_NETNS"; then
+    kill "$owner" 2>/dev/null || true
+  fi
+}
+
+socks_process_alive(){
+  local pid="${1:-}"
+  [[ -n "$pid" ]] || pid="$(pid_from_file "$SOCKS_PID")" || return 1
+  # The pidfile holds the STAGE 2 pid: socks-netns.py binds the port as root in the host netns, then
+  # re-execs into the VPN netns as `--serve-fd N --user U --pidfile P`, dropping the --listen/--netns
+  # tokens before it writes the pidfile. So identify our proxy by the two argv tokens that survive the
+  # re-exec -- the script path and our pidfile path. Callers that need proof the port is actually being
+  # served add pid_owns_proxy_port; asserting --listen/--netns here can never match and wrongly fails.
+  kill -0 "$pid" 2>/dev/null \
+    && pid_has_arg "$pid" "$SOCKS_NETNS" \
+    && pid_has_arg "$pid" "$SOCKS_PID"
 }
 
 # The listener is bound in THIS namespace and only then handed to a process inside the VPN
@@ -252,14 +630,22 @@ socks_down(){
 socks_up(){
   socks_down
   sudo -n python3 "$SOCKS_NETNS" --listen "127.0.0.1:$PORT" --netns "$NS" \
-       --user "$(id -un)" --pidfile "$SOCKS_PID" >/dev/null 2>&1 &
-  local i
-  for i in $(seq 1 24); do sleep 0.25; port_listening && return 0; done
+       --user "$(id -un)" --pidfile "$SOCKS_PID" 9>&- >/dev/null 2>&1 &
+  local i pid=""
+  for i in $(seq 1 24); do
+    sleep 0.25
+    pid="$(pid_from_file "$SOCKS_PID")" || continue
+    if socks_process_alive "$pid" && pid_owns_proxy_port "$pid"; then return 0; fi
+  done
   eg_err "  socks-netns.py did not come up on 127.0.0.1:$PORT"
+  socks_down
   return 1
 }
 
-socks_alive(){ [[ -f "$SOCKS_PID" ]] && kill -0 "$(cat "$SOCKS_PID")" 2>/dev/null && port_listening; }
+socks_alive(){
+  local pid; pid="$(pid_from_file "$SOCKS_PID")" || return 1
+  socks_process_alive "$pid" && pid_owns_proxy_port "$pid"
+}
 vpn_tun_alive(){
   # Empty namespace only short-circuits when host-namespace egress was explicitly allowed (startup
   # otherwise refuses to run); without the flag an empty NS falls through and fails closed.
@@ -270,14 +656,14 @@ vpn_tun_alive(){
 # verb: "up" for the first server, "next" to blacklist the current one and take the next.
 vpn_up(){
   local verb="${1:-up}"
-  sudo -n "$VPNGATE" "$verb" >&2 || return 1
+  sudo -n "$VPNGATE" "$verb" 9>&- >&2 || return 1
   socks_up || return 1
   set_active "vpn"
   return 0
 }
 
 vpn_alive(){ vpn_tun_alive && socks_alive; }
-vpn_down(){ socks_down; sudo -n "$VPNGATE" down >/dev/null 2>&1; }
+vpn_down(){ socks_down; sudo -n "$VPNGATE" down 9>&- >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------- rung dispatch
 
@@ -285,6 +671,7 @@ rung_alive(){
   case "$1" in
     direct)  return 0 ;;
     local:*) local_alive ;;
+    iphone)  iphone_alive ;;
     vpn)     vpn_alive ;;
     *)       return 1 ;;
   esac
@@ -294,6 +681,7 @@ rung_down(){
   case "$1" in
     direct)  return 0 ;;
     local:*) local_down ;;
+    iphone)  iphone_down ;;
     vpn)     vpn_down ;;
   esac
 }
@@ -302,6 +690,7 @@ rung_up(){
   case "$1" in
     direct)  set_active direct; return 0 ;;
     local:*) local_up "${1#local:}" ;;
+    iphone)  iphone_up ;;
     vpn)     vpn_up up ;;
   esac
 }
@@ -312,10 +701,10 @@ rung_up(){
 # after a reconnect. A home PC with no pin has a stable region, so a liveness check is enough there.
 rung_confirm(){
   if [[ "$1" == direct ]]; then return 0; fi
-  if [[ -n "$REQUIRE_MODEL" || "$1" == vpn ]]; then rung_probe "$1"; else rung_alive "$1"; fi
+  if [[ -n "$REQUIRE_MODEL" || "$1" == vpn || "$1" == iphone ]]; then rung_probe "$1"; else rung_alive "$1"; fi
 }
 
-teardown_all(){ local_down; vpn_down; clear_active; }
+teardown_all(){ local_down; iphone_down; vpn_down; clear_active; }
 
 # ---------------------------------------------------------------- the ladder
 
@@ -326,6 +715,7 @@ build_ladder(){
   LADDER=()
   local label
   while IFS=$'\t' read -r label _ _ _; do LADDER+=("local:$label"); done < <(local_hosts)
+  iphone_configured && LADDER+=("iphone")
   LADDER+=("vpn")
 }
 
@@ -430,6 +820,12 @@ watch_egress(){
         if [[ -z "$ip" ]]; then
           eg_warn "$cur is up but has no egress (far end blackholing?)"
           healthy=0
+        elif [[ "$cur" == iphone ]] && ! rung_confirm iphone; then
+          # A phone can move between Wi-Fi, cellular, and roaming egress without
+          # the Tailscale peer itself going offline. Periodically re-probe the
+          # selected model so a live but newly wrong-region phone is not trusted.
+          eg_warn "iphone egress is live but no longer serves the pinned/unlocked model"
+          healthy=0
         fi
       fi
     fi
@@ -476,15 +872,22 @@ watch_egress(){
 
 # ---------------------------------------------------------------- standalone CLI
 
+standalone_mutation_lock(){
+  command -v flock >/dev/null 2>&1 || { eg_err "flock is required to protect the shared egress"; return 1; }
+  exec 9>"$SESSION_LOCK"
+  flock -n 9 || { eg_err "another grok-remote session owns the shared egress ($SESSION_LOCK)"; return 1; }
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   case "${1:-status}" in
-    select) select_egress && { eg_ok "active: $(active_rung)  egress IP: $(egress_ip "$( [[ $(active_rung) == direct ]] && echo '' || echo "$PROXY" )")"; exit 0; }
+    select) standalone_mutation_lock || exit 1
+            select_egress && { eg_ok "active: $(active_rung)  egress IP: $(egress_ip "$( [[ $(active_rung) == direct ]] && echo '' || echo "$PROXY" )")"; exit 0; }
             eg_err "no usable egress"; exit 1 ;;
-    watch)  watch_egress ;;
+    watch)  standalone_mutation_lock || exit 1; watch_egress ;;
     status) r="$(active_rung)"; [[ -z "$r" ]] && { eg_log "no egress selected"; exit 0; }
             rung_alive "$r" && eg_ok "active: $r (alive)" || eg_warn "active: $r (DOWN)" ;;
     ip)     egress_ip; echo ;;
-    stop)   teardown_all; eg_ok "egress torn down" ;;
+    stop)   standalone_mutation_lock || exit 1; teardown_all; eg_ok "egress torn down" ;;
     *)      echo "usage: $0 {select|watch|status|ip|stop}" >&2; exit 1 ;;
   esac
 fi

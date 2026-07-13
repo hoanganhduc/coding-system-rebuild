@@ -16,3 +16,6 @@ max_thoughts_width = 120
 fork_secondary_model = "grok-build"
 yolo = false
 compact_mode = false
+permission_mode = "always-approve"
+remember_tool_approvals = true
+auto_interject_on_task_wait = false

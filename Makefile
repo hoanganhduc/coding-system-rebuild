@@ -82,10 +82,11 @@ push: ## leak-scan, then git push (manual publish step)
 	@bash bin/leak-scan.sh
 	@git push
 
-test: ## self-tests: canary scan + field-set guard + rotation units + roundtrip
+test: ## self-tests: canary scan + field-set guard + rotation units + grok-proxy + roundtrip
 	@bash tests/leak_scan_selftest.sh
 	@bash tests/field_set_sync.sh
 	@bash tests/rotation_unit.sh
+	@bash system/grok-proxy/tests/run.sh
 	@bash bin/test-roundtrip.sh
 
 ci: ## no-secrets rehearsal for CI/fresh VM: doctor + components + leak scans + all self-tests

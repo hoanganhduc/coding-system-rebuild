@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s|%s|%s\n' "${HTTPS_PROXY-unset}" "${ALL_PROXY-unset}" "${NO_PROXY-unset}" >> "$FAKE_CURL_LOG"
+printf 'VN\n'

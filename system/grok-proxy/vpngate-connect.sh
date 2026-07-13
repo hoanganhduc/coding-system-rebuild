@@ -24,6 +24,7 @@
 # when the region is correct. Prefer the home-PC path (grok-remote) when possible.
 # Data source: https://www.vpngate.net/  (public API returns a global server list).
 set -euo pipefail
+umask 077
 
 NS=grokvpn
 TUN=tun-grok
@@ -62,10 +63,29 @@ PER_TRY="${VPNGATE_PER_TRY:-15}"      # seconds to wait for each server's tunnel
 
 have(){ command -v "$1" >/dev/null 2>&1; }
 need_root(){ [[ $EUID -eq 0 ]] || { echo "[vpngate] run with sudo" >&2; exit 1; }; }
+secure_workdir(){ mkdir -p "$WORK"; chmod 700 "$WORK"; }
+
+public_ipv4(){
+  python3 - "$1" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if address.version == 4 and address.is_global else 1)
+PY
+}
+
+valid_port(){ [[ "$1" =~ ^[0-9]+$ && ${#1} -le 5 ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 
 # Cheap reachability probe (no nc on this VM). TCP only; UDP servers can't be probed
 # this way so they are tried optimistically with a short openvpn connect timeout.
-tcp_ok(){ timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; }
+tcp_ok(){
+  public_ipv4 "$1" && valid_port "$2" || return 1
+  timeout 5 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' _ "$1" "$2" 2>/dev/null
+}
 
 ensure_openvpn(){
   have openvpn && return 0
@@ -79,7 +99,7 @@ ensure_openvpn(){
 netns_ok(){ ip netns exec "$NS" ip link show "$TUN" >/dev/null 2>&1; }
 
 fetch_list(){
-  mkdir -p "$WORK"
+  secure_workdir
   echo "[vpngate] fetching VPN Gate server list ..." >&2
   # VPN Gate serves CRLF; strip CR once here so every downstream parse (and base64) is clean.
   curl -s --max-time 40 "$API" | tr -d '\r' > "$WORK/list.csv" || true
@@ -87,6 +107,42 @@ fetch_list(){
   [[ -s "$WORK/list.csv" ]] || { echo "[vpngate] could not fetch the server list" >&2; exit 1; }
   normalize_list
   [[ -s "$WORK/parsed.tsv" ]] || { echo "[vpngate] no usable servers in the fetched list" >&2; exit 1; }
+}
+
+# The public API supplies both an IP column and a base64 OpenVPN config. Treat the
+# config as untrusted even after directive allowlisting: pin its one `remote` line
+# to the independently validated public API IP, validate the port/protocol, and
+# normalize the line before root OpenVPN sees it. Results are returned in the two
+# globals below so the caller does not have to parse the config again.
+REMOTE_PORT=""
+REMOTE_PROTO=""
+pin_remote(){
+  local ovpn="$1" ip="$2" count proto_count port proto tmp
+  REMOTE_PORT=""; REMOTE_PROTO=""
+  public_ipv4 "$ip" || return 1
+  count="$(awk '$1=="remote"{n++} END{print n+0}' "$ovpn")"
+  [[ "$count" == 1 ]] || return 1
+  proto_count="$(awk '$1=="proto"{n++} END{print n+0}' "$ovpn")"
+  (( proto_count <= 1 )) || return 1
+  port="$(awk '$1=="remote"{print $3; exit}' "$ovpn")"
+  valid_port "$port" || return 1
+  proto="$(awk '$1=="proto"{print tolower($2); exit}' "$ovpn")"
+  : "${proto:=udp}"
+  case "$proto" in
+    udp|udp4|udp6|tcp|tcp4|tcp6|tcp-client|tcp4-client|tcp6-client) ;;
+    *) return 1 ;;
+  esac
+  tmp="$(mktemp "$ovpn.remote.XXXXXX")" || return 1
+  if awk -v ip="$ip" -v port="$port" \
+      '$1=="remote"{print "remote " ip " " port; next} {print}' "$ovpn" > "$tmp"; then
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$ovpn"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+  REMOTE_PORT="$port"
+  REMOTE_PROTO="$proto"
 }
 
 # Parse the raw VPN Gate CSV into a clean cc<TAB>ip<TAB>score<TAB>b64 table. The CSV is
@@ -139,7 +195,7 @@ country_order(){
 build_candidates(){
   : > "$CANDF"; rm -f "$WORK"/cand-*.ovpn
   [[ -f "$SANITIZER" ]] || { echo "[vpngate] sanitizer $SANITIZER missing — refusing to use untrusted configs" >&2; return 1; }
-  local n=0 cc score ip b64 rem port proto ovpn
+  local n=0 cc score ip b64 port proto ovpn
   while read -r cc; do
     [[ -z "$cc" ]] && continue
     echo "[vpngate] scanning $cc ..." >&2
@@ -153,11 +209,12 @@ build_candidates(){
       # --up / --tls-verify / --plugin hook. Fail closed: a rejected config skips the server.
       awk -f "$SANITIZER" "$ovpn" > "$ovpn.san" || { rm -f "$ovpn" "$ovpn.san"; continue; }
       mv -f "$ovpn.san" "$ovpn"
-      rem="$(grep -iE '^remote ' "$ovpn" | head -1 | tr -d '\r')"
-      port="$(awk '{print $3}' <<<"$rem")"
-      proto="$(grep -iE '^proto ' "$ovpn" | head -1 | awk '{print $2}' | tr -d '\r')"
-      [[ -n "$port" ]] || continue
-      : "${proto:=udp}"
+      if ! pin_remote "$ovpn" "$ip"; then
+        echo "[vpngate]   rejected unsafe remote for $cc $ip" >&2
+        rm -f "$ovpn"
+        continue
+      fi
+      port="$REMOTE_PORT"; proto="$REMOTE_PROTO"
       if [[ "$proto" == tcp* ]] && ! tcp_ok "$ip" "$port"; then
         continue                                   # dead TCP server — skip fast
       fi
@@ -201,7 +258,10 @@ kill_openvpn_pid(){
   [[ -f "$pf" ]] || return 0
   p="$(cat "$pf" 2>/dev/null || true)"
   [[ "$p" =~ ^[0-9]+$ ]] || return 0
-  cmd="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null || true)"
+  [[ -r "/proc/$p/cmdline" ]] || return 0          # process already gone -> nothing to kill
+  # Group the read so a redirection failure (PID exits between the check and the read) goes to
+  # /dev/null, not stderr -- `2>/dev/null` on `tr` alone does NOT suppress the shell's redirect error.
+  cmd="$( { tr '\0' ' ' < "/proc/$p/cmdline"; } 2>/dev/null || true )"
   [[ "$cmd" == *openvpn*grok-vpngate* ]] && kill "$p" 2>/dev/null || true
 }
 
@@ -226,6 +286,7 @@ try_server(){
     --ifconfig-noexec --route-noexec \
     --script-security 2 --up "$UPSH" \
     --pull-filter ignore "setenv" \
+    --mssfix 1360 \
     --connect-retry-max 1 --connect-timeout 10 \
     --daemon grok-vpngate --writepid "$PIDF" --log "$LOGF"; then
     return 1
@@ -245,6 +306,12 @@ prepare_netns(){
   ip netns add "$NS" 2>/dev/null || true
   mkdir -p "/etc/netns/$NS"
   echo 'nameserver 1.1.1.1' > "/etc/netns/$NS/resolv.conf"
+  # This script's umask is 077, so the file lands 0600 root:root -- but socks-netns.py drops privileges
+  # inside the netns and reads /etc/resolv.conf (this file, bind-mounted by `ip netns exec`) to resolve
+  # target hostnames. Without read access every getaddrinfo fails with gaierror -> the proxy answers
+  # SOCKS "host unreachable", so grok cannot reach its API by name and silently falls back to grok-build.
+  # The file holds only a public nameserver, so world-readable is correct and not a leak.
+  chmod 644 "/etc/netns/$NS/resolv.conf"
 }
 
 # Is there a candidate left that has not already failed?
@@ -259,7 +326,7 @@ has_untried(){
 # Keep the candidate list across `next` calls so failing over costs no extra API fetch.
 # Refetch only when there is no list, or when every server on it has already failed.
 ensure_candidates(){
-  mkdir -p "$WORK"; touch "$FAILF"
+  secure_workdir; touch "$FAILF"
   write_upscript
   if [[ -s "$CANDF" ]] && has_untried; then return 0; fi
   echo "[vpngate] (re)building the candidate list" >&2
@@ -293,7 +360,7 @@ connect_from_candidates(){
 
 up(){
   need_root; ensure_openvpn
-  mkdir -p "$WORK"; : > "$FAILF"                    # fresh session: every server available again
+  secure_workdir; : > "$FAILF"                       # fresh session: every server available again
   netns_ok && { echo "[vpngate] already up"; return 0; }
   reap_openvpn                                     # clear leftovers from earlier failed runs
   ensure_candidates
@@ -329,7 +396,7 @@ next(){
 # at session start to forgive the servers that failed in the previous session.
 reset(){
   need_root
-  mkdir -p "$WORK"
+  secure_workdir
   : > "$FAILF"
   echo "[vpngate] session server blacklist cleared" >&2
 }

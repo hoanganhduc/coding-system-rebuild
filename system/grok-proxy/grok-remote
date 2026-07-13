@@ -6,13 +6,15 @@
 # the model you chose, and holds the egress up for as long as grok runs, failing over underneath
 # the session when one dies:
 #
-#     home PC over Tailscale  >  VPN Gate server  >  next VPN Gate server ...   [direct = fallback]
+#     home PC over Tailscale  >  iPhone exit node  >  VPN Gate servers ...   [direct = selection fallback]
 #
 #   grok-remote [grok-args...]   pick an egress, launch grok through it, supervise it
 #   grok-remote status           active rung, the IP grok.com sees, and the remembered model
 #   grok-remote ip               print that egress IP and exit
 #   grok-remote stop             tear the egress down
+#   grok-remote iphone-setup [NODE] enroll the isolated sidecar and select an iPhone node
 #   grok-remote --host LABEL     force one home PC from hosts.conf
+#   grok-remote --iphone         force the configured iPhone exit node
 #   grok-remote --vpn            skip the home PCs; start on VPN Gate
 #   grok-remote --no-direct      never fall back to the direct connection
 #   grok-remote --pick-model     re-open the model menu even if nothing has changed
@@ -34,12 +36,22 @@ CHOICE="$DIR/.model.choice"       # the model you last settled on (empty = let g
 SEEN="$DIR/.model.seen"           # the unlocked set you were last offered
 FORCE_PICK=0
 
-usage(){ sed -n '2,24p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage(){ sed -n '2,26p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+acquire_session_lock(){
+  command -v flock >/dev/null 2>&1 || { eg_err "flock is required to protect the shared egress"; return 1; }
+  exec 9>"$SESSION_LOCK"
+  if ! flock -n 9; then
+    eg_err "another grok-remote session owns the shared egress ($SESSION_LOCK)"
+    return 1
+  fi
+}
 
 no_egress_help(){ cat >&2 <<EOF
 ${c_red}[egress]${c_rst} No egress unlocks anything beyond what this VM already sees.
   - Wake a home PC, confirm 'tailscale status' shows it online, and make sure its
     ssh_user is filled in in $CONF
+  - Or configure/repair the phone rung:  grok-remote iphone-setup
   - Or force the VPN Gate fallback:   grok-remote --vpn
   - Or accept the direct connection:  drop --no-direct
 EOF
@@ -230,7 +242,7 @@ launch(){
     fi
   fi
 
-  watch_egress &
+  ( exec 9>&-; watch_egress ) &
   WATCHDOG_PID=$!
   # Run grok backgrounded and wait on it, so an external `kill -TERM` on this wrapper is forwarded to
   # grok at once. A foreground external command would defer the trap until grok exits on its own,
@@ -245,12 +257,18 @@ launch(){
   # foreground group, so it reads input and paints the TUI without SIGTTIN/SIGTTOU. Resetting
   # INT/QUIT in the subshell hands grok clean default handlers to install its own over.
   local rc=0
+  # models_via() rewrites grok's model cache on every probe, and the last probe before launch was
+  # learn_baseline's DIRECT fetch -- so the cache now holds the blocked region's list, not what this
+  # egress serves. Drop it so grok refetches /v1/models through the session's own connection; otherwise
+  # it validates -m against the stale list and rejects the model ("unknown model id" / silent demote).
+  rm -f "$GROK_MODELS_CACHE"
   if [[ "$rung" == direct ]]; then
-    ( trap - INT QUIT; exec "$GROK_BIN" --leader-socket "$LEADER" "${marg[@]}" "$@" ) <&0 &
+    ( trap - INT QUIT; exec 9>&-
+      exec "${CLEAN_PROXY_ENV[@]}" "$GROK_BIN" --leader-socket "$LEADER" "${marg[@]}" "$@" ) <&0 &
   else
-    ( trap - INT QUIT
-      ALL_PROXY="$PROXY" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
-        exec "$GROK_BIN" --leader-socket "$LEADER" "${marg[@]}" "$@" ) <&0 &
+    ( trap - INT QUIT; exec 9>&-
+      exec "${CLEAN_PROXY_ENV[@]}" ALL_PROXY="$PROXY" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
+        "$GROK_BIN" --leader-socket "$LEADER" "${marg[@]}" "$@" ) <&0 &
   fi
   GROK_PID=$!
 
@@ -273,15 +291,23 @@ main(){
       # region-independent, local-only grok subcommands: run bare grok, pick no egress
       exec "$GROK_BIN" "$@" ;;
     status) cmd_status; exit 0 ;;
-    ip)     rung_alive "$(active_rung)" || select_egress >/dev/null || { no_egress_help; exit 1; }
+    ip)     acquire_session_lock || exit 1
+            rung_alive "$(active_rung)" || select_egress >/dev/null || { no_egress_help; exit 1; }
             egress_ip "$(proxy_for "$(active_rung)")"; echo; exit 0 ;;
-    stop)   teardown_all; eg_ok "egress torn down"; exit 0 ;;
+    stop)   acquire_session_lock || exit 1
+            teardown_all; eg_ok "egress torn down"; exit 0 ;;
+    iphone-setup)
+            acquire_session_lock || exit 1
+            shift; [[ $# -le 1 ]] || { eg_err "usage: grok-remote iphone-setup [NODE]"; exit 2; }
+            iphone_setup "${1:-}"; exit $? ;;
   esac
 
-  local force_host="" force_vpn=0
+  local force_host="" force_vpn=0 force_iphone=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --host)       force_host="${2:-}"; shift 2 ;;
+      --host)       [[ $# -ge 2 && -n "$2" ]] || { eg_err "--host requires a label"; exit 2; }
+                    force_host="$2"; shift 2 ;;
+      --iphone)     force_iphone=1; shift ;;
       --vpn)        force_vpn=1; shift ;;
       --no-direct)  ALLOW_DIRECT=0; shift ;;
       --pick-model) FORCE_PICK=1; shift ;;
@@ -298,18 +324,59 @@ main(){
     completions|help|worktree|leader) exec "$GROK_BIN" "$@" ;;
   esac
 
-  if [[ -n "$(active_rung)" ]] && rung_alive "$(active_rung)"; then
+  local forced=0
+  [[ -n "$force_host" ]] && forced=$((forced + 1))
+  (( force_iphone )) && forced=$((forced + 1))
+  (( force_vpn )) && forced=$((forced + 1))
+  (( forced <= 1 )) || { eg_err "choose only one of --host, --iphone, or --vpn"; exit 2; }
+  acquire_session_lock || exit 1
+
+  # The rung the caller explicitly demanded, if any. A forced rung must NOT be satisfied by reusing a
+  # different egress that merely happens to be up (e.g. `--host windows` reusing a leftover vpn rung).
+  local want=""
+  [[ -n "$force_host" ]] && want="local:$force_host"
+  (( force_iphone )) && want="iphone"
+  (( force_vpn )) && want="vpn"
+
+  local cur reusable=0; cur="$(active_rung)"
+  if [[ -n "$cur" ]] && rung_alive "$cur" && { [[ -z "$want" ]] || [[ "$cur" == "$want" ]]; }; then
+    reusable=1
+    if [[ "$cur" == iphone ]] && ! rung_probe iphone; then
+      eg_warn "the existing iPhone sidecar is live but its current egress no longer qualifies"
+      rung_down iphone
+      clear_active
+      cur=""
+      reusable=0
+    fi
+  fi
+  # A persisted rung can be unhealthy while its old process still owns the shared
+  # SOCKS port. Tear it down before walking from the top, or the stale listener
+  # makes every preferred home-PC bind fail and incorrectly pushes selection down.
+  if (( ! reusable )) && [[ -n "$cur" ]]; then
+    eg_warn "discarding stale or non-requested egress: $cur"
+    teardown_all
+    cur=""
+  fi
+  if (( reusable )); then
     # Reusing a live egress keeps its cached baseline (egress.sh ages it out on GROK_BASELINE_TTL);
     # only a fresh selection re-measures, so the rm below lives in the non-reuse branches. Re-measuring
     # is what lets a model that becomes available everywhere join the baseline instead of looking like
     # something a tunnel unlocked.
-    eg_log "reusing the egress already up: $(active_rung)"
+    eg_log "reusing the egress already up: $cur"
   elif [[ -n "$force_host" ]]; then
     rm -f "$BASELINE"
+    [[ -n "$cur" && "$cur" != "$want" ]] && teardown_all   # free the shared SOCKS port from the old rung
     rung_up "local:$force_host" && rung_probe "local:$force_host" \
       || { eg_err "forced host '$force_host' unlocks nothing"; rung_down "local:$force_host"; clear_active; exit 1; }
+  elif (( force_iphone )); then
+    rm -f "$BASELINE"
+    [[ -n "$cur" && "$cur" != "$want" ]] && teardown_all
+    learn_baseline
+    rung_up iphone && rung_probe iphone \
+      || { eg_err "configured iPhone is unavailable or unlocks nothing"; rung_down iphone; clear_active; exit 1; }
   elif (( force_vpn )); then
     rm -f "$BASELINE"
+    [[ -n "$cur" && "$cur" != "$want" ]] && teardown_all
     learn_baseline; try_vpn_sequence || { vpn_down; clear_active; no_egress_help; exit 1; }
   else
     rm -f "$BASELINE"
