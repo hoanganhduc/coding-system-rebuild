@@ -125,6 +125,57 @@ arguments. An explicit path can change a scanner's scope and exclusion policy.
 
 ---
 
+## [ERR-20260717-045] installer-fixture-depended-on-production-lock
+
+**Logged**: 2026-07-17T01:58:10Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+After delegated cgroup setup let GitHub Actions reach the installer suite, 98
+cases failed because the fake `grok-remote` embedded the production
+self-admission block and tried to open the live production install lock. The
+development host already had that lock, masking the fresh-runner dependency.
+
+### Error
+
+    compatibility-matrix: exit 78
+    /var/lib/grok-proxy/release-control/install.lock: No such file or directory
+
+### Response
+
+Keep the exact production admission-marker bytes in the fixture, but mark the
+fake payload as already admitted by the generated gate under test. Production
+admission and evidence validation remain unchanged. A clean container without
+the production lock now passes the exact formerly failing install case.
+
+### Prevention
+
+Fixtures that embed production boundary code must explicitly neutralize live
+host dependencies outside the boundary being tested. Validate them once in an
+environment without existing installation state; a green development host is
+not fresh-host evidence.
+
+### Canonical Integration Plan
+
+- Related Skills: none
+- Related Settings Or Artifacts: installer regression tests, GitHub Actions
+- Affected Install Targets: not_applicable
+- Affected OS/Substrates: linux
+- Canonical Repo Change: `system/grok-proxy/tests/test_release_installer.py`
+- Docs And Generated Outputs: not needed
+- Verification Plan: clean-container focused test, delegated local installer suite, hosted rehearsal
+- Blocked Or Unsupported Targets: non-Linux substrates unverified
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `system/grok-proxy/tests/test_release_installer.py`,
+  `system/grok-proxy/install-release.py`
+
+---
+
 ## [ERR-20260717-042] empty-pgrep-aborted-clean-residue-probe
 
 **Logged**: 2026-07-17T00:24:00Z

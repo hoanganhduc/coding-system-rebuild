@@ -99,6 +99,10 @@ def write_source(
                 "RELEASE_CANARY=0\n"
                 '[[ "${GROK_RELEASE_CANARY_MODE:-0}" == 1 ]] && RELEASE_CANARY=1\n'
                 + release_installer.GROK_SELF_ADMISSION_BLOCK.decode("ascii")
+                # The fixture runs only behind the generated gate, which is
+                # the admission boundary under test.  Do not make it depend
+                # on a live host's production install lock as a second gate.
+                + "RELEASE_ADMITTED=1\n"
                 + release_installer.GROK_ORDINARY_ADMISSION_BLOCK.decode("ascii")
                 + CANARY_FIXTURE
                 + f"printf 'grok-remote:{version}:%s\\n' \"$*\"\n"
