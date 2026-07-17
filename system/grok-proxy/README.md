@@ -181,7 +181,7 @@ grok-remote                  # compatibility mode: one session owns the egress
 grok-remote status           # active rung, the IP grok.com sees, and the remembered model
 grok-remote ip               # just that IP
 grok-remote --host arch      # force one home PC
-grok-remote --iphone         # force the configured phone; never falls back to direct
+grok-remote --iphone         # force the configured phone when it offers your selected model
 grok-remote --vpn            # skip direct and the home PCs, start on VPN Gate
 grok-remote --no-direct      # never use direct, even if it would work
 grok-remote --pick-model     # re-open the model menu even if nothing has changed
@@ -193,6 +193,17 @@ The default compatibility mode remains a verified singleton: one mutating
 `grok-remote` command owns the legacy proxy/state at a time. A second launch,
 `ip`, setup, or `stop` command fails fast while that lock is held; `status`
 remains read-only.
+
+Forced iPhone selection is intentionally different from automatic discovery.
+Automatic mode uses the phone only when it adds a model beyond the direct
+baseline. `--iphone` instead honors the requested route when the phone is
+healthy, passes country policy, and offers the explicit, environment-pinned, or
+nonempty remembered model—even if direct now offers that model too. With no
+concrete preference, a forced model picker or routed `models` command receives
+the phone's complete valid catalog. An intentionally empty remembered choice
+continues to mean “let Grok decide.” The watchdog preserves that forced route:
+it repairs or reacquires only the configured phone and never silently demotes
+an explicit `--iphone` session to VPN.
 
 Set the opt-in flag on every participating launch to share one qualified
 route between simultaneous Grok processes:
@@ -293,9 +304,17 @@ deleted, requests through the proxy fail rather than leaking out of the host.
 | `VPNGATE_COUNTRIES` | — | force an ordered country list, e.g. `"VN JP"` |
 
 State kept in this directory: `.model.choice` (your model), `.model.seen` (the menu you were last
-offered), `.baseline.models`, `.unlocked.models`, `.egress.state`. The iPhone's Tailscale identity
+offered), `.baseline.models`, `.unlocked.models` (the selected route's eligible models: normally
+the automatic baseline delta, or the exact/full catalog admitted for a forced phone),
+`.egress.state`. The iPhone's Tailscale identity
 is deliberately outside the project tree at `~/.local/state/grok-proxy/iphone`; treat
 `tailscaled.state` as a credential and do not publish it.
+
+Compatibility mode applies a private creation mask to every Grok model probe
+and to the interactive launch.  This keeps Grok's regenerated shared model
+cache non-group-writable even when the calling shell uses a cooperative umask,
+including when the watchdog performs a later deep route check, so subsequent
+multi-session verification can safely consume it.
 
 ## Caveats
 

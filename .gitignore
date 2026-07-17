@@ -13,3 +13,8 @@ leak-denylist.txt
 __pycache__/
 .pytest_cache/
 .DS_Store
+
+# Repository-local Grok diagnostics are preserved across authoritative capture
+# but are never public backup inputs.
+/system/grok-proxy/.planning/
+/system/grok-proxy/.learnings/

@@ -220,7 +220,7 @@ CLEAN_PROXY_ENV=(env
 BASELINE="$PRIVATE_DIR/.baseline.models"            # what the VM is offered with no tunnel at all
 (( PROVIDER_MODE == 0 )) || BASELINE="$EG_RUNTIME_DIR/baseline.models"
 BASELINE_TTL="${GROK_BASELINE_TTL:-21600}"        # re-measure the baseline once it is older than this (s)
-UNLOCKED="$PRIVATE_DIR/.unlocked.models"            # what the active rung added on top of that
+UNLOCKED="$PRIVATE_DIR/.unlocked.models"            # models eligible on the selected route (normally its baseline delta)
 (( PROVIDER_MODE == 0 )) || UNLOCKED="$EG_RUNTIME_DIR/unlocked.models"
 # Optional pin. Left unset (the default), a rung is accepted when it unlocks any model the direct
 # egress cannot see -- see learn_baseline() for why that beats naming a model.
@@ -734,6 +734,10 @@ country_allowed(){ [[ -n "$1" && " $GROK_BLOCKED_CC " != *" $1 "* ]]; }
 GROK_MODELS_CACHE="${GROK_MODELS_CACHE:-$HOME/.grok/models_cache.json}"
 models_via(){
   local proxy="${1-$PROXY}" out
+  # Grok recreates its shared model cache during this probe.  Watchdog probes
+  # run in a child forked before the interactive launch path, so protect the
+  # cache here as well as in launch() instead of relying on the caller's umask.
+  umask 077
   if [[ -n "${GROK_MODELS_CMD:-}" ]]; then
     out="$(GROK_PROBE_RUNG="${2:-}" bash -c "$GROK_MODELS_CMD" 2>/dev/null | head -c 1048577)"
     (( ${#out} <= 1048576 )) || return 1
@@ -814,6 +818,37 @@ rung_unlocks(){
   eg_ok "$rung: unlocks $(paste -sd, <<<"$extra")"
 }
 
+# A caller that explicitly names the iPhone has already chosen the route.  It
+# still has to pass country policy and a real model API probe, but it need not
+# beat the direct baseline.  When a concrete target is supplied, admit only
+# that exact model; otherwise retain the complete valid catalog for the normal
+# compatibility picker or a routed `grok models` command.
+rung_offers_forced(){
+  local rung="$1" proxy="$2" required="${3:-}" got hit
+  discard_invalid_model_state_file "$UNLOCKED"
+  if [[ -n "$required" ]] && ! model_id_valid "$required"; then
+    eg_warn "configured model id is invalid"
+    return 1
+  fi
+  got="$(models_via "$proxy" "$rung")"
+  if [[ -z "$got" ]]; then eg_warn "  $rung: the API is not reachable through it"; return 1; fi
+  eg_log "  $rung offers: $(paste -sd, <<<"$got")"
+
+  if [[ -n "$required" ]]; then
+    hit="$(grep -ixF -- "$required" <<<"$got")"
+    if [[ -z "$hit" ]]; then
+      eg_warn "  $rung: does not offer $required"
+      return 1
+    fi
+    printf '%s\n' "$hit" > "$UNLOCKED"
+    eg_ok "$rung: offers $required"
+    return 0
+  fi
+
+  printf '%s\n' "$got" > "$UNLOCKED"
+  eg_ok "$rung: forced route has a usable model catalog"
+}
+
 # Country first (free, and rejects a whole class of useless exits), models second.
 rung_probe(){
   local rung="$1" proxy="$PROXY" cc
@@ -829,6 +864,19 @@ rung_probe(){
   if [[ -n "$cc" ]]; then eg_log "  $rung: exits in $cc — asking grok what that unlocks"
   else eg_log "  $rung: egress country unknown — asking grok what it unlocks anyway"; fi
   rung_unlocks "$rung" "$proxy"
+}
+
+rung_probe_forced(){
+  local rung="$1" required="${2:-}" proxy="$PROXY" cc
+  [[ "$rung" == direct ]] && proxy=""
+  cc="$(egress_country "$proxy")"
+  if [[ -n "$cc" ]] && ! country_allowed "$cc"; then
+    eg_warn "  $rung: exits in $cc — the EU / X-banned block is not an allowed forced route"
+    return 1
+  fi
+  if [[ -n "$cc" ]]; then eg_log "  $rung: exits in $cc — asking grok what it offers"
+  else eg_log "  $rung: egress country unknown — asking grok what it offers anyway"; fi
+  rung_offers_forced "$rung" "$proxy" "$required"
 }
 
 # ---------------------------------------------------------------- rung: local PC
@@ -1738,6 +1786,10 @@ rung_up(){
 # after a reconnect. A home PC with no pin has a stable region, so a liveness check is enough there.
 rung_confirm(){
   if [[ "$1" == direct ]]; then return 0; fi
+  if [[ "$1" == iphone && "${FORCE_IPHONE_ROUTE:-0}" == 1 ]]; then
+    rung_probe_forced iphone "$REQUIRE_MODEL"
+    return
+  fi
   if [[ -n "$REQUIRE_MODEL" || "$1" == vpn || "$1" == iphone ]]; then rung_probe "$1"; else rung_alive "$1"; fi
 }
 
@@ -1860,6 +1912,21 @@ demote(){
 
 # ---------------------------------------------------------------- watchdog
 
+watch_reacquire(){
+  if [[ "${FORCE_IPHONE_ROUTE:-0}" == 1 ]]; then
+    if rung_up iphone && rung_confirm iphone; then
+      return 0
+    fi
+    # Retain the exact route request across retries.  A failed partial startup
+    # must be removed before the next attempt, and it must never fall through
+    # to the automatic ladder.
+    rung_down iphone >/dev/null 2>&1 || return 1
+    clear_active
+    return 1
+  fi
+  select_egress 0 0
+}
+
 watch_egress(){
   local cycle=0 fails=0 cur
   while sleep "$WATCH_INTERVAL"; do
@@ -1868,7 +1935,7 @@ watch_egress(){
     # No egress currently held (a prior round tore everything down to fail closed). Keep hunting:
     # a home PC may have woken, or a VPN region that serves the model may now be reachable.
     if [[ -z "$cur" ]]; then
-      if select_egress 0 0 >/dev/null 2>&1; then
+      if watch_reacquire >/dev/null 2>&1; then
         eg_ok "acquired $(active_rung); grok will resume on its own"; fails=0
       fi
       continue
@@ -1925,15 +1992,22 @@ watch_egress(){
       continue
     fi
 
-    eg_err "$cur failed — demoting"
-    if demote; then
-      eg_ok "now on $(active_rung); grok will resume on its own"
+    if [[ "$cur" == iphone && "${FORCE_IPHONE_ROUTE:-0}" == 1 ]]; then
+      eg_err "forced iPhone failed — tearing it down; will retry only the configured iPhone"
+      if ! teardown_all; then
+        eg_err "forced iPhone teardown was incomplete; continuing to fail closed"
+      fi
     else
-      # Nothing serves the model right now. Fail closed: tear everything down so grok's port is not
-      # left pointed at a wrong-region exit (it fails closed and retries), and so the state stops
-      # falsely naming a rung. The empty-state branch above then re-walks the whole ladder each cycle.
-      eg_err "no egress serves the model right now — tearing down; will keep retrying from the top"
-      teardown_all
+      eg_err "$cur failed — demoting"
+      if demote; then
+        eg_ok "now on $(active_rung); grok will resume on its own"
+      else
+        # Nothing serves the model right now. Fail closed: tear everything down so grok's port is not
+        # left pointed at a wrong-region exit (it fails closed and retries), and so the state stops
+        # falsely naming a rung. The empty-state branch above then re-walks the whole ladder each cycle.
+        eg_err "no egress serves the model right now — tearing down; will keep retrying from the top"
+        teardown_all
+      fi
     fi
     fails=0
   done

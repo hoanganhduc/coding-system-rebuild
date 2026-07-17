@@ -40,6 +40,73 @@ Classify every new or newly observed runtime artifact in both `MANIFEST.yaml` an
 
 ---
 
+## [ERR-20260717-042] assumed-low-level-broker-status-cli
+
+**Logged**: 2026-07-17T05:42:24Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+The final residue audit invoked `vpn-broker status` as if it were a standalone
+positional command.  The broker intentionally exposes only a closed,
+owner-bound option schema, so argparse rejected the call before inspection.
+
+### Response
+
+Stopped the gate, acknowledged the protocol violation, read `vpn-broker
+--help`, and restarted with the supported aggregate `install-release.py status`
+plus independent OS listener/process/netns/cgroup inventories.
+
+### Prevention
+
+Do not infer a public CLI from an internal operation name.  Check `--help` for
+each low-level privileged helper and prefer the documented aggregate diagnostic
+when ownership credentials are intentionally unavailable.
+
+### Metadata
+
+- Reproducible: yes; the mistaken read-only invocation exited at argparse
+- Related Files: `system/grok-proxy/vpn-broker`, `docs/INSTALL.md`
+
+---
+
+## [ERR-20260717-041] watchdog-probe-forked-before-private-umask
+
+**Logged**: 2026-07-17T05:08:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+The first cache-permission correction applied `umask 077` only after the
+compatibility watchdog had been forked.  A later watchdog `models_via` deep
+probe could therefore delete and recreate Grok's shared cache under the
+operator's original `umask 002`, restoring unsafe mode `0664`.
+
+### Response
+
+A fresh-context reviewer traced the fork order.  Added a red fake-Grok
+regression that invokes `models_via` under `umask 002`, then applied the private
+mask at the probe boundary itself while retaining the launch boundary mask.
+
+### Prevention
+
+For shared mutable state, enumerate every producer process rather than securing
+only the primary process.  Fork ordering matters: a child created before a
+security-context change retains the old context even when a later sibling is
+correctly constrained.
+
+### Metadata
+
+- Reproducible: yes; the new focused regression failed before the correction
+  and passed afterward
+- Related Files: `system/grok-proxy/egress.sh`,
+  `system/grok-proxy/grok-remote`,
+  `system/grok-proxy/tests/test_proxy_env.sh`
+
+---
+
 ## [ERR-20260717-043] parallel-roundtrip-shared-staging-race
 
 **Logged**: 2026-07-17T01:30:03Z
@@ -2051,5 +2118,40 @@ diagnostic paths topology-generic.
 
 - Reproducible: yes
 - Related Files: `system/grok-proxy/.learnings/ERRORS.md`, `bin/leak-scan.sh`
+
+---
+
+## [ERR-20260717-040] compatibility-grok-cache-inherited-cooperative-umask
+
+**Logged**: 2026-07-17T04:43:40Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+A successful live compatibility invocation removed and let Grok recreate its
+shared model cache under the operator shell's `umask 002`, producing mode
+`0664`. The fixed multi-session real-pair verifier then failed its baseline
+before transport because group-writable cache input is outside its trust
+boundary.
+
+### Response
+
+Matched the verifier's error hash to its exact source literal, confirmed the
+live file identity, added a red fake-Grok regression under `umask 002`, and made
+the compatibility launch apply `umask 077` before Grok recreates the cache.
+
+### Prevention
+
+When one lane creates mutable state later consumed by a stricter lane, set an
+explicit creation mask at the producer boundary and test the resulting mode;
+do not rely on the interactive shell's ambient umask or repair one file ad hoc.
+
+### Metadata
+
+- Reproducible: yes; two real-pair attempts returned the same baseline error hash
+- Related Files: `system/grok-proxy/grok-remote`,
+  `system/grok-proxy/tests/test_proxy_env.sh`,
+  `system/grok-proxy/grok_ms/qualification_verifier.py`
 
 ---

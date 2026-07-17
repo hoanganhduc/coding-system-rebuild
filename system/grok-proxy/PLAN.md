@@ -115,3 +115,24 @@ deny in place for an explicit resume or rollback.
 
 Promotion stops at the first failed gate. A skipped or externally blocked live
 check is recorded as blocked, never converted into a pass.
+
+## Post-v1 correction — forced iPhone with a globally available model
+
+1. Add deterministic regressions proving that equal direct/iPhone catalogs
+   fail before the correction while automatic selection still rejects the
+   no-value tunnel.
+2. Separate explicit phone acceptance from baseline-delta discovery, resolve
+   the effective model without persisting a preference, and apply the forced
+   predicate to fresh, reused, and watchdog-revalidated phone routes while
+   retaining the forced route across teardown/retry.
+3. Verify explicit-model rejection, menu/listing neutrality, country policy,
+   watchdog pinning, private Grok cache creation by both launch and later
+   watchdog probes, teardown, syntax, and the complete deterministic suite.
+4. Capture the canonical public source into the sanitized backup, install a
+   new immutable release, re-establish intended existing route qualifications,
+   and run a real iPhone model query and inference.
+5. Obtain fresh-context test/code review, audit release and source parity, and
+   leave no listener, provider, supervisor, namespace, tun, or recovery residue.
+
+Out of scope: changing automatic ladder policy, making multi-session default,
+or supporting simultaneous different-route contracts.

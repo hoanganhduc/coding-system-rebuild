@@ -33,15 +33,18 @@ echo "PASS: probes clear inherited proxies and use only the intended route"
 # The same rule must reach the Grok child itself, not just curl probes.
 cat > "$tmp/bin/fake-grok" <<'EOF'
 #!/usr/bin/env bash
-printf '%s|%s|%s|%s\n' \
+printf '%s|%s|%s|%s|%s\n' \
   "${HTTPS_PROXY-unset}" "${ALL_PROXY-unset}" "${NO_PROXY-unset}" \
-  "$([[ -e /proc/$$/fd/9 ]] && printf inherited || printf closed)" > "$FAKE_GROK_LOG"
+  "$([[ -e /proc/$$/fd/9 ]] && printf inherited || printf closed)" \
+  "$( : > "$FAKE_CACHE_PATH"; stat -c %a "$FAKE_CACHE_PATH" )" > "$FAKE_GROK_LOG"
 EOF
 chmod 700 "$tmp/bin/fake-grok"
 
 (
+  umask 002
   export GROK_BIN="$tmp/bin/fake-grok"
   export FAKE_GROK_LOG="$tmp/grok-direct.log"
+  export FAKE_CACHE_PATH="$tmp/direct-model-cache"
   . "$tmp/target/grok-remote"
   watch_egress(){ sleep 30; }
   model_args(){ :; }
@@ -50,12 +53,14 @@ chmod 700 "$tmp/bin/fake-grok"
   exec 9>"$tmp/direct.lock"
   launch
 )
-IFS='|' read -r https all no fd < "$tmp/grok-direct.log"
-[[ "$https" == unset && "$all" == unset && "$no" == unset && "$fd" == closed ]]
+IFS='|' read -r https all no fd mode < "$tmp/grok-direct.log"
+[[ "$https" == unset && "$all" == unset && "$no" == unset && "$fd" == closed && "$mode" == 600 ]]
 
 (
+  umask 002
   export GROK_BIN="$tmp/bin/fake-grok"
   export FAKE_GROK_LOG="$tmp/grok-phone.log"
+  export FAKE_CACHE_PATH="$tmp/phone-model-cache"
   . "$tmp/target/grok-remote"
   watch_egress(){ sleep 30; }
   model_args(){ :; }
@@ -64,7 +69,29 @@ IFS='|' read -r https all no fd < "$tmp/grok-direct.log"
   exec 9>"$tmp/phone.lock"
   launch
 )
-IFS='|' read -r https all no fd < "$tmp/grok-phone.log"
-[[ "$https" == unset && "$all" == "$PROXY" && "$no" == "$NOPROXY" && "$fd" == closed ]]
+IFS='|' read -r https all no fd mode < "$tmp/grok-phone.log"
+[[ "$https" == unset && "$all" == "$PROXY" && "$no" == "$NOPROXY" && "$fd" == closed && "$mode" == 600 ]]
 
-echo "PASS: Grok children receive only the selected route and do not inherit the session lock"
+echo "PASS: Grok children receive only the selected route, a private umask, and no session lock"
+
+# Watchdog/deep probes invoke Grok through models_via() after launch has forked
+# the watcher.  They must recreate the shared model cache privately even when
+# the caller started grok-remote from a cooperative umask.
+cat > "$tmp/bin/fake-grok-models" <<'EOF'
+#!/usr/bin/env bash
+: > "$FAKE_CACHE_PATH"
+printf 'Available models:\n  * grok-4.5\n'
+EOF
+chmod 700 "$tmp/bin/fake-grok-models"
+
+(
+  umask 002
+  export GROK_BIN="$tmp/bin/fake-grok-models"
+  export GROK_MODELS_CACHE="$tmp/probe-model-cache"
+  export FAKE_CACHE_PATH="$GROK_MODELS_CACHE"
+  . "$tmp/target/egress.sh"
+  [[ "$(models_via "$PROXY" iphone)" == grok-4.5 ]]
+  [[ "$(stat -c %a "$GROK_MODELS_CACHE")" == 600 ]]
+)
+
+echo "PASS: watchdog model probes recreate Grok's shared cache privately"

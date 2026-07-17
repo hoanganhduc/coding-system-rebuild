@@ -301,6 +301,43 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
 - Obtain fresh-context code, test, and security review; repair valid findings
   and rerun affected gates.
 
+## Compatibility forced-iPhone acceptance correction
+
+An explicit compatibility invocation with `--iphone` expresses route intent,
+not a request to rerun the automatic ladder's baseline-delta policy.  A fresh
+or reusable phone route is acceptable when its pinned identity is healthy, its
+country passes policy, the model API is reachable, and it offers the effective
+session model.  Effective model precedence is explicit `-m`/`--model`, an
+existing `GROK_REQUIRE_MODEL` pin, then a valid nonempty remembered choice.  A
+missing or intentionally empty choice remains unpinned and does not silently
+become Grok's configured default.  Without an explicit/environment pin,
+model-listing subcommands and `--pick-model` remain preference-neutral and may
+expose the complete valid phone catalog; an environment pin continues to bound
+`--pick-model` as it did before this correction.
+
+The correction must not change automatic selection, demotion ordering, direct
+fallback, fail-closed cleanup, or watchdog model pinning.  A missing concrete
+target, blocked country, unreachable API, wrong phone identity, or failed
+teardown still fails closed.  Compatibility model-choice files remain written
+only by the existing model-selection path; qualification probes do not persist
+preferences.  Forced-phone intent remains bound through watchdog confirmation:
+an unpinned equal catalog is revalidated with the forced predicate, and a
+failed phone is torn down and retried without entering the automatic/VPN
+ladder.  Automatic sessions retain their existing repair and demotion order.
+Because both compatibility probes and the interactive launch remove and let
+Grok recreate its shared model cache, every such Grok child (including a
+watchdog deep probe) must inherit `umask 077`; an ambient cooperative umask must
+not produce cache state rejected by the multi-session trust boundary.
+
+Acceptance requires seen-to-fail coverage for equal direct/phone catalogs,
+fresh and reused forced routes, explicit-model precedence, absent target model,
+`--pick-model`, model-listing subcommands, blocked country, unchanged automatic
+selection, private model-cache creation by launch and watchdog probes, and
+exact post-session cleanup.
+Production changes are installed
+only through a new immutable release; selected-release parity and existing
+qualified route behavior must be re-established before delivery.
+
 ## Risks
 
 - Grok, iOS, Tailscale, residential peers, and volunteer VPN servers can change

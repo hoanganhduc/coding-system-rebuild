@@ -14,7 +14,7 @@
 #   grok-remote stop             tear the egress down
 #   grok-remote iphone-setup [NODE] enroll the isolated sidecar and select an iPhone node
 #   grok-remote --host LABEL     force one home PC from hosts.conf
-#   grok-remote --iphone         force the configured iPhone exit node
+#   grok-remote --iphone         force the configured iPhone when it offers your selected model
 #   grok-remote --vpn            skip the home PCs; start on VPN Gate
 #   grok-remote --direct         use the committed direct backend only (feature-on)
 #   grok-remote --no-direct      never fall back to the direct connection
@@ -248,6 +248,7 @@ LEADER="$PRIVATE_DIR/.grok-leader.sock"   # compatibility lane's dedicated leade
 CHOICE="$PRIVATE_DIR/.model.choice"       # remembered model (private mutable state)
 SEEN="$PRIVATE_DIR/.model.seen"           # last offered set (private mutable state)
 FORCE_PICK=0
+FORCE_IPHONE_ROUTE=0                    # internal watchdog policy; never inherited from callers
 
 usage(){ sed -n '2,26p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
@@ -329,7 +330,7 @@ pick_model(){
   cur="$(cat "$CHOICE" 2>/dev/null)"
   for i in "${!opts[@]}"; do [[ "${opts[$i]}" == "$cur" ]] && def=$((i+1)); done
   {
-    printf '\n%s[egress]%s this egress unlocks models you cannot get otherwise:\n' "$c_cyan" "$c_rst"
+    printf '\n%s[egress]%s models available through this egress:\n' "$c_cyan" "$c_rst"
     for i in "${!opts[@]}"; do
       printf '   %d) %s%s\n' "$((i+1))" "${opts[$i]}" "$([[ "${opts[$i]}" == "$cur" ]] && printf ' (current)')"
     done
@@ -350,6 +351,29 @@ grok_default_model(){
   local value
   value="$(sed -n 's/^default *= *"\(.*\)"/\1/p' "$HOME/.grok/config.toml" 2>/dev/null | head -1)"
   model_id_valid "$value" && printf '%s' "$value"
+}
+
+# Resolve only a forced-route admission target; model_args() remains the sole
+# writer of compatibility choice state.  An explicit CLI model outranks an
+# environment pin, which outranks a valid nonempty remembered choice.  Missing
+# and intentionally empty choices both preserve "let grok decide".  Without an
+# environment pin, --pick-model and routed subcommands need the full catalog.
+forced_probe_model(){
+  local model=""
+  if caller_picked_model "$@"; then
+    model="$(caller_model "$@")"
+  elif [[ -n "$REQUIRE_MODEL" ]]; then
+    model="$REQUIRE_MODEL"
+  elif (( FORCE_PICK )) || is_subcommand "${1:-}"; then
+    return 0
+  else
+    discard_invalid_model_state_file "$CHOICE"
+    model="$(cat "$CHOICE" 2>/dev/null)"
+  fi
+  if [[ -n "$model" ]]; then
+    model_id_valid "$model" || return 1
+    printf '%s' "$model"
+  fi
 }
 
 # grok keeps using its own default even when a rung has unlocked a better model, so hand it the one
@@ -414,7 +438,7 @@ model_args(){
       # offers it -- a new model appearing must not silently drop you back to grok's default. Do
       # not record these as seen either: the next interactive run still owes you the menu.
       if [[ -z "$choice" ]]; then
-        eg_ok "unlocked: $(paste -sd, "$UNLOCKED")   (run interactively to choose, or pass -m)"
+        eg_ok "available: $(paste -sd, "$UNLOCKED")   (run interactively to choose, or pass -m)"
         return 0
       fi
       eg_log "new on offer: $(printf '%s,' "${new[@]}" | sed 's/,$//') — keeping $choice for now" >&2
@@ -426,7 +450,7 @@ model_args(){
     if (( ${#unlocked[@]} > 1 )); then
       eg_ok "model: $choice (remembered — --pick-model to change)" >&2
     else
-      eg_ok "model: $choice — the one this egress unlocked" >&2
+      eg_ok "model: $choice — available through this egress" >&2
     fi
   fi
 }
@@ -488,6 +512,10 @@ launch(){
   # learn_baseline's DIRECT fetch -- so the cache now holds the blocked region's list, not what this
   # egress serves. Drop it so grok refetches /v1/models through the session's own connection; otherwise
   # it validates -m against the stale list and rejects the model ("unknown model id" / silent demote).
+  # Grok recreates this shared cache itself.  Force a private creation mask so
+  # an operator's cooperative shell umask cannot make the cache group-writable
+  # and therefore unsafe for later multi-session qualification.
+  umask 077
   rm -f "$GROK_MODELS_CACHE"
   if [[ "$rung" == direct ]]; then
     ( trap - INT QUIT; exec 9>&-
@@ -574,6 +602,12 @@ main(){
   (( force_iphone )) && forced=$((forced + 1))
   (( force_vpn )) && forced=$((forced + 1))
   (( forced <= 1 )) || { eg_err "choose only one of --host, --iphone, or --vpn"; exit 2; }
+  local forced_model=""
+  if (( force_iphone )); then
+    FORCE_IPHONE_ROUTE=1
+    forced_model="$(forced_probe_model "$@")" \
+      || { eg_err "cannot resolve a safe forced-route model"; exit 2; }
+  fi
   acquire_session_lock || exit 1
 
   # The rung the caller explicitly demanded, if any. A forced rung must NOT be satisfied by reusing a
@@ -586,12 +620,20 @@ main(){
   local cur reusable=0; cur="$(active_rung)"
   if [[ -n "$cur" ]] && rung_alive "$cur" && { [[ -z "$want" ]] || [[ "$cur" == "$want" ]]; }; then
     reusable=1
-    if [[ "$cur" == iphone ]] && ! rung_probe iphone; then
-      eg_warn "the existing iPhone sidecar is live but its current egress no longer qualifies"
-      rung_down iphone
-      clear_active
-      cur=""
-      reusable=0
+    if [[ "$cur" == iphone ]]; then
+      local phone_qualified=0
+      if (( force_iphone )); then
+        rung_probe_forced iphone "$forced_model" && phone_qualified=1
+      else
+        rung_probe iphone && phone_qualified=1
+      fi
+      if (( ! phone_qualified )); then
+        eg_warn "the existing iPhone sidecar is live but its current egress no longer qualifies"
+        rung_down iphone
+        clear_active
+        cur=""
+        reusable=0
+      fi
     fi
   fi
   # A persisted rung can be unhealthy while its old process still owns the shared
@@ -626,8 +668,8 @@ main(){
       exit 1
     fi
     learn_baseline
-    rung_up iphone && rung_probe iphone \
-      || { eg_err "configured iPhone is unavailable or unlocks nothing"; rung_down iphone; clear_active; exit 1; }
+    rung_up iphone && rung_probe_forced iphone "$forced_model" \
+      || { eg_err "configured iPhone is unavailable or does not offer an acceptable model"; rung_down iphone; clear_active; exit 1; }
   elif (( force_vpn )); then
     rm -f "$BASELINE"
     if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then

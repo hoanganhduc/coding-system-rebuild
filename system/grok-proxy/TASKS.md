@@ -188,3 +188,49 @@
   Grok/OpenVPN/relay/sidecar processes, `grokvpn` namespace, `tun-grok`, broker
   ledger/artifacts beyond the stable lock, active canary/deny records, or
   `grok-ms-*` cgroups.
+
+## Forced-iPhone equal-catalog correction — 2026-07-17
+
+- [x] Add red regressions for fresh/reused forced phone acceptance when direct
+  and phone offer the same model.
+- [x] Prove explicit-model precedence, missing-model rejection,
+  `--pick-model`/model-listing neutrality, blocked-country rejection, and
+  unchanged automatic selection.
+- [x] Implement a forced-phone model-offer predicate without changing
+  automatic discovery/demotion, cleanup, or watchdog pinning.
+- [x] Preserve forced route intent through watchdog repair/reacquisition and
+  enforce a private Grok model-cache creation mask.
+- [x] Extend that private mask to watchdog/deep `models_via` probes after a
+  fresh review reproduced cache mode `0664` under caller `umask 002`.
+- [x] Run focused tests, shell syntax, complete Grok regressions, source mirror
+  checks, and leak scan.
+- [x] Install the new immutable release, re-establish intended existing rung
+  qualifications, and pass a real iPhone model query and inference.
+- [x] Complete fresh-context review and prove source/release parity plus empty
+  runtime residue.
+
+### Final correction evidence — 2026-07-17
+
+- Selected immutable release:
+  `cc0aa2946151f9ec9edda6176c55e449a7982e37283458c960774346519e0893`.
+  Root/user selectors, boot inventory, access policy, and rollback eligibility
+  validate; deny is absent.
+- The exact equal-catalog `grok-remote --iphone models` command passed repeatedly
+  through the Vietnam phone exit, and a real pinned inference returned
+  `IPHONE_ROUTE_OK`.  Under caller `umask 002`, both probe- and launch-created
+  `~/.grok/models_cache.json` remained mode `0600`.
+- The complete deterministic suite passed, including 104 installer tests (five
+  explicit root-cgroup harness skips), install/source-backup pipelines, source
+  parity, diff checks, and the 1,687-file leak scan.
+- Fixed `load32` and forced-loss recovery passed.  Real two-session/fault/repair
+  canaries passed and were promoted for `home:windows` and VPN, including a
+  second pass after successful rollback to `370267b6...` and reinstall.
+- iPhone multi-session promotion remains withheld: two same-rung fault canaries
+  reached the guarded pair but reproduced `real-pair-cleanup` hash
+  `bc1ce0f5...`; an intervening attempt was transiently unable to list the
+  authorized model.  Exact recovery and canary abort converged each time, and
+  the public forced-phone query continued to pass.  This does not revert or
+  weaken the compatibility equal-catalog fix.
+- Final residue inventory is empty for ports 1080/11080/11081, Grok/provider
+  processes, `grokvpn`, `tun-grok`, and Grok cgroups.  Only stable empty control
+  directories, mode-0600 locks, and the bounded supervisor log remain.
