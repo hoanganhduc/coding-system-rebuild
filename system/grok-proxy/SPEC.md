@@ -338,6 +338,70 @@ Production changes are installed
 only through a new immutable release; selected-release parity and existing
 qualified route behavior must be re-established before delivery.
 
+## Compatibility forced-home acceptance correction
+
+An explicit compatibility invocation with `--host LABEL` expresses exact
+route intent just as `--iphone` does.  The named host need not add a model
+beyond the direct baseline, but it must be the configured endpoint for
+`LABEL`, establish its SSH/SOCKS route, pass country policy, reach the model
+API, and offer the effective session model.  Effective-model precedence and
+preference-neutral listing/picker behavior are identical to forced-iPhone
+selection: explicit CLI model, environment pin, valid nonempty remembered
+choice, then an unpinned complete catalog.
+
+The exact host request remains binding after initial admission.  Reuse must
+re-probe the route instead of trusting only its listener, repair must validate
+the effective model, terminal failure must tear the route down, and empty-state
+reacquisition must retry only the same `local:LABEL` rung.  A forced-host
+session must never silently demote to another home PC, iPhone, VPN, or direct.
+If exact host/iPhone teardown reports that a control master, listener, or other
+provider may remain, the route ownership record must be retained: admission
+exits, watchdog repair does not raise a replacement, and empty-state
+reacquisition cannot begin until exact cleanup succeeds. Compatibility
+teardown is one aggregate transaction across local, phone, and VPN cleanup:
+the validated owner is reconciled first, all paths are attempted, and a bounded
+second pass decides the final empty proof after shared-port cross-provider
+listeners have disappeared. State becomes empty only when that proof succeeds.
+Automatic selection, repair, demotion, stale-route replacement, `ip`, the
+standalone selector, forced-VPN failure cleanup, and `stop` must enter selection
+only from that proved-empty state. Successful automatic/stop behavior and the
+forced-VPN selection policy remain unchanged.
+A fixed-content, owner-only compatibility recovery marker durably covers every
+transition window in which route state alone cannot identify whether effects
+remain.  Startup reconciles all provider residue before raising a route; a
+pending marker makes watchdog and subsequent commands cleanup-only until the
+aggregate transaction succeeds.  State is accepted only as one exact regular
+mode-0600 record, and local SSH liveness/cleanup may consume `DEST` only when
+that validated record names a `local:*` rung.  A rejected repair clears state
+before removing its marker, while cleanup uncertainty retains the marker and
+prevents later repair, demotion, or reacquisition.
+Home-host startup publishes its validated rung, destination, and SSH port
+before creating the control master.  A publication failure therefore has no
+network effect; an interrupted or uncertain SSH startup remains recoverable
+through the persisted destination, and startup never unlinks an unexplained
+control path. Automatic selection treats retained ownership or failed
+post-probe teardown as terminal instead of overwriting it with another rung or
+direct fallback; `select_egress` independently rejects any nonempty ownership
+state as a final caller-safety boundary.
+`iphone-setup` is an owned maintenance transaction: it publishes recovery
+intent and phone ownership before starting the sidecar, and reports success
+only after final aggregate teardown proves empty. A valid selected route is
+refused with an explicit stop requirement; pending or malformed ownership is
+recovered instead. Compatibility-to-supervisor handoff consumes any valid
+pending compatibility marker under the legacy lock only after the broker
+admits migration; a fenced live legacy VPN ledger and an invalid marker both
+fail closed and are never silently discarded.
+
+Automatic home-PC selection remains baseline-delta-based, and forced VPN
+semantics remain unchanged.  Acceptance requires seen-to-fail coverage for a
+fresh equal-catalog host, reused-route model mismatch, explicit-model
+precedence, blocked country, preference-neutral model listing, exact watchdog
+repair/reacquisition/no-demotion, failed-teardown ownership retention, and
+automatic equal-catalog host rejection.
+The corrected source must be captured into the sanitized mirror and installed
+only as a newly admitted immutable release before live Windows and iPhone
+regression checks.
+
 ## Risks
 
 - Grok, iOS, Tailscale, residential peers, and volunteer VPN servers can change

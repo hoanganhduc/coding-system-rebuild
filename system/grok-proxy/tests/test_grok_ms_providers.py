@@ -940,6 +940,10 @@ while True:
 
 _FAKE_EGRESS = r'''#!/bin/bash
 set -uo pipefail
+if [[ "${1:-}" == compatibility-handoff \
+      && -e "$(dirname "$0")/next-publication-loss" ]]; then
+  exit 0
+fi
 [[ "${GROK_PROVIDER_MODE:-}" == 1 ]] || exit 80
 [[ -z "${LEAK_ME+x}" ]] || exit 81
 [[ "$GROK_EGRESS_RUNTIME_DIR" == /* ]] || exit 82
@@ -947,6 +951,100 @@ set -uo pipefail
 verb="${1:-}"
 rung="${2:-}"
 pidfile="$GROK_EGRESS_RUNTIME_DIR/legacy.pid"
+fixture="$(dirname "$0")"
+broker_ledger="$fixture/broker-ledger.json"
+write_failed_broker_ledger(){
+  GROK_TEST_BROKER_LEDGER="$broker_ledger" python3 - <<'PY'
+import json
+import os
+import pathlib
+import tempfile
+
+path = pathlib.Path(os.environ["GROK_TEST_BROKER_LEDGER"])
+policy = {
+    "max_tries": int(os.environ["GROK_PROVIDER_VPN_MAX_TRIES"]),
+    "ranking_version": os.environ["GROK_PROVIDER_VPN_RANKING_VERSION"],
+    "countries": os.environ["GROK_PROVIDER_VPN_COUNTRIES"].split(),
+    "prefer_countries": os.environ["GROK_PROVIDER_VPN_COUNTRIES"].split(),
+    "blocked_countries": os.environ["GROK_PROVIDER_VPN_BLOCKED_COUNTRIES"].split(),
+}
+record = {
+    "schema_version": 3,
+    "protocol_version": 1,
+    "caller_uid": os.getuid(),
+    "release_id": os.environ["GROK_ACTIVE_RELEASE_ID"],
+    "owner_epoch": os.environ["GROK_PROVIDER_OWNER_EPOCH"],
+    "generation": int(os.environ["GROK_PROVIDER_GENERATION"]),
+    "listen_port": int(os.environ["GROK_PROXY_PORT"]),
+    "contract_digest": os.environ["GROK_PROVIDER_CONTRACT_DIGEST"],
+    "vpn_policy": policy,
+    "phase": "FAILED",
+    "vpn": None,
+    "relay": None,
+    "operation": None,
+}
+data = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+fd, temporary = tempfile.mkstemp(prefix=".broker-ledger.", dir=path.parent)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "wb", closefd=True) as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    fd = -1
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if fd >= 0:
+        os.close(fd)
+    pathlib.Path(temporary).unlink(missing_ok=True)
+PY
+}
+validate_failed_broker_ledger(){
+  GROK_TEST_BROKER_LEDGER="$broker_ledger" python3 - <<'PY'
+import json
+import os
+import pathlib
+
+value = json.loads(pathlib.Path(os.environ["GROK_TEST_BROKER_LEDGER"]).read_text(encoding="ascii"))
+fields = {
+    "schema_version", "protocol_version", "caller_uid", "release_id",
+    "owner_epoch", "generation", "listen_port", "contract_digest",
+    "vpn_policy", "phase", "vpn", "relay", "operation",
+}
+expected_policy = {
+    "max_tries": int(os.environ["GROK_PROVIDER_VPN_MAX_TRIES"]),
+    "ranking_version": os.environ["GROK_PROVIDER_VPN_RANKING_VERSION"],
+    "countries": os.environ["GROK_PROVIDER_VPN_COUNTRIES"].split(),
+    "prefer_countries": os.environ["GROK_PROVIDER_VPN_COUNTRIES"].split(),
+    "blocked_countries": os.environ["GROK_PROVIDER_VPN_BLOCKED_COUNTRIES"].split(),
+}
+expected_owner = {
+    "caller_uid": os.getuid(),
+    "release_id": os.environ["GROK_ACTIVE_RELEASE_ID"],
+    "owner_epoch": os.environ["GROK_PROVIDER_OWNER_EPOCH"],
+    "generation": int(os.environ["GROK_PROVIDER_GENERATION"]),
+    "listen_port": int(os.environ["GROK_PROXY_PORT"]),
+    "contract_digest": os.environ["GROK_PROVIDER_CONTRACT_DIGEST"],
+    "vpn_policy": expected_policy,
+}
+valid = (
+    set(value) == fields
+    and value.get("schema_version") == 3
+    and value.get("protocol_version") == 1
+    and value.get("phase") == "FAILED"
+    and value.get("vpn") is None
+    and value.get("relay") is None
+    and value.get("operation") is None
+    and all(value.get(name) == expected for name, expected in expected_owner.items())
+)
+raise SystemExit(0 if valid else 1)
+PY
+}
 write_inventory(){
     pid="$1"
     privileged='[]'
@@ -995,6 +1093,11 @@ case "$verb" in
     counter="$(dirname "$0")/next.count"
     count="$(cat "$counter" 2>/dev/null || printf 0)"
     printf '%s\n' "$((count + 1))" > "$counter"
+    if [[ -e "$fixture/next-publication-loss" ]]; then
+      write_failed_broker_ledger
+      rm -f "$GROK_PROVIDER_INVENTORY"
+      exit 0
+    fi
     write_inventory "$pid"
     ;;
   provider-stop)
@@ -1005,8 +1108,19 @@ case "$verb" in
       kill -KILL "$pid" 2>/dev/null || true
     fi
     rm -f "$pidfile" "$GROK_PROVIDER_INVENTORY"
+    [[ ! -e "$fixture/next-publication-loss" || ! -e "$broker_ledger" ]] || exit 90
     ;;
   provider-recover)
+    if [[ -e "$fixture/next-publication-loss" && -e "$broker_ledger" ]]; then
+      validate_failed_broker_ledger || exit 91
+      attempts="$fixture/recover.count"
+      count="$(cat "$attempts" 2>/dev/null || printf 0)"
+      count="$((count + 1))"
+      printf '%s\n' "$count" > "$attempts"
+      chmod 600 "$attempts"
+      [[ ! -e "$fixture/fail-first-recover" || "$count" -gt 1 ]] || exit 92
+      rm -f "$broker_ledger"
+    fi
     pid="$(cat "$pidfile" 2>/dev/null || true)"
     if [[ "$pid" =~ ^[0-9]+$ ]]; then
       kill "$pid" 2>/dev/null || true
@@ -1018,6 +1132,7 @@ case "$verb" in
     ;;
   provider-prove-empty)
     [[ ! -e "$pidfile" && ! -e "$GROK_PROVIDER_INVENTORY" ]] || exit 85
+    [[ ! -e "$broker_ledger" ]] || exit 90
     ! ss -H -lnt "sport = :$GROK_PROXY_PORT" 2>/dev/null | grep -q . || exit 86
     ;;
   *) exit 87 ;;
@@ -1826,6 +1941,226 @@ adapter.start(wanted, TransitionDeadline.after_ms(120_000), lambda *args: None)
                     recover_compatibility=False,
                 ).recovered
             )
+
+    def test_vpn_next_publication_loss_is_residue_and_fresh_process_recovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            os.chmod(root, 0o700)
+            release = self._release(root)
+            release_id = "b" * 64
+            manifest = release / "release.json"
+            manifest.write_text(
+                json.dumps({"release_id": release_id}) + "\n",
+                encoding="ascii",
+            )
+            manifest.chmod(0o444)
+            (release / "next-publication-loss").touch()
+            (release / "fail-first-recover").touch()
+
+            runtime = root / "runtime"
+            wanted = request(unused_port(), rung="vpn", generation=23)
+            wanted = dataclasses.replace(
+                wanted,
+                contract=dataclasses.replace(
+                    wanted.contract,
+                    release_id=release_id,
+                    vpn_policy=dataclasses.replace(
+                        wanted.contract.vpn_policy,
+                        ranking_version="vpngate-score-uptime-v1",
+                    ),
+                ),
+            )
+            secure_runtime = SecureRuntime(runtime)
+            secure_runtime.initialize()
+            store = RecoveryStore(secure_runtime)
+            fence = FenceRecord(
+                schema_version=1,
+                release_id=release_id,
+                owner_epoch=wanted.owner_epoch,
+                pid=2**31 - 1,
+                pid_start_ticks=1,
+                boot_id=current_process_identity().boot_id,
+                phase="DRAINING",
+            )
+            FenceStore(secure_runtime).publish(fence)
+            effect_id = f"{wanted.owner_epoch}-g{wanted.generation}-start"
+            prepared = ProviderRecoveryRecord(
+                schema_version=1,
+                record_version=1,
+                release_id=release_id,
+                owner_epoch=wanted.owner_epoch,
+                effect_id=effect_id,
+                phase="PREPARED",
+                request=wanted,
+                resources=None,
+            )
+            store.put_provider(prepared)
+
+            def reject_first_candidate(*_args) -> QualificationEvidence:
+                raise ProviderError("injected first VPN candidate rejection")
+
+            adapter = LegacyShellProvider(runtime, release)
+            with self.assertRaisesRegex(
+                ProviderResidueError,
+                "failed-start cleanup|failed start",
+            ) as raised:
+                adapter.start(
+                    wanted,
+                    TransitionDeadline.after_ms(10_000),
+                    reject_first_candidate,
+                )
+            self.assertIn(
+                "provider-stop rejected failed-start cleanup",
+                str(raised.exception),
+            )
+            self.assertEqual((release / "next.count").read_text().strip(), "1")
+
+            retained = store.load_provider(effect_id)
+            self.assertEqual(retained, prepared)
+            failed = dataclasses.replace(prepared, phase="FAILED")
+            store.replace_provider(failed)
+            provider_path = store.provider_path(effect_id)
+            provider_bytes = provider_path.read_bytes()
+            self.assertEqual(store.list_provider_scopes(), ())
+
+            ledger_path = release / "broker-ledger.json"
+            ledger_bytes = ledger_path.read_bytes()
+            ledger = json.loads(ledger_bytes)
+            self.assertEqual(
+                set(ledger),
+                {
+                    "schema_version",
+                    "protocol_version",
+                    "caller_uid",
+                    "release_id",
+                    "owner_epoch",
+                    "generation",
+                    "listen_port",
+                    "contract_digest",
+                    "vpn_policy",
+                    "phase",
+                    "vpn",
+                    "relay",
+                    "operation",
+                },
+            )
+            self.assertEqual(
+                (
+                    ledger["schema_version"],
+                    ledger["protocol_version"],
+                    ledger["phase"],
+                    ledger["vpn"],
+                    ledger["relay"],
+                    ledger["operation"],
+                ),
+                (3, 1, "FAILED", None, None, None),
+            )
+            self.assertNotIn("transition_id", ledger)
+            self.assertEqual(
+                {
+                    "caller_uid": ledger["caller_uid"],
+                    "release_id": ledger["release_id"],
+                    "owner_epoch": ledger["owner_epoch"],
+                    "generation": ledger["generation"],
+                    "listen_port": ledger["listen_port"],
+                    "contract_digest": ledger["contract_digest"],
+                    "vpn_policy": ledger["vpn_policy"],
+                },
+                {
+                    "caller_uid": os.getuid(),
+                    "release_id": release_id,
+                    "owner_epoch": wanted.owner_epoch,
+                    "generation": wanted.generation,
+                    "listen_port": wanted.private_endpoint.port,
+                    "contract_digest": wanted.contract.digest(),
+                    "vpn_policy": {
+                        "max_tries": wanted.contract.vpn_policy.max_tries,
+                        "ranking_version": (
+                            wanted.contract.vpn_policy.ranking_version
+                        ),
+                        "countries": list(wanted.contract.vpn_policy.countries),
+                        "prefer_countries": list(
+                            wanted.contract.vpn_policy.countries
+                        ),
+                        "blocked_countries": list(
+                            wanted.contract.vpn_policy.blocked_countries
+                        ),
+                    },
+                },
+            )
+
+            recovery_helper = r'''
+import json
+import sys
+from pathlib import Path
+
+from grok_ms.supervisor import recover_offline
+
+outcome = recover_offline(
+    Path(sys.argv[1]),
+    Path(sys.argv[2]),
+    recover_compatibility=False,
+)
+print(json.dumps({"provider_records": outcome.provider_records, "recovered": outcome.recovered}))
+'''
+            environment = {
+                "PATH": os.environ.get("PATH", ""),
+                "PYTHONPATH": str(ROOT),
+                "GROK_TESTING": "1",
+            }
+
+            first = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    recovery_helper,
+                    str(runtime),
+                    str(release),
+                ],
+                text=True,
+                capture_output=True,
+                env=environment,
+                timeout=30,
+                check=False,
+            )
+            self.assertNotEqual(first.returncode, 0, first.stdout)
+            self.assertIn("ProviderResidueError", first.stderr)
+            self.assertEqual(provider_path.read_bytes(), provider_bytes)
+            self.assertEqual(ledger_path.read_bytes(), ledger_bytes)
+            self.assertEqual(store.load_provider(effect_id), failed)
+            self.assertEqual(store.list_provider_scopes(), ())
+            self.assertEqual(
+                FenceStore(secure_runtime).load(),
+                dataclasses.replace(fence, phase="RECOVERING"),
+            )
+
+            second = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    recovery_helper,
+                    str(runtime),
+                    str(release),
+                ],
+                text=True,
+                capture_output=True,
+                env=environment,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(
+                json.loads(second.stdout),
+                {"provider_records": 1, "recovered": True},
+            )
+            self.assertEqual((release / "recover.count").read_text().strip(), "2")
+            self.assertFalse(ledger_path.exists())
+            self.assertEqual(store.list_providers(), ())
+            self.assertEqual(store.list_provider_scopes(), ())
+            self.assertIsNone(FenceStore(secure_runtime).load())
+            self.assertFalse(runtime.joinpath("p").exists())
 
     def test_strict_shell_adapter_uses_isolated_env_inventory_and_empty_proof(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

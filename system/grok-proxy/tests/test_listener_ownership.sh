@@ -107,8 +107,14 @@ rm "$tmp/target/state/tailscaled.log"
   # PID. The new teardown must adopt it through argv + pidfd revalidation.
   rm -f "$IPHONE_PID_IDENTITY"
   iphone_down
+  clear_active
   unset FAKE_TAILSCALE_STATUS_JSON
 
+  # Setup now owns an aggregate compatibility transition.  This listener test
+  # exercises only the real sidecar; isolate unrelated SSH/VPN cleanup seams so
+  # it cannot consult the host's deployed broker or control socket.
+  local_down(){ [[ ! -e "$CTL" && ! -L "$CTL" ]]; }
+  vpn_down(){ :; }
   iphone_setup "100.64.0.99"
   [[ "$(cat "$IPHONE_NODE_FILE")" == n-test-phone ]]
   [[ "$(cat "$IPHONE_READY_FILE")" == n-test-phone ]]

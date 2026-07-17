@@ -135,6 +135,10 @@ else
   CTL="$PRIVATE_DIR/.tunnel.ctl"
   STATE="$PRIVATE_DIR/.egress.state"
 fi
+# Compatibility mutations publish this fixed marker before teardown or route
+# replacement effects.  Its presence is a durable instruction to recover,
+# never permission to reuse or overwrite the recorded route.
+RECOVERY_MARKER="$PRIVATE_DIR/.egress.recovery-required"
 
 # Locks and the crash-persistent recovery fence must outlive any selected code
 # release. Live callers cannot redirect them; the root broker derives the same
@@ -608,7 +612,7 @@ fi
 set_active(){
   case "$1" in
     direct|iphone|vpn) ;;
-    local:*) home_label_valid "${1#local:}" || return 1 ;;
+    local:*) home_label_valid "${1#local:}" && [[ -n "${2:-}" ]] || return 1 ;;
     *) return 1 ;;
   esac
   [[ -z "${2:-}" ]] || route_token_valid "$2" || return 1
@@ -629,7 +633,60 @@ state_value(){
   [[ -f "$STATE" ]] || return 1
   sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -1
 }
+state_record_valid(){
+  python3 - "$STATE" "$(id -u)" <<'PY' >/dev/null 2>&1
+import os
+import re
+import stat
+import sys
+
+path = sys.argv[1]
+uid = int(sys.argv[2])
+descriptor = -1
+try:
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    info = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != uid
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or not 1 <= info.st_size <= 1024
+    ):
+        raise ValueError("unsafe state metadata")
+    raw = os.read(descriptor, 1025)
+    if len(raw) != info.st_size or len(raw) > 1024:
+        raise ValueError("unstable or oversized state")
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+
+match = re.fullmatch(
+    rb"RUNG=([^\n]*)\nDEST=([^\n]*)\nSPORT=([^\n]*)\n",
+    raw,
+)
+if match is None:
+    raise SystemExit(1)
+rung, destination, sport_raw = (
+    value.decode("ascii", "strict") for value in match.groups()
+)
+token = re.compile(r"[A-Za-z0-9._:+/@-]{1,256}\Z")
+label = re.compile(r"[A-Za-z0-9._:+@-]{1,120}\Z")
+if rung.startswith("local:"):
+    if label.fullmatch(rung[6:]) is None or token.fullmatch(destination) is None:
+        raise SystemExit(1)
+elif rung not in {"direct", "iphone", "vpn"}:
+    raise SystemExit(1)
+elif destination and token.fullmatch(destination) is None:
+    raise SystemExit(1)
+if re.fullmatch(r"[1-9][0-9]{0,4}", sport_raw) is None:
+    raise SystemExit(1)
+if int(sport_raw) > 65535:
+    raise SystemExit(1)
+PY
+}
 active_rung(){
+  state_record_valid || return 1
   local value; value="$(state_value RUNG)" || return 1
   case "$value" in
     direct|iphone|vpn) ;;
@@ -639,11 +696,48 @@ active_rung(){
   printf '%s' "$value"
 }
 active_dest(){
+  state_record_valid || return 1
   local value; value="$(state_value DEST)" || return 1
   [[ -z "$value" ]] || route_token_valid "$value" || return 1
   printf '%s' "$value"
 }
 clear_active(){ rm -f "$STATE"; }
+
+recovery_marker_valid(){
+  (( PROVIDER_MODE == 0 )) || return 1
+  [[ -f "$RECOVERY_MARKER" && ! -L "$RECOVERY_MARKER" ]] || return 1
+  [[ "$(stat -c '%u:%a' "$RECOVERY_MARKER" 2>/dev/null)" == "$(id -u):600" ]] \
+    || return 1
+  [[ "$(cat "$RECOVERY_MARKER" 2>/dev/null)" == RECOVERY_REQUIRED ]]
+}
+
+recovery_transition_pending(){
+  (( PROVIDER_MODE == 0 )) || return 1
+  [[ -e "$RECOVERY_MARKER" || -L "$RECOVERY_MARKER" ]]
+}
+
+begin_recovery_transition(){
+  (( PROVIDER_MODE == 0 )) || return 0
+  if recovery_transition_pending; then
+    recovery_marker_valid
+    return
+  fi
+  local tmp
+  tmp="$(umask 077; mktemp "$RECOVERY_MARKER.XXXXXX")" || return 1
+  if printf '%s\n' RECOVERY_REQUIRED > "$tmp" \
+     && chmod 600 "$tmp" \
+     && mv -fT -- "$tmp" "$RECOVERY_MARKER"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
+end_recovery_transition(){
+  (( PROVIDER_MODE == 0 )) || return 0
+  recovery_marker_valid || return 1
+  rm -f -- "$RECOVERY_MARKER"
+}
 
 pid_from_file(){
   [[ -s "$1" ]] || return 1
@@ -818,11 +912,11 @@ rung_unlocks(){
   eg_ok "$rung: unlocks $(paste -sd, <<<"$extra")"
 }
 
-# A caller that explicitly names the iPhone has already chosen the route.  It
-# still has to pass country policy and a real model API probe, but it need not
-# beat the direct baseline.  When a concrete target is supplied, admit only
-# that exact model; otherwise retain the complete valid catalog for the normal
-# compatibility picker or a routed `grok models` command.
+# A caller that explicitly names a host or iPhone has already chosen the route.
+# It still has to pass country policy and a real model API probe, but it need
+# not beat the direct baseline.  When a concrete target is supplied, admit
+# only that exact model; otherwise retain the complete valid catalog for the
+# normal compatibility picker or a routed `grok models` command.
 rung_offers_forced(){
   local rung="$1" proxy="$2" required="${3:-}" got hit
   discard_invalid_model_state_file "$UNLOCKED"
@@ -907,19 +1001,31 @@ local_up_one(){
   [[ -s "$khost" ]] && skc="yes"
   [[ "$ip" != -* && "$user" != -* ]] || return 1
   if ! tcp_ok "$ip" "$sport"; then eg_warn "  $label ($ip:$sport) not reachable over Tailscale"; return 1; fi
-  rm -f "$CTL"
+  if [[ -e "$CTL" || -L "$CTL" ]]; then
+    eg_warn "  refusing to replace an unexplained SSH control path: $CTL"
+    return 1
+  fi
+  # Persist the exact cleanup destination before starting the SSH effect.  If
+  # publication fails, no listener is created; if startup is interrupted or
+  # fails unclearly, ordinary recovery still has the destination it must use.
+  set_active "local:$label" "$user@$ip" "$sport" || return 1
   # ControlPersist=yes, not a timeout: with a timeout the master self-terminates once no
   # SOCKS connection has been open for that long, which kills a perfectly healthy tunnel
   # while you sit reading grok's last answer. ServerAlive 5x3 notices a dead link in ~15s.
-  ssh -M -S "$CTL" -fnN \
+  if ssh -M -S "$CTL" -fnN \
       -o ControlPersist=yes \
       -o ExitOnForwardFailure=yes \
       -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
       -o StrictHostKeyChecking="$skc" \
       -o UserKnownHostsFile="$khost" \
       -o ConnectTimeout=8 -o BatchMode=yes \
-      -i "$KEY" -p "$sport" -D "127.0.0.1:$PORT" -- "$user@$ip" 9>&- || return 1
-  set_active "local:$label" "$user@$ip" "$sport"
+      -i "$KEY" -p "$sport" -D "127.0.0.1:$PORT" -- "$user@$ip" 9>&-; then
+    return 0
+  fi
+  # Clear the ownership record only after exact rollback succeeds.  A failed
+  # rollback retains the destination for a later stop/recovery attempt.
+  local_down && clear_active
+  return 1
 }
 
 local_up(){
@@ -938,8 +1044,15 @@ local_up(){
   return 1
 }
 
+local_recorded_dest(){
+  local rung
+  rung="$(active_rung 2>/dev/null)" || return 1
+  [[ "$rung" == local:* ]] || return 1
+  active_dest
+}
+
 local_alive(){
-  local dest; dest="$(active_dest 2>/dev/null || true)"
+  local dest; dest="$(local_recorded_dest 2>/dev/null || true)"
   if (( PROVIDER_MODE == 1 )) && [[ -z "$dest" ]]; then
     dest="$GROK_PROVIDER_HOME_USER@$GROK_PROVIDER_HOME_HOST"
   fi
@@ -948,7 +1061,7 @@ local_alive(){
 }
 
 local_down(){
-  local dest rc=0; dest="$(active_dest 2>/dev/null || true)"
+  local dest rc=0; dest="$(local_recorded_dest 2>/dev/null || true)"
   if (( PROVIDER_MODE == 1 )) && [[ -z "$dest" ]]; then
     dest="$GROK_PROVIDER_HOME_USER@$GROK_PROVIDER_HOME_HOST"
   fi
@@ -1480,16 +1593,28 @@ iphone_select_exit(){
 
 iphone_up(){
   iphone_configured || return 1
-  iphone_start || return 1
+  local node
+  node="$(iphone_node)" || return 1
+  [[ -n "$node" ]] || return 1
+  # Publish the sidecar cleanup identity before any process or listener effect.
+  # Failed rollback keeps this record; successful rollback removes it.
+  set_active iphone "$node" || return 1
+  if ! iphone_start; then
+    iphone_down && clear_active
+    return 1
+  fi
   # Let the just-started backend settle before judging it: an already-enrolled sidecar is briefly in
   # "Starting" and reading it too early wrongly reports "not authenticated".
   if [[ "$(iphone_wait_backend)" != Running ]]; then
     eg_warn "  iPhone sidecar is not authenticated — run: grok-remote iphone-setup"
-    iphone_down
+    iphone_down && clear_active
     return 1
   fi
-  iphone_select_exit || { iphone_down; return 1; }
-  set_active iphone "$(iphone_node)"
+  if ! iphone_select_exit; then
+    iphone_down && clear_active
+    return 1
+  fi
+  return 0
 }
 
 iphone_alive(){ iphone_listener_alive && iphone_exit_online; }
@@ -1521,13 +1646,8 @@ iphone_save_node(){
 # One-time enrollment of the sidecar identity. Authentication is interactive by
 # default; automation accepts only an auth-key FILE so the secret never appears in
 # argv or shell history. This never changes the primary Tailscale daemon.
-iphone_setup(){
-  local node="${1:-}" rc=0
-  [[ -n "$node" ]] || node="$(iphone_node)"
-  [[ -n "$node" ]] || node="$(iphone_detect_node)" || return 1
-  route_token_valid "$node" \
-    || { eg_err "iPhone exit-node IP/name has unsupported characters"; return 1; }
-  port_listening && { eg_err "port $PORT is in use — run 'grok-remote stop' before iphone-setup"; return 1; }
+iphone_setup_action(){
+  local node="$1" rc=0
   iphone_save_node "$node" || return 1
   iphone_start || return 1
   # A re-enrolled sidecar reconnects from persisted state and reaches "Running" on its own; deciding it
@@ -1543,26 +1663,24 @@ iphone_setup(){
     if [[ -n "$IPHONE_AUTHKEY_FILE" ]]; then
       local key_mode=""
       [[ -f "$IPHONE_AUTHKEY_FILE" && ! -L "$IPHONE_AUTHKEY_FILE" && -r "$IPHONE_AUTHKEY_FILE" ]] \
-        || { eg_err "GROK_IPHONE_AUTHKEY_FILE must be a readable regular file"; iphone_down; return 1; }
+        || { eg_err "GROK_IPHONE_AUTHKEY_FILE must be a readable regular file"; return 1; }
       key_mode="$(stat -c '%a' "$IPHONE_AUTHKEY_FILE" 2>/dev/null || true)"
       if [[ ! "$key_mode" =~ ^[0-7]{3,4}$ ]] || (( (8#$key_mode & 8#77) != 0 )); then
         eg_err "GROK_IPHONE_AUTHKEY_FILE must not be accessible by group or other users (chmod 600)"
-        iphone_down
         return 1
       fi
       up_args+=(--auth-key="file:$IPHONE_AUTHKEY_FILE")
     elif [[ ! -t 0 ]]; then
       eg_err "iphone-setup needs a TTY login or GROK_IPHONE_AUTHKEY_FILE"
-      iphone_down
       return 1
     fi
-    iphone_cli "${up_args[@]}" || { iphone_down; return 1; }
+    iphone_cli "${up_args[@]}" || return 1
   fi
   if iphone_select_exit; then
     local stable_id=""
     stable_id="$(iphone_selected_exit_id)" \
-      || { eg_warn "selected phone has no stable node ID in Tailscale status"; iphone_down; return 1; }
-    iphone_save_node "$stable_id" || { iphone_down; return 1; }
+      || { eg_warn "selected phone has no stable node ID in Tailscale status"; return 1; }
+    iphone_save_node "$stable_id" || return 1
     ( umask 077; printf '%s\n' "$stable_id" > "$IPHONE_READY_FILE" )
     chmod 600 "$IPHONE_READY_FILE"
     eg_ok "iPhone exit node '$node' is ready and pinned to its stable node ID"
@@ -1571,7 +1689,46 @@ iphone_setup(){
     eg_warn "enable Run as Exit Node on the iPhone, approve it in Tailscale, then rerun iphone-setup"
     rc=1
   fi
-  iphone_down
+  return "$rc"
+}
+
+iphone_setup(){
+  local node="${1:-}" rc=0 existing=""
+  [[ -n "$node" ]] || node="$(iphone_node)"
+  [[ -n "$node" ]] || node="$(iphone_detect_node)" || return 1
+  route_token_valid "$node" \
+    || { eg_err "iPhone exit-node IP/name has unsupported characters"; return 1; }
+
+  # Setup is a maintenance transaction, not an exception to route ownership.
+  # Recover a prior interrupted transition first, then publish fresh recovery
+  # intent and the exact sidecar rung before any process/listener can appear.
+  existing="$(active_rung 2>/dev/null || true)"
+  if recovery_transition_pending; then
+    eg_warn "recovering incomplete egress ownership before iphone-setup"
+    teardown_all \
+      || { eg_err "cannot run iphone-setup while prior recovery is incomplete"; return 1; }
+  elif [[ -e "$STATE" || -L "$STATE" ]]; then
+    if [[ -n "$existing" ]]; then
+      eg_err "egress route '$existing' is selected — run 'grok-remote stop' before iphone-setup"
+      return 1
+    fi
+    eg_warn "recovering malformed egress ownership before iphone-setup"
+    teardown_all \
+      || { eg_err "cannot run iphone-setup while prior recovery is incomplete"; return 1; }
+  fi
+  begin_clean_route_transition \
+    || { eg_err "cannot prove an empty route before iphone-setup"; return 1; }
+  if ! set_active iphone "$node"; then
+    eg_err "cannot publish iphone-setup cleanup ownership"
+    teardown_all >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  iphone_setup_action "$node" || rc=$?
+  if ! teardown_all; then
+    eg_err "iphone-setup cleanup was incomplete; recovery ownership was retained"
+    return 1
+  fi
   return "$rc"
 }
 
@@ -1715,9 +1872,15 @@ PY
 
 # verb: "up" for the first server, "next" to blacklist the current one and take the next.
 vpn_up(){
-  local verb="${1:-up}"
+  local verb="${1:-up}" state_published=0
   case "$verb" in up|next|reset) ;; *) return 1 ;; esac
   prepare_socks_runtime || return 1
+  # Compatibility mode has no supervisor-owned transition record, so publish
+  # cleanup ownership before asking the root broker to create anything.
+  if (( PROVIDER_MODE == 0 && HANDOFF_MODE == 0 )); then
+    set_active vpn || return 1
+    state_published=1
+  fi
   if ! vpn_broker_call "$verb" >&2; then
     (( PROVIDER_MODE == 1 )) && return 31
     return 1
@@ -1734,7 +1897,7 @@ vpn_up(){
     (( PROVIDER_MODE == 1 )) && return 33
     return 1
   fi
-  if ! set_active "vpn"; then
+  if (( state_published == 0 )) && ! set_active "vpn"; then
     vpn_broker_call down >/dev/null 2>&1 || true
     (( PROVIDER_MODE == 1 )) && return 34
     return 1
@@ -1773,7 +1936,7 @@ rung_down(){
 
 rung_up(){
   case "$1" in
-    direct)  set_active direct; return 0 ;;
+    direct)  set_active direct ;;
     local:*) local_up "${1#local:}" ;;
     iphone)  iphone_up ;;
     vpn)     vpn_up up ;;
@@ -1786,20 +1949,111 @@ rung_up(){
 # after a reconnect. A home PC with no pin has a stable region, so a liveness check is enough there.
 rung_confirm(){
   if [[ "$1" == direct ]]; then return 0; fi
-  if [[ "$1" == iphone && "${FORCE_IPHONE_ROUTE:-0}" == 1 ]]; then
-    rung_probe_forced iphone "$REQUIRE_MODEL"
+  if [[ -n "${FORCE_EXACT_ROUTE:-}" && "$1" == "$FORCE_EXACT_ROUTE" ]]; then
+    rung_probe_forced "$1" "$REQUIRE_MODEL"
     return
   fi
   if [[ -n "$REQUIRE_MODEL" || "$1" == vpn || "$1" == iphone ]]; then rung_probe "$1"; else rung_alive "$1"; fi
 }
 
-teardown_all(){
-  local rc=0
-  local_down || rc=1
-  iphone_down || rc=1
-  vpn_down || rc=1
-  clear_active || rc=1
+teardown_provider_pass(){
+  local selected="$1" rc=0
+  case "$selected" in
+    local:*)
+      local_down || rc=1
+      vpn_down || rc=1
+      iphone_down || rc=1
+      ;;
+    vpn)
+      vpn_down || rc=1
+      local_down || rc=1
+      iphone_down || rc=1
+      ;;
+    iphone)
+      iphone_down || rc=1
+      local_down || rc=1
+      vpn_down || rc=1
+      ;;
+    *)
+      local_down || rc=1
+      vpn_down || rc=1
+      iphone_down || rc=1
+      ;;
+  esac
   return "$rc"
+}
+
+teardown_all(){
+  local rc=0 selected=""
+  # Publish recovery intent before the first destructive action.  If marker
+  # publication fails, leave every effect untouched and fail closed.
+  begin_recovery_transition || return 1
+  selected="$(active_rung 2>/dev/null || true)"
+  # Every compatibility provider shares one port and both the phone and VPN
+  # absence checks reject a listener owned by another provider.  Reconcile the
+  # validated owner first, then attempt every other exact cleanup.  A second
+  # pass is the authoritative empty proof after those shared-port effects have
+  # had a chance to disappear.  For malformed/empty state the fixed first pass
+  # still discovers and removes a safely identifiable phone or VPN owner; an
+  # unidentifiable SSH control master remains fail-closed.
+  teardown_provider_pass "$selected" || true
+  teardown_provider_pass "$selected" || rc=1
+  # State is the only durable cleanup handle.  Aggregate teardown is a
+  # transaction: try every component, but publish the empty state only after
+  # all three exact cleanup paths have succeeded.
+  (( rc == 0 )) || return "$rc"
+  clear_active || return 1
+  end_recovery_transition
+}
+
+# Explicit-route recovery uses the same aggregate transaction.  Keeping this
+# named wrapper makes its watchdog policy visible at the call site.
+teardown_forced_exact(){
+  teardown_all
+}
+
+stop_egress(){
+  if teardown_all; then
+    eg_ok "egress torn down"
+    return 0
+  fi
+  eg_err "egress teardown failed; route state was left unchanged for recovery"
+  return 1
+}
+
+# Reuse a healthy selected route.  A stale or malformed record must pass the
+# aggregate teardown transaction before a new ladder walk can publish another
+# owner.  Both public command front ends use this gate.
+ensure_selected_egress(){
+  local cur=""
+  cur="$(active_rung 2>/dev/null || true)"
+  if ! recovery_transition_pending \
+     && [[ -n "$cur" ]] && rung_alive "$cur"; then
+    return 0
+  fi
+  if recovery_transition_pending || [[ -e "$STATE" || -L "$STATE" ]]; then
+    eg_warn "discarding stale or invalid egress ownership before selection"
+    if ! teardown_all; then
+      eg_err "cannot select a replacement because teardown was incomplete"
+      return 1
+    fi
+  fi
+  select_egress
+}
+
+# EMPTY state is not itself proof that no legacy process, socket, listener, or
+# broker residue exists.  Reconcile every provider first, then publish the
+# transition marker that protects the upcoming startup/qualification window.
+begin_clean_route_transition(){
+  if recovery_transition_pending || [[ -e "$STATE" || -L "$STATE" ]]; then
+    eg_err "cannot begin a clean route transition over existing ownership"
+    return 1
+  fi
+  if ! teardown_all; then
+    eg_err "cannot prove provider residue empty before route startup"
+    return 1
+  fi
+  begin_recovery_transition
 }
 
 # ---------------------------------------------------------------- the ladder
@@ -1857,48 +2111,92 @@ try_vpn_sequence(){
 # $2=0 forbids the direct fallback: when demoting, the rung being abandoned HAD unlocked models, so
 # landing on direct would silently downgrade the session and unmask the VM's region.
 select_egress(){
-  local start="${1:-0}" direct_fallback="${2:-1}" i rung
+  local start="${1:-0}" direct_fallback="${2:-1}" i rung current
+  if recovery_transition_pending || [[ -e "$STATE" || -L "$STATE" ]]; then
+    current="$(active_rung 2>/dev/null || true)"
+    eg_err "selection requires proved-empty ownership state${current:+ (currently $current)}"
+    return 1
+  fi
+  begin_clean_route_transition \
+    || { eg_err "cannot publish route-selection recovery intent"; return 1; }
   learn_baseline
   build_ladder
   for (( i = start; i < ${#LADDER[@]}; i++ )); do
     rung="${LADDER[$i]}"
     eg_log "trying rung: $rung"
     if [[ "$rung" == vpn ]]; then
-      try_vpn_sequence && return 0
-      vpn_down
+      if try_vpn_sequence; then
+        end_recovery_transition || return 1
+        return 0
+      fi
+      if ! vpn_down; then
+        eg_err "vpn selection failed and exact teardown was incomplete; aborting selection"
+        return 1
+      fi
+      clear_active || return 1
       continue
     fi
-    if ! rung_up "$rung"; then continue; fi
-    if rung_probe "$rung"; then return 0; fi
-    rung_down "$rung"
+    if ! rung_up "$rung"; then
+      current="$(active_rung 2>/dev/null || true)"
+      if [[ -e "$STATE" || -L "$STATE" ]]; then
+        eg_err "$rung startup retained cleanup ownership${current:+ as $current}; aborting selection"
+        return 1
+      fi
+      continue
+    fi
+    if rung_probe "$rung"; then
+      end_recovery_transition || return 1
+      return 0
+    fi
+    if ! rung_down "$rung"; then
+      eg_err "$rung probe failed and exact teardown was incomplete; aborting selection"
+      return 1
+    fi
+    clear_active || return 1
   done
   # Nothing on the ladder offered anything the VM cannot already see. Routing buys nothing, so take
   # the cheapest path -- but only here, at selection time, never as a demotion.
   if [[ "$direct_fallback" == 1 && "$ALLOW_DIRECT" == 1 ]]; then
     eg_warn "no egress unlocks anything beyond the direct connection — falling back to direct"
-    rm -f "$UNLOCKED"; set_active direct; return 0
+    rm -f "$UNLOCKED"
+    set_active direct || return 1
+    end_recovery_transition || return 1
+    return 0
   fi
   # A probing walk that comes up empty must not leave a rung named in the state: try_vpn_sequence
   # sets 'vpn' active before its probe, so without this the caller would see a phantom vpn rung.
-  clear_active
+  clear_active || return 1
+  end_recovery_transition || return 1
   return 1
 }
 
 # Move strictly downward. Inside the vpn rung, "down" means the next VPN Gate server.
 demote(){
-  local cur; cur="$(active_rung)"
+  local cur
+  cur="$(active_rung)" \
+    || { eg_err "cannot demote without a valid selected route"; return 1; }
+  begin_recovery_transition \
+    || { eg_err "cannot publish demotion recovery intent"; return 1; }
   if [[ "$cur" == vpn ]]; then
     eg_warn "demoting to the next VPN Gate server"
     local verb=next i=0
     while (( i < VPN_MAX_TRIES )); do
       if ! vpn_up "$verb"; then break; fi
-      if rung_probe vpn && vpn_stable; then return 0; fi
+      if rung_probe vpn && vpn_stable; then
+        end_recovery_transition || return 1
+        return 0
+      fi
       i=$((i+1))
     done
     eg_err "no VPN Gate server left"
     return 1
   fi
-  rung_down "$cur"
+  if ! rung_down "$cur"; then
+    eg_err "$cur teardown was incomplete; retaining ownership and refusing demotion"
+    return 1
+  fi
+  clear_active || return 1
+  end_recovery_transition || return 1
   # Resume the ladder just past the rung being abandoned. Deriving the index from the live ladder
   # (not a stashed LADDER_POS a reused session never set) is what stops a demote from re-probing
   # rungs above the current one. An unknown rung starts past the end -> fail closed, no fallback.
@@ -1913,15 +2211,17 @@ demote(){
 # ---------------------------------------------------------------- watchdog
 
 watch_reacquire(){
-  if [[ "${FORCE_IPHONE_ROUTE:-0}" == 1 ]]; then
-    if rung_up iphone && rung_confirm iphone; then
+  local forced="${FORCE_EXACT_ROUTE:-}"
+  if [[ -n "$forced" ]]; then
+    begin_clean_route_transition || return 1
+    if rung_up "$forced" && rung_confirm "$forced" \
+       && end_recovery_transition; then
       return 0
     fi
     # Retain the exact route request across retries.  A failed partial startup
     # must be removed before the next attempt, and it must never fall through
     # to the automatic ladder.
-    rung_down iphone >/dev/null 2>&1 || return 1
-    clear_active
+    teardown_all >/dev/null 2>&1 || return 1
     return 1
   fi
   select_egress 0 0
@@ -1930,6 +2230,12 @@ watch_reacquire(){
 watch_egress(){
   local cycle=0 fails=0 cur
   while sleep "$WATCH_INTERVAL"; do
+    if recovery_transition_pending; then
+      eg_err "route recovery is pending — retrying exact aggregate teardown"
+      teardown_all >/dev/null 2>&1 || true
+      fails=0
+      continue
+    fi
     cur="$(active_rung)"
 
     # No egress currently held (a prior round tore everything down to fail closed). Keep hunting:
@@ -1980,22 +2286,44 @@ watch_egress(){
       fi
     elif (( fails <= RUNG_RETRIES )); then
       eg_warn "$cur down — repairing (attempt $fails/$RUNG_RETRIES)"
-      rung_down "$cur"
+      if ! begin_recovery_transition; then
+        eg_err "cannot publish $cur repair recovery intent"
+        continue
+      fi
+      if ! rung_down "$cur"; then
+        if [[ -n "${FORCE_EXACT_ROUTE:-}" && "$cur" == "$FORCE_EXACT_ROUTE" ]]; then
+          eg_err "forced route $cur repair teardown was incomplete; retaining exact ownership"
+        else
+          eg_err "$cur repair teardown was incomplete; retaining ownership"
+        fi
+        continue
+      fi
       # rung_confirm, not rung_alive: a reconnected VPN may have surfaced in a region that no longer
       # serves the pinned model, and "restored" must never mean "up but wrong region".
-      if rung_up "$cur" && rung_confirm "$cur"; then
+      if rung_up "$cur" && rung_confirm "$cur" \
+         && end_recovery_transition; then
         eg_ok "$cur restored; grok will resume on its own"
         fails=0
       else
-        rung_down "$cur"                              # do not leave a wrong-region tunnel up
+        if rung_down "$cur"; then
+          if ! clear_active || ! end_recovery_transition; then
+            eg_err "$cur failed repair cleanup could not publish empty ownership; recovery remains pending"
+          fi
+        else
+          if [[ -n "${FORCE_EXACT_ROUTE:-}" && "$cur" == "$FORCE_EXACT_ROUTE" ]]; then
+            eg_err "forced route $cur failed repair cleanup; retaining exact ownership"
+          else
+            eg_err "$cur failed repair cleanup; retaining ownership"
+          fi
+        fi
       fi
       continue
     fi
 
-    if [[ "$cur" == iphone && "${FORCE_IPHONE_ROUTE:-0}" == 1 ]]; then
-      eg_err "forced iPhone failed — tearing it down; will retry only the configured iPhone"
-      if ! teardown_all; then
-        eg_err "forced iPhone teardown was incomplete; continuing to fail closed"
+    if [[ -n "${FORCE_EXACT_ROUTE:-}" && "$cur" == "$FORCE_EXACT_ROUTE" ]]; then
+      eg_err "forced route $cur failed — tearing it down; will retry only that route"
+      if ! teardown_forced_exact; then
+        eg_err "forced-route teardown was incomplete; continuing to fail closed"
       fi
     else
       eg_err "$cur failed — demoting"
@@ -2471,6 +2799,13 @@ compatibility_handoff_locked(){
   # legacy VPN is deliberately refused; it is never adopted into a new ledger.
   vpn_broker_call migrate-legacy >/dev/null || return 1
   legacy_session_lock_check || return 1
+  if recovery_transition_pending; then
+    recovery_marker_valid \
+      || { eg_err "unsafe legacy recovery marker"; return 1; }
+    eg_warn "completing pending compatibility recovery before handoff"
+    legacy_session_lock_check && teardown_all \
+      && legacy_session_lock_check || return 1
+  fi
   if [[ -e "$STATE" || -L "$STATE" ]]; then
     [[ -f "$STATE" && ! -L "$STATE" \
        && "$(stat -c %u "$STATE" 2>/dev/null)" == "$(id -u)" ]] \
@@ -2524,7 +2859,8 @@ compatibility_handoff_locked(){
      && ! -e "$IPHONE_SOCKET" && ! -L "$IPHONE_SOCKET" \
      && ! -e "$SOCKS_PID" && ! -L "$SOCKS_PID" ]] || return 1
   [[ -z "$(port_owner_pid)" ]] || return 1
-  ! port_listening
+  ! port_listening || return 1
+  ! recovery_transition_pending
 }
 
 compatibility_handoff_command(){
@@ -2543,6 +2879,21 @@ standalone_mutation_lock(){
   acquire_stable_mutation_lock
 }
 
+standalone_select_command(){
+  standalone_mutation_lock || return 1
+  if ensure_selected_egress; then
+    eg_ok "active: $(active_rung)  egress IP: $(egress_ip "$( [[ $(active_rung) == direct ]] && echo '' || echo "$PROXY" )")"
+    return 0
+  fi
+  eg_err "no usable egress"
+  return 1
+}
+
+standalone_stop_command(){
+  standalone_mutation_lock || return 1
+  stop_egress
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   case "${1:-status}" in
     provider-up) [[ $# == 2 ]] || exit 2
@@ -2557,14 +2908,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             provider_prove_empty_command "$2" ;;
     compatibility-handoff) [[ $# == 1 ]] || exit 2
             compatibility_handoff_command ;;
-    select) standalone_mutation_lock || exit 1
-            select_egress && { eg_ok "active: $(active_rung)  egress IP: $(egress_ip "$( [[ $(active_rung) == direct ]] && echo '' || echo "$PROXY" )")"; exit 0; }
-            eg_err "no usable egress"; exit 1 ;;
+    select) standalone_select_command ;;
     watch)  standalone_mutation_lock || exit 1; watch_egress ;;
     status) r="$(active_rung)"; [[ -z "$r" ]] && { eg_log "no egress selected"; exit 0; }
             rung_alive "$r" && eg_ok "active: $r (alive)" || eg_warn "active: $r (DOWN)" ;;
     ip)     egress_ip; echo ;;
-    stop)   standalone_mutation_lock || exit 1; teardown_all; eg_ok "egress torn down" ;;
+    stop)   standalone_stop_command ;;
     *)      echo "usage: $0 {select|watch|status|ip|stop|compatibility-handoff|provider-up RUNG|provider-next vpn|provider-recover RUNG|provider-stop RUNG|provider-prove-empty RUNG}" >&2; exit 1 ;;
   esac
 fi

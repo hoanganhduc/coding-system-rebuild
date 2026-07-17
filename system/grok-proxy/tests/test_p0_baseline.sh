@@ -227,6 +227,14 @@ ROOT="$ROOT" LEDGER="$tmp/vpn-up-ledger" bash -c '
       34) printf " prepare broker:up tun relay state broker:down" ;;
     esac
   }
+  expected_compatibility_calls(){
+    case "$1" in
+      31) printf " prepare state broker:up" ;;
+      32) printf " prepare state broker:up tun broker:down" ;;
+      33) printf " prepare state broker:up tun relay broker:down" ;;
+      34) printf " prepare state" ;;
+    esac
+  }
   for expected in 31 32 33 34; do
     fail_stage=$expected
     : > "$LEDGER"
@@ -252,7 +260,11 @@ ROOT="$ROOT" LEDGER="$tmp/vpn-up-ledger" bash -c '
       rc=$?
       set -e
       (( rc == 1 )) || exit 1
-      [[ "$(cat "$LEDGER")" == "$(expected_calls "$expected")" ]] || exit 1
+      if [[ "$mode" == compatibility ]]; then
+        [[ "$(cat "$LEDGER")" == "$(expected_compatibility_calls "$expected")" ]] || exit 1
+      else
+        [[ "$(cat "$LEDGER")" == "$(expected_calls "$expected")" ]] || exit 1
+      fi
     done
   done
 '
@@ -279,9 +291,13 @@ fi
 grep -q -- '--listen-port "$PORT"' "$ROOT/egress.sh" \
   || fail "egress did not bind relay ownership to the broker request port"
 
-# Teardown tries every component but reports failure if any exact cleanup fails.
-ROOT="$ROOT" bash -c '
+# Teardown tries every component but reports failure if any exact cleanup
+# fails, and it never clears route state on a partial aggregate result.
+ROOT="$ROOT" ACTIVE_STATE="$tmp/teardown-active.state" \
+  RECOVERY_STATE="$tmp/teardown-recovery.state" bash -c '
   . "$ROOT/egress.sh"
+  STATE="$ACTIVE_STATE"
+  RECOVERY_MARKER="$RECOVERY_STATE"
   calls=""
   local_down(){ calls+=" local"; return 11; }
   iphone_down(){ calls+=" iphone"; return 12; }
@@ -291,8 +307,9 @@ ROOT="$ROOT" bash -c '
   teardown_all
   rc=$?
   set -e
-  [[ "$calls" == " local iphone vpn state" ]]
+  [[ "$calls" == " local vpn iphone local vpn iphone" ]]
   (( rc != 0 ))
+  recovery_transition_pending
 '
 
 # Public compatibility commands must propagate the aggregate result.  Use
@@ -304,13 +321,21 @@ set +e
 out="$(HOME="$tmp/home" XDG_STATE_HOME="$tmp/home/.local/state" \
   GROK_TESTING=1 GROK_TEST_CONTROL_DIR="$tmp/public-control" \
   GROK_TEST_VPN_BROKER=/bin/false \
-  ROOT="$ROOT" bash -c '. "$ROOT/grok-remote"; main stop' 2>&1)"
+  ROOT="$ROOT" bash -c '
+    . "$ROOT/grok-remote"
+    PRIVATE_DIR="$HOME/grok-proxy"
+    mkdir -p "$PRIVATE_DIR"
+    STATE="$PRIVATE_DIR/.egress.state"
+    CTL="$PRIVATE_DIR/.tunnel.ctl"
+    RECOVERY_MARKER="$PRIVATE_DIR/.egress.recovery-required"
+    main stop
+  ' 2>&1)"
 rc=$?
 set -e
 (( rc != 0 )) || fail "public stop reported success after teardown failure"
 [[ "$out" != *"egress torn down"* ]] || fail "public stop printed false success"
-[[ "$out" == *"ownership state was preserved"* ]] \
-  || fail "public stop failure did not explain recovery state"
+[[ "$out" == *"route state was left unchanged for recovery"* ]] \
+  || fail "public stop failure did not explain fail-closed recovery state"
 
 # The stable fence survives loss of the live flock holder and blocks all legacy
 # mutations until recovery clears it. Test paths require the explicit test gate.

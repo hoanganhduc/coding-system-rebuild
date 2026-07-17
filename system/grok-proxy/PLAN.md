@@ -136,3 +136,38 @@ check is recorded as blocked, never converted into a pass.
 
 Out of scope: changing automatic ladder policy, making multi-session default,
 or supporting simultaneous different-route contracts.
+
+## Post-v1 correction — forced home host with a globally available model
+
+1. Reproduce `--host windows` against the selected immutable release and add a
+   deterministic equal-catalog regression that fails on the current branch.
+2. Generalize compatibility exact-route state from iPhone-only to a concrete
+   forced rung, resolve the effective model for host and phone, and apply the
+   forced offer predicate to fresh/reused host admission.
+3. Preserve the exact host through watchdog confirmation, repair, teardown,
+   and same-rung reacquisition; prohibit automatic demotion from a forced host.
+   A failed exact teardown retains its ownership record and blocks replacement
+   admission/reacquisition. Make compatibility teardown an aggregate
+   transaction: reconcile the validated owner first, attempt every provider,
+   then use a bounded second pass as the shared-port empty proof; clear state
+   only after it succeeds, and require proved-empty ownership before automatic selection,
+   watchdog repair/demotion, `ip`, standalone selection, forced-VPN failure
+   cleanup, or `stop` can replace a route.
+   Cover transition gaps with a durable owner-only recovery marker, reconcile
+   every provider before fresh startup, and keep later watchdog cycles
+   cleanup-only until marker, state, and effects converge. Bind SSH DEST use to
+   a validated local rung; make rejected-repair rollback clear state before the
+   marker; run `iphone-setup` as an owned transaction; and consume pending
+   compatibility recovery under the warm-handoff lock.
+   Persist the validated home cleanup destination before starting OpenSSH so a
+   state-publication failure is effect-free and uncertain startup is recoverable;
+   never unlink an unexplained control path, and never overwrite retained
+   ownership with another rung or direct.
+4. Prove missing-model and blocked-country failure, listing neutrality, and
+   unchanged automatic equal-catalog rejection; run focused and full suites.
+5. Synchronize the canonical and sanitized source, install and admit a new
+   immutable release, then verify live Windows success and iPhone non-regression
+   with exact post-test cleanup and a fresh-context review.
+
+Out of scope: altering automatic ladder value policy or forced-VPN selection
+policy, making multi-session default, or changing multi-session contracts.

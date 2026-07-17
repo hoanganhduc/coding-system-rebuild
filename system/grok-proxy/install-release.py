@@ -219,6 +219,26 @@ DIRECT_ADMISSION_PRODUCTION_PATHS = (
 DIRECT_ADMISSION_PRODUCTION_BUNDLES = frozenset(
     {
         (
+            "838d0f778768e48390c9a8a9075f4b321f86bcd19979ab9afbf4688126277fe7",
+            "fc8f966fe233a54659349d3cfa18d81deaf7396d3a8a6287308a1ead7a4457b9",
+            "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
+        ),
+        (
+            "838d0f778768e48390c9a8a9075f4b321f86bcd19979ab9afbf4688126277fe7",
+            "75f5c530b7fabc45bc0d8a55a8a5856e9a3f85968df2733da6f33cd6700ce99d",
+            "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
+        ),
+        (
+            "838d0f778768e48390c9a8a9075f4b321f86bcd19979ab9afbf4688126277fe7",
+            "d546b38db5a54368e2e321b9353b2b7ac055fc75a40fde056cb99482db4bf24b",
+            "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
+        ),
+        (
+            "6b85e7a1db0dfc17c3519e47a4a28ca82421da6d71b7e77920e030003f664889",
+            "cca6f7709b673aba2959017ee095ceefbc3ed614dd2b4365bb856cf7b9c8c989",
+            "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
+        ),
+        (
             "600ecdd7b7125441c5e2068202449ec64c84faa17387d602859a6f242f347a9d",
             "fecff21ce1e5513b64ce0ab79555fb6f1a997544b98fe4eabdb9df0311c02f48",
             "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
@@ -241,6 +261,11 @@ DIRECT_ADMISSION_PRODUCTION_BUNDLES = frozenset(
         (
             "c4a3f51261b35e4351690845dec4bfcc69eb0d366bae6272f6d42ce3cd5bfa82",
             "ef85fb7aff2409b1ba0b27240f1af9f8ed0de2e8e8a277b690440bfaaed3dace",
+            "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
+        ),
+        (
+            "99fa57dcddafed69c786af349a837cd17a06f5d6ed17131b3736cb8b506d2a13",
+            "269a6954a1a37d8b2bbea7dc0a12a8773b98b27dc8af59e4c66c010b8f23c505",
             "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
         ),
     }

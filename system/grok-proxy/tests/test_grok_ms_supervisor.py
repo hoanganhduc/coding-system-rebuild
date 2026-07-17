@@ -54,6 +54,7 @@ from grok_ms.providers import (
     ProviderResidueError,
     ProviderTimeout,
     ProviderRequest,
+    ProviderResult,
     ProviderResourceGraph,
     ProviderScopeRecord,
     QualificationEvidence,
@@ -242,6 +243,107 @@ def recovery_workspace(root: Path, request_value: ProviderRequest) -> Path:
     return root / "p" / hashlib.sha256(material).hexdigest()[:24]
 
 
+def modeled_provider_graph(
+    root: Path,
+    request_value: ProviderRequest,
+) -> ProviderResourceGraph:
+    workspace = recovery_workspace(root, request_value)
+    workspace.mkdir(parents=True, mode=0o700)
+    workspace.parent.chmod(0o700)
+    workspace.chmod(0o700)
+    paths: list[PathIdentity] = []
+    for name, kind in (("state", "state"), ("inventory.json", "inventory")):
+        path = workspace / name
+        path.write_text(f"{kind}\n", encoding="ascii")
+        path.chmod(0o600)
+        info = path.lstat()
+        paths.append(
+            PathIdentity(
+                path=str(path),
+                kind=kind,
+                device=info.st_dev,
+                inode=info.st_ino,
+                uid=info.st_uid,
+                mode=info.st_mode & 0o7777,
+            )
+        )
+    process = ProcessIdentity(
+        pid=2_000_000_000 - request_value.generation,
+        start_ticks=request_value.generation,
+        boot_id=read_boot_id(),
+    )
+    privileged: tuple[PrivilegedResourceIdentity, ...] = ()
+    if request_value.rung == "vpn":
+        privileged = tuple(
+            PrivilegedResourceIdentity(kind, name, request_value.transition_id)
+            for kind, name in (
+                ("namespace", "grokvpn"),
+                ("tun", "tun-grok"),
+                ("vpn_daemon", "openvpn"),
+            )
+        )
+    return ProviderResourceGraph(
+        owner_epoch=request_value.owner_epoch,
+        transition_id=request_value.transition_id,
+        generation=request_value.generation,
+        rung=request_value.rung,
+        runtime_dir=str(workspace),
+        processes=(process,),
+        listeners=(
+            ListenerIdentity(
+                request_value.private_endpoint,
+                90_000 + request_value.generation,
+                process,
+            ),
+        ),
+        paths=tuple(paths),
+        privileged=privileged,
+    )
+
+
+def promote_modeled_provider_scope(
+    store,
+    request_value: ProviderRequest,
+    child: ProcessIdentity,
+) -> ProviderScopeRecord:
+    scope = ScopeIdentity(
+        backend="cgroup-v2-v1",
+        parent_path="/sys/fs/cgroup/fake-parent",
+        parent_device=1,
+        parent_inode=2,
+        scope_path=(
+            "/sys/fs/cgroup/fake-parent/"
+            f"grok-ms-{request_value.generation:024x}"
+        ),
+        scope_device=1,
+        scope_inode=1_000 + request_value.generation,
+    )
+    record = ProviderScopeRecord(
+        schema_version=1,
+        record_version=1,
+        release_id=request_value.contract.release_id,
+        verb="provider-up",
+        phase="ATTACHED",
+        request=request_value,
+        child=child,
+        scope=scope,
+    )
+    store.put(request_value, record)
+    store.promote(request_value, record)
+    return record
+
+
+def remove_modeled_provider_files(resources: ProviderResourceGraph) -> None:
+    for identity in resources.paths:
+        Path(identity.path).unlink(missing_ok=True)
+    runtime = Path(resources.runtime_dir)
+    for directory in (runtime, runtime.parent):
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            pass
+
+
 class ExactRecoveryProvider:
     def __init__(self, provider_root: Path, marker: Path | None = None) -> None:
         self.provider_root = provider_root
@@ -278,6 +380,143 @@ class ExactRecoveryProvider:
                     path.rmdir()
                 except OSError:
                     break
+        return ResidueReport(True, ())
+
+
+class StopStateLossProvider:
+    """Model shell stop losing local state before reporting down failure."""
+
+    def __init__(self) -> None:
+        self.root: Path | None = None
+        self.scope_store = None
+        self.graph: ProviderResourceGraph | None = None
+        self.scope_record: ProviderScopeRecord | None = None
+        self.recovered_graph: ProviderResourceGraph | None = None
+        self.calls: list[str] = []
+
+    def bind(self, root: Path) -> None:
+        self.root = root
+        self.scope_store = RecoveryStore(SecureRuntime(root)).provider_scope_store
+
+    def start(self, request_value, deadline, qualifier, cancellation=None):
+        del cancellation
+        deadline.check("modeled provider start")
+        assert self.root is not None and self.scope_store is not None
+        self.calls.append("provider-up")
+        graph = modeled_provider_graph(self.root, request_value)
+        self.graph = graph
+        self.scope_record = promote_modeled_provider_scope(
+            self.scope_store,
+            request_value,
+            graph.processes[0],
+        )
+        return ProviderResult(
+            request_value,
+            qualifier(request_value.private_endpoint, request_value, deadline, None),
+            graph,
+        )
+
+    def stop(self, result, deadline, cancellation=None):
+        del cancellation
+        deadline.check("modeled provider stop")
+        self.calls.append("provider-stop")
+        remove_modeled_provider_files(result.resources)
+        raise ProviderResidueError(
+            "provider-stop shell down failed after state and inventory loss"
+        )
+
+    def prove_empty(self, _result):
+        raise AssertionError("failed provider-stop must not claim an empty proof")
+
+    def recover(self, request_value, resources, deadline):
+        deadline.check("modeled provider recover")
+        self.calls.append("provider-recover")
+        assert self.scope_store is not None
+        if resources != self.graph:
+            raise AssertionError("offline recovery did not receive the APPLIED graph")
+        self.recovered_graph = resources
+        retained = self.scope_store.load(request_value, "provider")
+        if retained != self.scope_record or retained is None:
+            raise AssertionError("offline recovery lost the promoted provider scope")
+        self.scope_store.delete(request_value, "provider", retained)
+        remove_modeled_provider_files(resources)
+        return ResidueReport(True, ())
+
+
+class NextPublicationLossProvider:
+    """Model VPN-next mutating its broker ledger before publication fails."""
+
+    def __init__(self) -> None:
+        self.root: Path | None = None
+        self.scope_store = None
+        self.scope_record: ProviderScopeRecord | None = None
+        self.ledger_path: Path | None = None
+        self.published_ledger: dict[str, object] | None = None
+        self.recovered_ledger: dict[str, object] | None = None
+        self.started_rungs: list[str] = []
+        self.calls: list[str] = []
+
+    def bind(self, root: Path) -> None:
+        self.root = root
+        self.scope_store = RecoveryStore(SecureRuntime(root)).provider_scope_store
+        self.ledger_path = root.parent / "broker-ledger.json"
+
+    def start(self, request_value, deadline, _qualifier, cancellation=None):
+        del cancellation
+        deadline.check("modeled provider next")
+        assert (
+            self.root is not None
+            and self.scope_store is not None
+            and self.ledger_path is not None
+        )
+        self.started_rungs.append(request_value.rung)
+        if request_value.rung != "vpn":
+            raise AssertionError("a lower provider rung was attempted")
+        self.calls.extend(("provider-up", "provider-next"))
+        transient = modeled_provider_graph(self.root, request_value)
+        self.scope_record = promote_modeled_provider_scope(
+            self.scope_store,
+            request_value,
+            transient.processes[0],
+        )
+        ledger = {
+            "generation": request_value.generation,
+            "transition_id": request_value.transition_id,
+        }
+        self.ledger_path.write_text(
+            json.dumps(ledger, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="ascii",
+        )
+        self.ledger_path.chmod(0o600)
+        self.published_ledger = ledger
+        remove_modeled_provider_files(transient)
+        raise ProviderResidueError(
+            "provider-next broker mutation preceded state publication failure"
+        )
+
+    def stop(self, _result, _deadline, _cancellation=None):
+        raise AssertionError("an uncommitted provider must not be stopped as active")
+
+    def prove_empty(self, _result):
+        raise AssertionError("an uncommitted provider must not claim an empty proof")
+
+    def recover(self, request_value, resources, deadline):
+        deadline.check("modeled provider recover")
+        self.calls.append("provider-recover")
+        assert self.scope_store is not None and self.ledger_path is not None
+        if resources is not None:
+            raise AssertionError("failed provider-next unexpectedly published a graph")
+        ledger = json.loads(self.ledger_path.read_text(encoding="ascii"))
+        if ledger != self.published_ledger or ledger.get("transition_id") != (
+            request_value.transition_id
+        ):
+            raise AssertionError("offline recovery did not consume the same broker ledger")
+        self.recovered_ledger = ledger
+        self.ledger_path.unlink()
+        retained = self.scope_store.load(request_value, "provider")
+        if retained != self.scope_record or retained is None:
+            raise AssertionError("offline recovery lost the provider-next scope")
+        self.scope_store.delete(request_value, "provider", retained)
         return ResidueReport(True, ())
 
 
@@ -3258,6 +3497,133 @@ raise SystemExit(88)
             # production finalization deliberately leaves the durable fence.
             running.finish()
 
+    def test_provider_stop_state_loss_retains_applied_authority_for_offline_recovery(
+        self,
+    ) -> None:
+        wanted = dataclasses.replace(
+            contract(ladder=("vpn",)),
+            release_id=_release_id(ROOT),
+        )
+        provider = StopStateLossProvider()
+        running = RunningSupervisor(wanted, provider)
+        provider.bind(running.root)
+        client = running.connect()
+        try:
+            registered = request(client, register_packet(wanted))
+            self.assertTrue(registered["ok"], registered)
+            expected_graph = running.supervisor.active_result.resources
+            client.close()
+            running.thread.join(timeout=5)
+            self.assertFalse(running.thread.is_alive())
+
+            store = RecoveryStore(SecureRuntime(running.root))
+            records = store.list_providers()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].phase, "APPLIED")
+            self.assertEqual(records[0].resources, expected_graph)
+            self.assertEqual(
+                store.provider_scope_store.load(records[0].request, "provider"),
+                provider.scope_record,
+            )
+            self.assertIsNotNone(FenceStore(running.supervisor.runtime).load())
+            self.assertTrue(
+                all(not Path(item.path).exists() for item in expected_graph.paths)
+            )
+
+            with mock.patch.object(
+                supervisor_module,
+                "process_can_still_execute",
+                return_value=False,
+            ):
+                outcome = recover_offline(
+                    running.root,
+                    ROOT,
+                    providers={"vpn": provider},
+                    recover_compatibility=False,
+                )
+            self.assertTrue(outcome.recovered)
+            self.assertEqual(outcome.provider_records, 1)
+            self.assertEqual(provider.recovered_graph, expected_graph)
+            self.assertEqual(
+                provider.calls,
+                ["provider-up", "provider-stop", "provider-recover"],
+            )
+            self.assertEqual(store.list_providers(), ())
+            self.assertEqual(store.list_provider_scopes(), ())
+            self.assertIsNone(FenceStore(running.supervisor.runtime).load())
+        finally:
+            client.close()
+            running.finish()
+
+    def test_provider_next_publication_loss_forbids_lower_commit_and_reuses_ledger(
+        self,
+    ) -> None:
+        wanted = dataclasses.replace(
+            contract(ladder=("vpn", "direct")),
+            release_id=_release_id(ROOT),
+        )
+        provider = NextPublicationLossProvider()
+        running = RunningSupervisor(wanted, provider)
+        provider.bind(running.root)
+        client = running.connect()
+        try:
+            response = request(client, register_packet(wanted))
+            self.assertFalse(response["ok"], response)
+            self.assertIn("provider-next broker mutation", response["error"])
+            client.close()
+            running.thread.join(timeout=5)
+            self.assertFalse(running.thread.is_alive())
+
+            self.assertEqual(provider.started_rungs, ["vpn"])
+            self.assertIsNone(running.supervisor.active_result)
+            self.assertIsNotNone(running.supervisor.frontend)
+            frontend = running.supervisor.frontend.gauges()
+            self.assertFalse(frontend.accepting)
+            self.assertIsNone(frontend.committed_generation)
+            self.assertIsNotNone(provider.ledger_path)
+            assert provider.ledger_path is not None
+            self.assertTrue(provider.ledger_path.exists())
+
+            store = RecoveryStore(SecureRuntime(running.root))
+            records = store.list_providers()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].phase, "FAILED")
+            self.assertIsNone(records[0].resources)
+            self.assertEqual(
+                records[0].request.transition_id,
+                provider.published_ledger["transition_id"],
+            )
+            self.assertEqual(
+                store.provider_scope_store.load(records[0].request, "provider"),
+                provider.scope_record,
+            )
+            self.assertIsNotNone(FenceStore(running.supervisor.runtime).load())
+
+            with mock.patch.object(
+                supervisor_module,
+                "process_can_still_execute",
+                return_value=False,
+            ):
+                outcome = recover_offline(
+                    running.root,
+                    ROOT,
+                    providers={"vpn": provider},
+                    recover_compatibility=False,
+                )
+            self.assertTrue(outcome.recovered)
+            self.assertEqual(provider.recovered_ledger, provider.published_ledger)
+            self.assertEqual(
+                provider.calls,
+                ["provider-up", "provider-next", "provider-recover"],
+            )
+            self.assertFalse(provider.ledger_path.exists())
+            self.assertEqual(store.list_providers(), ())
+            self.assertEqual(store.list_provider_scopes(), ())
+            self.assertIsNone(FenceStore(running.supervisor.runtime).load())
+        finally:
+            client.close()
+            running.finish()
+
     def test_unexpected_leader_residue_still_stops_provider_and_keeps_fence(self) -> None:
         wanted = contract()
         provider = ScriptedProvider((ScriptedStep("start"), ScriptedStep("stop")))
@@ -4060,6 +4426,139 @@ exit 91
             )
             self.assertFalse(second.recovered)
             self.assertEqual(adapter.calls, [("direct", 1, True)])
+
+    def test_partial_provider_recover_retains_graph_scope_and_fence_for_retry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, runtime = self.make_root(temporary)
+            fence = self.recovery_fence(runtime)
+            request_value = self.recovery_request(fence, rung="vpn")
+            privileged = tuple(
+                PrivilegedResourceIdentity(kind, name, request_value.transition_id)
+                for kind, name in (
+                    ("namespace", "grokvpn"),
+                    ("tun", "tun-grok"),
+                    ("vpn_daemon", "openvpn"),
+                )
+            )
+            graph = self.exact_graph(
+                root,
+                request_value,
+                privileged=privileged,
+            )
+            effect_id = self.put_recovery(
+                runtime,
+                fence,
+                request_value,
+                "APPLIED",
+                graph,
+            )
+            store = RecoveryStore(runtime)
+            scope_record = promote_modeled_provider_scope(
+                store.provider_scope_store,
+                request_value,
+                graph.processes[0],
+            )
+            provider_path = store.provider_path(effect_id)
+            scope_path = store.provider_scope_store.path(request_value, "provider")
+            provider_bytes = provider_path.read_bytes()
+            scope_bytes = scope_path.read_bytes()
+            ledger = Path(temporary) / "broker-ledger.json"
+            ledger.write_text(
+                json.dumps(
+                    {"transition_id": request_value.transition_id},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="ascii",
+            )
+            ledger.chmod(0o600)
+
+            class PartialRecoveryProvider:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def recover(self, recovered_request, resources, deadline):
+                    deadline.check("partial provider recovery")
+                    self.calls += 1
+                    self.assert_request = recovered_request
+                    self.assert_resources = resources
+                    if recovered_request != request_value or resources != graph:
+                        raise AssertionError("provider recovery authority changed")
+                    current_scope = store.provider_scope_store.load(
+                        recovered_request,
+                        "provider",
+                    )
+                    if current_scope != scope_record:
+                        raise AssertionError("provider recovery scope changed")
+                    current_ledger = json.loads(ledger.read_text(encoding="ascii"))
+                    if current_ledger != {
+                        "transition_id": recovered_request.transition_id
+                    }:
+                        raise AssertionError("provider recovery ledger changed")
+                    if self.calls == 1:
+                        Path(graph.paths[0].path).unlink()
+                        raise ProviderResidueError(
+                            "injected partial provider-recover failure"
+                        )
+                    ledger.unlink()
+                    store.provider_scope_store.delete(
+                        recovered_request,
+                        "provider",
+                        current_scope,
+                    )
+                    remove_modeled_provider_files(graph)
+                    return ResidueReport(True, ())
+
+            adapter = PartialRecoveryProvider()
+            with self.assertRaisesRegex(
+                ProviderResidueError,
+                "partial provider-recover",
+            ):
+                recover_offline(
+                    root,
+                    ROOT,
+                    providers={"vpn": adapter},
+                    recover_compatibility=False,
+                )
+
+            retained_record = store.load_provider(effect_id)
+            self.assertIsNotNone(retained_record)
+            self.assertEqual(retained_record.phase, "APPLIED")
+            self.assertEqual(retained_record.resources, graph)
+            self.assertEqual(provider_path.read_bytes(), provider_bytes)
+            self.assertEqual(scope_path.read_bytes(), scope_bytes)
+            self.assertEqual(
+                store.provider_scope_store.load(request_value, "provider"),
+                scope_record,
+            )
+            retained_fence = FenceStore(runtime).load()
+            self.assertIsNotNone(retained_fence)
+            self.assertEqual(retained_fence.owner_epoch, fence.owner_epoch)
+            self.assertEqual(retained_fence.phase, "RECOVERING")
+            self.assertEqual(IntentStore(runtime).load(effect_id).phase, "APPLIED")
+            self.assertTrue(ledger.exists())
+
+            with mock.patch.object(
+                supervisor_module,
+                "_run_compatibility_handoff",
+                return_value=None,
+            ):
+                outcome = recover_offline(
+                    root,
+                    ROOT,
+                    providers={"vpn": adapter},
+                    recover_compatibility=False,
+                )
+            self.assertTrue(outcome.recovered)
+            self.assertEqual(adapter.calls, 2)
+            self.assertIsNone(store.load_provider(effect_id))
+            self.assertEqual(store.list_provider_scopes(), ())
+            self.assertIsNone(IntentStore(runtime).load(effect_id))
+            self.assertIsNone(FenceStore(runtime).load())
+            self.assertFalse(ledger.exists())
 
     def test_offline_recovery_deletes_orphan_cleaned_intent_before_clearing_fence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -180,7 +180,7 @@ finish steps 1–2 and rerun `grok-remote iphone-setup`.
 grok-remote                  # compatibility mode: one session owns the egress
 grok-remote status           # active rung, the IP grok.com sees, and the remembered model
 grok-remote ip               # just that IP
-grok-remote --host arch      # force one home PC
+grok-remote --host arch      # force one home PC when it offers your selected model
 grok-remote --iphone         # force the configured phone when it offers your selected model
 grok-remote --vpn            # skip direct and the home PCs, start on VPN Gate
 grok-remote --no-direct      # never use direct, even if it would work
@@ -194,16 +194,40 @@ The default compatibility mode remains a verified singleton: one mutating
 `ip`, setup, or `stop` command fails fast while that lock is held; `status`
 remains read-only.
 
-Forced iPhone selection is intentionally different from automatic discovery.
-Automatic mode uses the phone only when it adds a model beyond the direct
-baseline. `--iphone` instead honors the requested route when the phone is
-healthy, passes country policy, and offers the explicit, environment-pinned, or
-nonempty remembered model—even if direct now offers that model too. With no
-concrete preference, a forced model picker or routed `models` command receives
-the phone's complete valid catalog. An intentionally empty remembered choice
-continues to mean “let Grok decide.” The watchdog preserves that forced route:
-it repairs or reacquires only the configured phone and never silently demotes
-an explicit `--iphone` session to VPN.
+Explicit host and iPhone selection is intentionally different from automatic
+discovery. Automatic mode uses a home PC or phone only when it adds a model
+beyond the direct baseline. `--host LABEL` and `--iphone` instead honor the
+requested route when it is healthy, passes country policy, reaches the model
+API, and offers the explicit, environment-pinned, or nonempty remembered
+model—even if direct now offers that model too. With no concrete preference, a
+forced model picker or routed `models` command receives the route's complete
+valid catalog. An intentionally empty remembered choice continues to mean “let
+Grok decide.” The watchdog preserves that exact route: it repairs or reacquires
+only the named host or configured phone and never silently demotes an explicit
+session to another home PC, iPhone, VPN, or direct. If exact teardown cannot
+prove that the old control master/listener stopped, the ownership record is
+retained and no replacement is raised over it. Home-host startup records the
+validated cleanup destination before OpenSSH starts, so publication failure is
+effect-free and an uncertain startup can still be stopped exactly. It also
+refuses to unlink an unexplained SSH control path. Route teardown is an
+aggregate transaction: the validated owner is stopped first, local/phone/VPN
+cleanup are all attempted, and a bounded second pass proves shared-port
+absence after cross-provider listeners disappear. The ownership state changes
+to empty only after that final pass succeeds.
+Automatic selection, watchdog repair/demotion, stale replacement, `ip`, the
+standalone selector, forced-VPN failure cleanup, and `stop` all use that rule;
+selection itself refuses to start over nonempty ownership state. A mode-0600
+`.egress.recovery-required` marker covers transition windows in which state may
+temporarily be empty; a later command performs cleanup only while it exists.
+Fresh startup first reconciles ownerless SSH, sidecar, and VPN residue. SSH
+cleanup consumes a destination only from a validated `local:*` record, so an
+iPhone record can never direct an OpenSSH control command. `iphone-setup` uses
+the same owned transaction and cannot report success if final sidecar teardown
+is uncertain. It refuses a valid selected route and asks for `grok-remote stop`
+instead of silently replacing it; only pending or malformed ownership enters
+recovery. Warm multi-session handoff completes any pending compatibility
+recovery before it proceeds, unless the authenticated broker fences a live
+legacy VPN ledger.
 
 Set the opt-in flag on every participating launch to share one qualified
 route between simultaneous Grok processes:
@@ -266,6 +290,12 @@ exit identity. Thus an opt-in phone whose egress changes is repaired and
 requalified, but a model-catalog change behind an unchanged exit IP is not
 proactively detected until traffic fails and triggers repair.
 
+Before any compatibility repair raises a replacement, teardown of the current
+rung must succeed. A failed teardown retains the cleanup identity and blocks
+repair or demotion. `stop` likewise reports failure without clearing route
+state when any component cleanup is incomplete, so a later recovery attempt
+never has to guess what may still own the listener.
+
 Failed VPN servers are blacklisted for the session and never handed out again; the candidate list
 is refetched once every server on it has been burned. Once demoted, the ladder **stays** demoted
 for the rest of the session — a home PC waking up does not trigger a switch back, because changing
@@ -305,8 +335,10 @@ deleted, requests through the proxy fail rather than leaking out of the host.
 
 State kept in this directory: `.model.choice` (your model), `.model.seen` (the menu you were last
 offered), `.baseline.models`, `.unlocked.models` (the selected route's eligible models: normally
-the automatic baseline delta, or the exact/full catalog admitted for a forced phone),
-`.egress.state`. The iPhone's Tailscale identity
+the automatic baseline delta, or the exact/full catalog admitted for a forced host or phone),
+`.egress.state`. During a compatibility transition,
+`.egress.recovery-required` is a generated crash-recovery marker and is removed
+only after exact cleanup publishes empty state. The iPhone's Tailscale identity
 is deliberately outside the project tree at `~/.local/state/grok-proxy/iphone`; treat
 `tailscaled.state` as a credential and do not publish it.
 

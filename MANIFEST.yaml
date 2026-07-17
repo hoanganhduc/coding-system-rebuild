@@ -447,7 +447,7 @@ entries:
 
   - id: grokproxy-exclude
     root: grok-proxy
-    match: [".tunnel.*", ".egress.state", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-remote.lock", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", ".grok-source-restore*", ".planning", ".learnings", "__pycache__"]
+    match: [".tunnel.*", ".egress.state", ".egress.recovery-required", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-remote.lock", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", ".grok-source-restore*", ".planning", ".learnings", "__pycache__"]
     class: exclude-generated
     note: SSH control sockets + tunnel/leader runtime state + per-run egress/model cache (regenerated); local planning/learning ledgers remain outside the public mirror
 

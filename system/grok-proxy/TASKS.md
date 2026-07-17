@@ -234,3 +234,94 @@
 - Final residue inventory is empty for ports 1080/11080/11081, Grok/provider
   processes, `grokvpn`, `tun-grok`, and Grok cgroups.  Only stable empty control
   directories, mode-0600 locks, and the bounded supervisor log remain.
+
+## Forced-home equal-catalog correction — 2026-07-17
+
+- [x] Reproduce the selected-release failure with the real Windows route and
+  prove transport/API success precedes baseline-delta rejection.
+- [x] Add a deterministic fresh-host equal-catalog regression and observe it
+  fail before the implementation change.
+- [x] Generalize exact compatibility route intent across forced host and phone.
+- [x] Cover reused-route model mismatch, precedence, listing neutrality,
+  blocked country, watchdog exact-route retention, and unchanged automatic
+  selection.
+- [x] Resolve fresh review findings: retain exact host/iPhone ownership when
+  teardown fails, suppress replacement repair/reacquisition, make route
+  assertions non-vacuous, and cover successful and failed repair cycles.
+- [x] Resolve follow-up review: publish home-route ownership before OpenSSH,
+  retain it on uncertain startup cleanup, and directly test both exact cleanup
+  helpers' state-deletion success paths.
+- [x] Resolve final ownership review: make uncertain automatic startup and
+  failed post-probe cleanup terminal, and preserve selected-route identity
+  across stale replacement and `stop` teardown failures.
+- [x] Resolve second-round caller review: make aggregate teardown transactional,
+  gate automatic watchdog repair/demotion plus `ip` and standalone selection on
+  proved cleanup, retain failed VPN candidate ownership, and refuse unexplained
+  SSH control-path replacement.
+- [x] Add exact mode/shape state validation plus a durable recovery marker;
+  reconcile ownerless residue before startup and make pending watchdog cycles
+  cleanup-only.
+- [x] Bind OpenSSH cleanup to validated local ownership, make rejected-repair
+  rollback publish empty state, and cover marker publication/clear/end failure.
+- [x] Make `iphone-setup` a pre-effect owned transaction whose success requires
+  exact final teardown, and consume pending recovery during warm handoff.
+- [x] Reconcile the validated provider first and use a bounded second pass for
+  shared-port absence, covering active/ownerless phone cleanup and permanently
+  ambiguous listeners without false first-stop failure.
+- [x] Run focused and full deterministic verification plus source parity and
+  leak checks.
+- [x] Install a newly admitted immutable release and prove live Windows success,
+  rollback eligibility, and empty runtime residue.
+- [ ] Repeat the live iPhone real-pair qualification when `iphone-xr` is online
+  and advertising its approved exit-node role; deterministic phone regressions
+  pass, but the 2026-07-17 live peer was externally unavailable.
+- [x] Obtain fresh-context code/test review and resolve every valid finding.
+
+### Final forced-home evidence — 2026-07-17
+
+- Canonical `tests/run.sh` passed every shell and Python suite, including 104
+  installer tests (five explicitly authorized root-cgroup cases skipped), 60
+  broker tests, 33 provider tests, 77 supervisor tests, 64 live-verifier tests,
+  and both install/backup pipelines.  A follow-up production-adapter regression
+  raised the provider total to 34 and proved VPN-next publication loss remains
+  residue across two fresh recovery processes; all 34 provider and all 77
+  supervisor tests passed again.
+- `~/grok-proxy` and `coding-system-rebuild/system/grok-proxy` have identical
+  reviewed public bytes.  Repository `diff --check`, the 18-test source-backup
+  pipeline, and the leak scan of 1,688 files passed.  Both trees plan immutable
+  release `ca1e592d...dfbd`; installed `grok-remote` and `egress.sh` hashes match
+  the canonical source.
+- Fixed `load32` passed in 7,671 ms: 32/32 clients completed, overload was
+  rejected, the resource gate passed, and cleanup was empty.  Peak observations
+  were 66 processes, 165 threads, 715 FDs, 1,353,728 KiB RSS, 201 cgroup tasks,
+  and 754,769,920 bytes of cgroup memory high-water delta, with zero memory/PID
+  event deltas.
+- Forced-supervisor-loss recovery passed in 4,634 ms: the wrapper failed closed,
+  the escaped descendant was contained, the first recovery applied, the second
+  was a no-op, the resource gate passed, and cleanup was empty.
+- The selected-release compatibility command `grok-remote --host windows models`
+  twice accepted the equal catalog, selected `local:windows`, reached Grok
+  through the Windows exit, and listed `grok-4.5`.  The final `home:windows`
+  real-pair passed in 67,233 ms (transport 66,871 ms; reconnect 4,117 ms): two
+  independent sessions shared one contract/generation/owner, leader mode stayed
+  disabled with zero leader sockets, cache snapshots stayed identity-safe, one
+  authenticated provider fault caused exactly one repair, both clients survived,
+  outputs and exit codes were valid, and cleanup was empty.
+- The final VPN `real-pair` passed on its bounded retry in 164,429 ms
+  (real OpenVPN/netns/relay transport 164,041 ms; reconnect 5,930 ms), with the
+  same two-session, cache, leader-disabled, authenticated-fault, single-repair,
+  client-survival, output, and empty-cleanup proofs.  The first attempt failed
+  closed at `real-pair-old-generation`; authenticated abort and boot
+  revalidation removed its canary and all route residue before the passing run.
+- The live phone checks were not misreported as passing: Tailscale reported
+  `iphone-xr` offline and not advertising an exit node.  Compatibility selection
+  failed cleanly, fixed real-pair stopped at model refresh, and authenticated
+  abort restored READY without listeners, state, marker, or sidecar residue.
+- Rollback to `e54b3e84...c876a1`, selector/status validation, reinstall of
+  `ca1e592d...dfbd`, a second Windows real-pair, promotion, and boot revalidation
+  all passed.  Final status has coherent valid user/root selectors, valid boot
+  inventory and access policy, no deny, complete rollback eligibility, only the
+  target exposed, and exactly the qualified `home:windows` and `vpn` rungs.
+  Final inventory found no listeners on 1080/11080/11081, owned provider
+  processes, `grokvpn`, `tun-grok`, Grok cgroups, compatibility state, or
+  recovery marker.

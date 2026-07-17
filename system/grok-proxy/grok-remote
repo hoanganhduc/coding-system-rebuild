@@ -20,11 +20,11 @@
 #   grok-remote --no-direct      never fall back to the direct connection
 #   grok-remote --pick-model     re-open the model menu even if nothing has changed
 #
-# No model name is hardcoded: a rung is accepted when it offers something the direct connection
-# does not. Your model choice is remembered, and you are only asked again when the egress starts
-# offering something new. The ladder, the probes and the watchdog live in egress.sh; socks-netns.py
-# lets the VPN rung bind the same local SOCKS port the ssh rung uses, which is what makes a rung
-# swappable underneath a running grok.
+# No model name is hardcoded: automatic selection accepts a rung when it offers something the
+# direct connection does not. Explicit --host/--iphone selection instead honors a healthy requested
+# route that offers your effective model. Your model choice is remembered, and you are only asked
+# again when the egress starts offering something new. The ladder, probes, and watchdog live in
+# egress.sh; socks-netns.py lets VPN bind the same local SOCKS port used by SSH routes.
 set -uo pipefail
 
 SELF="$(/usr/bin/readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
@@ -248,7 +248,7 @@ LEADER="$PRIVATE_DIR/.grok-leader.sock"   # compatibility lane's dedicated leade
 CHOICE="$PRIVATE_DIR/.model.choice"       # remembered model (private mutable state)
 SEEN="$PRIVATE_DIR/.model.seen"           # last offered set (private mutable state)
 FORCE_PICK=0
-FORCE_IPHONE_ROUTE=0                    # internal watchdog policy; never inherited from callers
+FORCE_EXACT_ROUTE=""                    # internal watchdog policy; never inherited from callers
 
 usage(){ sed -n '2,26p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
@@ -539,6 +539,17 @@ launch(){
   return "$rc"
 }
 
+discard_failed_exact_route(){
+  local rung="$1"
+  begin_recovery_transition || return 1
+  if ! rung_down "$rung"; then
+    eg_err "cannot discard failed forced route $rung because exact teardown failed"
+    return 1
+  fi
+  clear_active || return 1
+  end_recovery_transition || return 1
+}
+
 main(){
   local classification
   classification="$(compatibility_classify "$@")" \
@@ -550,15 +561,10 @@ main(){
       exec "$GROK_BIN" "$@" ;;
     status) cmd_status; exit 0 ;;
     ip)     acquire_session_lock || exit 1
-            rung_alive "$(active_rung)" || select_egress >/dev/null || { no_egress_help; exit 1; }
+            ensure_selected_egress >/dev/null || { no_egress_help; exit 1; }
             egress_ip "$(proxy_for "$(active_rung)")"; echo; exit 0 ;;
     stop)   acquire_session_lock || exit 1
-            if teardown_all; then
-              eg_ok "egress torn down"
-              exit 0
-            fi
-            eg_err "egress teardown failed; ownership state was preserved for recovery"
-            exit 1 ;;
+            stop_egress; exit $? ;;
     iphone-setup)
             acquire_session_lock || exit 1
             shift; [[ $# -le 1 ]] || { eg_err "usage: grok-remote iphone-setup [NODE]"; exit 2; }
@@ -603,8 +609,7 @@ main(){
   (( force_vpn )) && forced=$((forced + 1))
   (( forced <= 1 )) || { eg_err "choose only one of --host, --iphone, or --vpn"; exit 2; }
   local forced_model=""
-  if (( force_iphone )); then
-    FORCE_IPHONE_ROUTE=1
+  if (( force_iphone )) || [[ -n "$force_host" ]]; then
     forced_model="$(forced_probe_model "$@")" \
       || { eg_err "cannot resolve a safe forced-route model"; exit 2; }
   fi
@@ -616,21 +621,39 @@ main(){
   [[ -n "$force_host" ]] && want="local:$force_host"
   (( force_iphone )) && want="iphone"
   (( force_vpn )) && want="vpn"
+  if [[ -n "$force_host" ]] || (( force_iphone )); then
+    FORCE_EXACT_ROUTE="$want"
+  fi
 
-  local cur reusable=0; cur="$(active_rung)"
+  local cur reusable=0; cur="$(active_rung 2>/dev/null || true)"
+  # Marker/file presence is ownership even when the record is malformed.  A
+  # forced route may not bypass recovery merely because active_rung rejects it.
+  if recovery_transition_pending \
+     || { [[ -e "$STATE" || -L "$STATE" ]] && [[ -z "$cur" ]]; }; then
+    eg_warn "recovering incomplete or invalid egress ownership before routing"
+    if ! teardown_all; then
+      eg_err "cannot route while prior ownership recovery is incomplete"
+      exit 1
+    fi
+    cur=""
+  fi
   if [[ -n "$cur" ]] && rung_alive "$cur" && { [[ -z "$want" ]] || [[ "$cur" == "$want" ]]; }; then
     reusable=1
-    if [[ "$cur" == iphone ]]; then
-      local phone_qualified=0
-      if (( force_iphone )); then
-        rung_probe_forced iphone "$forced_model" && phone_qualified=1
+    if [[ "$cur" == iphone \
+       || ( -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ) ]]; then
+      local route_qualified=0
+      if [[ -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ]]; then
+        rung_probe_forced "$cur" "$forced_model" && route_qualified=1
       else
-        rung_probe iphone && phone_qualified=1
+        rung_probe "$cur" && route_qualified=1
       fi
-      if (( ! phone_qualified )); then
-        eg_warn "the existing iPhone sidecar is live but its current egress no longer qualifies"
-        rung_down iphone
-        clear_active
+      if (( ! route_qualified )); then
+        eg_warn "the existing $cur route is live but its current egress no longer qualifies"
+        if [[ -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ]]; then
+          discard_failed_exact_route "$cur" || exit 1
+        else
+          discard_failed_exact_route "$cur" || exit 1
+        fi
         cur=""
         reusable=0
       fi
@@ -659,8 +682,16 @@ main(){
       eg_err "cannot switch providers because exact teardown failed"
       exit 1
     fi
-    rung_up "local:$force_host" && rung_probe "local:$force_host" \
-      || { eg_err "forced host '$force_host' unlocks nothing"; rung_down "local:$force_host"; clear_active; exit 1; }
+    learn_baseline
+    begin_clean_route_transition \
+      || { eg_err "cannot publish forced-host recovery intent"; exit 1; }
+    if ! rung_up "local:$force_host" \
+       || ! rung_probe_forced "local:$force_host" "$forced_model" \
+       || ! end_recovery_transition; then
+      eg_err "forced host '$force_host' is unavailable or does not offer an acceptable model"
+      discard_failed_exact_route "local:$force_host" || exit 1
+      exit 1
+    fi
   elif (( force_iphone )); then
     rm -f "$BASELINE"
     if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then
@@ -668,15 +699,28 @@ main(){
       exit 1
     fi
     learn_baseline
-    rung_up iphone && rung_probe_forced iphone "$forced_model" \
-      || { eg_err "configured iPhone is unavailable or does not offer an acceptable model"; rung_down iphone; clear_active; exit 1; }
+    begin_clean_route_transition \
+      || { eg_err "cannot publish forced-iPhone recovery intent"; exit 1; }
+    if ! rung_up iphone || ! rung_probe_forced iphone "$forced_model" \
+       || ! end_recovery_transition; then
+      eg_err "configured iPhone is unavailable or does not offer an acceptable model"
+      discard_failed_exact_route iphone || exit 1
+      exit 1
+    fi
   elif (( force_vpn )); then
     rm -f "$BASELINE"
     if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then
       eg_err "cannot switch providers because exact teardown failed"
       exit 1
     fi
-    learn_baseline; try_vpn_sequence || { vpn_down; clear_active; no_egress_help; exit 1; }
+    learn_baseline
+    begin_clean_route_transition \
+      || { eg_err "cannot publish forced-VPN recovery intent"; exit 1; }
+    if ! try_vpn_sequence || ! end_recovery_transition; then
+      discard_failed_exact_route vpn || exit 1
+      no_egress_help
+      exit 1
+    fi
   else
     rm -f "$BASELINE"
     select_egress || { no_egress_help; exit 1; }
