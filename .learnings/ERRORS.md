@@ -40,6 +40,91 @@ Classify every new or newly observed runtime artifact in both `MANIFEST.yaml` an
 
 ---
 
+## [ERR-20260717-043] parallel-roundtrip-shared-staging-race
+
+**Logged**: 2026-07-17T01:30:03Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+Two `bin/test-roundtrip.sh` checks were launched in parallel to cover the live
+home and an empty CI home. Both sync paths use the repository's shared
+`.staging` workspace, so the concurrent runs interfered and the live-home run
+reported a false sync failure. The same live sync passed when rerun alone.
+
+### Response
+
+Treat repository sync and roundtrip helpers as serial verification gates. Run
+independent read-only syntax and environment probes in parallel, but do not
+parallelize commands that render through the shared staging directory.
+
+### Prevention
+
+Before parallelizing repo-level test helpers, inspect whether they share a
+staging, cache, journal, port, or generated-output path. A helper described as
+non-mutating toward the live system may still mutate repository-local scratch
+state.
+
+### Canonical Integration Plan
+
+- Related Skills: none
+- Related Settings Or Artifacts: local verification workflow
+- Affected Install Targets: codex
+- Affected OS/Substrates: linux
+- Canonical Repo Change: not needed; preserve as project-local command discipline
+- Docs And Generated Outputs: not needed
+- Verification Plan: rerun each roundtrip branch sequentially
+- Blocked Or Unsupported Targets: other agents and operating systems unverified
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `bin/test-roundtrip.sh`, `.staging`
+
+---
+
+## [ERR-20260717-044] leak-scan-explicit-dot-bypassed-default-scope
+
+**Logged**: 2026-07-17T01:30:03Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+The final leak check invoked `bin/leak-scan.sh .` instead of the documented
+`make leak-scan` gate. Supplying `.` bypassed the script's default exclusions
+and flagged deliberate secret-shaped canaries in the vendored `external/`
+test fixtures.
+
+### Response
+
+Read the Makefile target and reran its exact no-argument invocation. The
+documented working-tree gate passed with 1,702 files scanned.
+
+### Prevention
+
+Use repository-defined verification targets before composing direct helper
+arguments. An explicit path can change a scanner's scope and exclusion policy.
+
+### Canonical Integration Plan
+
+- Related Skills: none
+- Related Settings Or Artifacts: local verification workflow
+- Affected Install Targets: codex
+- Affected OS/Substrates: linux
+- Canonical Repo Change: not needed; the Makefile already exposes the correct gate
+- Docs And Generated Outputs: not needed
+- Verification Plan: `make leak-scan`
+- Blocked Or Unsupported Targets: other agents and operating systems unverified
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `Makefile`, `bin/leak-scan.sh`, `external/`
+
+---
+
 ## [ERR-20260717-042] empty-pgrep-aborted-clean-residue-probe
 
 **Logged**: 2026-07-17T00:24:00Z

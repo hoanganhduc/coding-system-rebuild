@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Roundtrip proof in /tmp — no live-system mutation.
-#   1. sync dry-run must be clean
-#   2. render-only install into $RUN/home — zero unresolved placeholders
+#   1. render-only install into $RUN/home — zero unresolved placeholders
+#   2. sync dry-run from the canonical home, or that fixture when unavailable
 #   3. fixture-secrets pack/restore cycle — modes + listing verified
 #   4. re-sync from $RUN/home — public artifacts must be stable (diff clean)
 #   5. leak-scan canary self-test (runtime-constructed canaries)
@@ -14,10 +14,7 @@ FAILED=0
 step() { echo; echo "== roundtrip $1 =="; }
 fail() { echo "FAIL: $1"; FAILED=1; }
 
-step "1/5 sync dry-run clean"
-( cd "$REPO" && bash bin/sync.sh --dry-run >/dev/null 2>&1 ) && echo ok || fail "sync dry-run"
-
-step "2/5 render-only install into fixture home"
+step "1/5 render-only install into fixture home"
 mkdir -p "$RUN/home"
 printf '%s\n' '# fixture pre-existing bashrc' > "$RUN/home/.bashrc"
 printf '%s\n' '# fixture pre-existing profile' > "$RUN/home/.profile"
@@ -30,6 +27,16 @@ python3 "$REPO/bin/lib/render_install.py" --repo "$REPO" --home "$RUN/home" --re
 grep -rl '{{ HOME }}' "$RUN/home" --include='*.sh' -m1 2>/dev/null | grep -v '\.template' | head -1 | grep -q . \
   && fail "unresolved {{ HOME }} in rendered shell file" || echo "placeholders: none in rendered files"
 [[ -L "$RUN/home/.claude/.local" ]] || fail "symlink topology not applied (.claude/.local)"
+
+step "2/5 sync dry-run from canonical home or rendered fixture"
+SYNC_HOME="${CSR_HOME_OVERRIDE:-$HOME}"
+if [[ -d "$SYNC_HOME/grok-proxy" ]]; then
+  ( cd "$REPO" && CSR_HOME_OVERRIDE="$SYNC_HOME" bash bin/sync.sh --dry-run >/dev/null 2>&1 ) \
+    && echo "ok (canonical home)" || fail "sync dry-run from canonical home"
+else
+  ( cd "$REPO" && CSR_HOME_OVERRIDE="$RUN/home" bash bin/sync.sh --dry-run >/dev/null 2>&1 ) \
+    && echo "ok (rendered fixture fallback)" || fail "sync dry-run from rendered fixture"
+fi
 
 step "3/5 fixture secrets pack/restore"
 FIX="$RUN/fixhome"; mkdir -p "$FIX"
