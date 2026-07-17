@@ -75,6 +75,18 @@ CSR_HOME_OVERRIDE="$RUN/home" python3 "$REPO/bin/lib/manifest_sync.py" \
 diff -rq "$RUN/resync/agents" "$REPO/agents" 2>/dev/null | grep -v '\.keys' > "$RUN/resync.diff" || true
 [[ -d "$RUN/resync/agents" ]] || fail "re-sync produced nothing"
 [[ ! -s "$RUN/resync.diff" ]] && echo "ok (diff clean)" || fail "re-sync diff not clean"
+diff -rq \
+  --exclude='.planning' \
+  --exclude='.learnings' \
+  --exclude='__pycache__' \
+  --exclude='*.pyc' \
+  --exclude='.pytest_cache' \
+  "$RUN/resync/system/grok-proxy" "$REPO/system/grok-proxy" \
+  > "$RUN/grok-resync.diff" 2>/dev/null || true
+[[ -d "$RUN/resync/system/grok-proxy" ]] || fail "Grok re-sync produced nothing"
+[[ ! -s "$RUN/grok-resync.diff" ]] \
+  && echo "ok (Grok source/backup diff clean)" \
+  || fail "Grok source/backup roundtrip differs"
 
 step "5/5 leak-scan canary self-test"
 bash "$REPO/tests/leak_scan_selftest.sh" || fail "canary self-test"

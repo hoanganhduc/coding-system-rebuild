@@ -36,7 +36,7 @@ Phases (each gated; resume after a failure with `PHASE=<n> bin/install.sh`):
 | 2 | prepare: apt, xtradeb PPA (chromium/calibre), texlive-full, tailscale, NodeSource node 22, npm prefix, npm globals (pinned), pipx, rustup, bun, elan, modal, docker, images | binaries respond |
 | 3 | restore secrets + chmod fixups (+ `tailscale up --authkey` if provided) | required entries present |
 | 5 | components: clone openclaw-bot → `external/`, ai-agents-skills → `~/ai-agents-skills` (single source of truth), at locked SHAs | HEAD == lock |
-| 6 | render configs/scripts/symlinks into $HOME | no unresolved `{{ HOME }}` |
+| 6 | render configs/scripts/symlinks into $HOME; atomically install the immutable grok-proxy user/root release | no unresolved `{{ HOME }}`; one coherent admitted Grok release |
 | 7 | OpenClaw slice via openclaw-bot (`--skip-docker --skip-services`); npm install channel plugins | secrets untouched; no dangling refs |
 | 8 | `research_compute` broker installed from `~/ai-agents-skills` (`install --apply --real-system --backup-replace --skills modal-research-compute`) + `verify` | broker runs via the `_run.sh` shim |
 | 8b| re-overlay zip secrets; `_run.sh` sha check | verify-secrets OK |
@@ -44,6 +44,148 @@ Phases (each gated; resume after a failure with `PHASE=<n> bin/install.sh`):
 | 10| docker images re-check (arch-conditional) | images present |
 | 11| systemd units rendered + per-unit enable state applied; linger; crontab marker block | states match `units.state` |
 | 12| post-install notes + `make verify` | verify green / green-with-degraded |
+
+Phase 6 treats `~/grok-proxy` as the editable Grok authoring source while
+preserving its private configuration, credentials, model cache, locks, and
+tunnel state. On a fresh machine it restores only the manifest-allowlisted
+public source from `system/grok-proxy`. If any managed public path already
+exists, the complete managed tree must match byte-for-byte (including executable
+bits) or the install fails before writing source files or invoking sudo. This
+prevents restore from overwriting local authoring work or creating a hybrid tree.
+
+The editable tree is never the production execution authority. After proving
+that the repository backup and canonical authoring tree match, the trusted
+repository installer stages runtime bytes from `~/grok-proxy` under paired
+root-owned immutable user/root release directories. Selection is atomic; the
+immutable payload self-admits and `~/.local/bin/grok-remote` is a convenience
+selector. Direct execution from either editable checkout refuses normal
+production use. `bin/render-install.sh
+--render-only` performs the same allowlisted source reconciliation but does not
+invoke sudo or change live release selectors.
+
+To inspect the selected release from the repository checkout:
+
+```bash
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py status \
+  --source "$HOME/grok-proxy" \
+  --home "$HOME"
+```
+
+To stage and atomically select the current checkout without rerunning the
+machine-wide package phases:
+
+```bash
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py install \
+  --source "$HOME/grok-proxy" \
+  --home "$HOME" \
+  --apply
+```
+
+The opt-in multi-session lane remains fail-closed until the selected release
+passes its fixed `load32` and `fault-recovery` qualification and each intended
+route/model tuple passes the fixed real-pair canary. The installer interface is:
+
+```bash
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py begin-release-qualification \
+  --source "$HOME/grok-proxy" --home "$HOME" --release-id RELEASE_ID --apply
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py canary-exec \
+  --source "$HOME/grok-proxy" --home "$HOME" --qualification-step load32 --apply
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py canary-exec \
+  --source "$HOME/grok-proxy" --home "$HOME" --qualification-step fault-recovery --apply
+
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py begin-rung-canary \
+  --source "$HOME/grok-proxy" --home "$HOME" --release-id RELEASE_ID \
+  --rung RUNG --route-profile PROFILE --contract-sha256 CONTRACT_SHA256 \
+  --grok-release-id GROK_RELEASE_ID --model-id MODEL_ID --apply
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py canary-exec \
+  --source "$HOME/grok-proxy" --home "$HOME" --qualification-step real-pair --apply
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py promote-rung \
+  --source "$HOME/grok-proxy" --home "$HOME" --apply
+```
+
+`PROFILE` is one of `direct`, `iphone`, `vpn`, `home:<label>`, `auto`, or
+`auto-no-direct`. Promotion accepts only installer-derived fixed results; manual
+canary transcripts and external evidence files are nonqualifying. Use
+`abort --apply` to cancel an active qualification fence. These commands start a
+release's first fixed qualification. Version 1 deliberately has no reset for an
+already completed qualification directory: if the generated gates change while
+the runtime release ID stays the same, stale evidence fails closed and the
+release cannot be requalified through this interface. Preserve the exact
+installer bytes; do not delete qualification state by hand.
+
+### Interrupted Grok release recovery
+
+Use `status` as the preliminary check before retrying phase 6:
+
+```bash
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py status \
+  --source "$HOME/grok-proxy" \
+  --home "$HOME"
+```
+
+For an interrupted release operation, an authorized recovery operator must also
+inspect the root-owned deny record and both root/user selection records. `status`
+does not expose the full deny ledger or selection phase. Once the immutable
+target user/root pair has been published, resume the target named by the deny
+ledger. Recovery uses that immutable target rather than rebuilding it from the
+current source bytes, but the current installer checkout is still required to
+provide this CLI:
+
+```bash
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py resume \
+  --source "$HOME/grok-proxy" \
+  --home "$HOME" \
+  --apply
+```
+
+Before pair publication, retry `install` from the exact frozen source bytes or
+abort to the release recorded in `from_release`:
+
+```bash
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py abort \
+  --source "$HOME/grok-proxy" \
+  --home "$HOME" \
+  --restore-from PRIOR_RELEASE_ID \
+  --apply
+```
+
+A first install has `from_release: null`; it has no prior release to abort to.
+Correct the blocking condition and resume/retry the same published target.
+Never start a different install while that null-source deny remains active.
+In particular, a fenced phase-6 operation must use `resume`; do not use a
+different `install` until the deny is cleared.
+
+Older interrupted targets may lack the authenticated legacy-migration broker
+endpoint. Current `resume` can still converge them only after root inventory
+proves the fixed legacy pathname absent. If `/var/lib/grok-vpngate` still
+exists, stop: do not run `resume`, and do not delete or move it ad hoc. This
+guide does not define a quarantine operation, and the public warm-handoff
+command is nonmutating. If a separately authorized and reviewed host-specific
+procedure has already made that exact pathname absent while retaining an
+independently verified root-only archive, `resume` rechecks every OpenVPN
+process, broker ledger, namespace, tun, listener, multi-session fence,
+workspace, reserved cgroup, and root inventory and fails closed on residue.
+Retain the archive through qualification, rollback, and reinstall.
+
+After `resume`, run `status` again and require `rollback_denied: false`, matching
+target root/user release IDs, `active_release_valid: true`,
+`release_access_policy_valid: true`, and exactly one ID in
+`exposed_user_releases`. Separately verify
+that both selection records are `READY`, their nonzero evidence digest matches
+the target evidence file, and that evidence is schema 3 before qualification.
+
+To roll back, require `rollback_eligibility_complete: true` and take a prior ID
+from `rollback_eligible_releases`. Retained IDs absent from that list predate or
+differ from the exact self-admission contract and cannot be selected. Archived
+user releases remain mode `0500` until this validation succeeds. Then run:
+
+```bash
+sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py rollback \
+  --source "$HOME/grok-proxy" \
+  --home "$HOME" \
+  --release-id RELEASE_ID \
+  --apply
+```
 
 ### SKIP_* toggles (sizes)
 

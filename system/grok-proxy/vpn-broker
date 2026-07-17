@@ -1,0 +1,3566 @@
+#!/usr/bin/env python3
+"""Fixed root VPN broker with a closed operation schema and durable ownership ledger."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager
+import ctypes
+from dataclasses import dataclass
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import secrets
+import select
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from typing import Any, Callable, Iterator
+
+
+SCHEMA_VERSION = 3
+PROTOCOL_VERSION = 1
+_RUNG_CANARY_SCHEMA_VERSION = 4
+_TOKEN = re.compile(r"^[A-Za-z0-9._:+@-]{1,256}$")
+_RELEASE = re.compile(r"^[0-9a-f]{64}$")
+_MODEL_ID = re.compile(r"^[A-Za-z0-9._:+/@-]{1,128}$")
+_COUNTRY = re.compile(r"^[A-Z]{2}$")
+_BOOT_ID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+_OPERATIONS = {
+    "up", "next", "reset", "down", "recover", "status", "migrate-legacy",
+}
+_MODES = {"compatibility", "compatibility-handoff", "supervisor"}
+_ROOT_ROLES = frozenset({"broker", "relay", "sanitizer", "vpngate"})
+
+
+def _bounded_failure_detail(payload: bytes, returncode: int) -> str:
+    """Describe hostile helper output without replaying its content."""
+
+    return (
+        f"exit={returncode} output_bytes={len(payload)} "
+        f"output_sha256={hashlib.sha256(payload).hexdigest()}"
+    )
+
+
+def _name_set_fingerprint(names: set[str]) -> str:
+    """Hash directory-entry identities without replaying hostile names."""
+
+    digest = hashlib.sha256()
+    for raw in sorted(os.fsencode(name) for name in names):
+        digest.update(len(raw).to_bytes(8, "big"))
+        digest.update(raw)
+    return digest.hexdigest()
+
+
+_LEDGER_PHASES = frozenset({"PREPARED", "ACTIVE", "DRAINING", "FAILED"})
+_FENCE_PHASES = frozenset({"BOOTSTRAPPING", "RECOVERING", "READY", "DRAINING"})
+_DENY_ALLOWED_OPERATIONS = frozenset({"status", "down", "recover"})
+_SCOPE_BACKEND = "cgroup-v2-v1"
+_SCOPE_NAME = re.compile(r"^grok-vpn-[0-9a-f]{24}$")
+_MIN_PORT = 1024
+_MAX_PORT = 65535
+_MAX_VPN_TRIES = 8
+_VPN_RANKING_VERSION = "vpngate-score-uptime-v1"
+_LEGACY_INERT_FILES = {
+    "list.csv": (frozenset({0o600, 0o644}), 8 * 1024 * 1024),
+    "parsed.tsv": (frozenset({0o600, 0o644}), 8 * 1024 * 1024),
+    "vpngate.ovpn": (frozenset({0o600, 0o644}), 1024 * 1024),
+    "up.sh": (frozenset({0o700, 0o755}), 64 * 1024),
+    "openvpn.log": (frozenset({0o600}), 8 * 1024 * 1024),
+}
+_LEGACY_ACTIVE_NAMES = frozenset({
+    "openvpn.pid", "openvpn.start", "openvpn.boot", "current.tsv", "failed.tsv",
+    "candidates.tsv", "attempts.tsv",
+})
+
+
+class BrokerError(RuntimeError):
+    pass
+
+
+class ExactCgroupV2Scope:
+    """Root operation ownership backed only by an exact cgroup-v2 child."""
+
+    def __init__(
+        self,
+        expected_uid: int,
+        *,
+        mount_root: Path = Path("/sys/fs/cgroup"),
+        proc_root: Path = Path("/proc"),
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.expected_uid = expected_uid
+        self.mount_root = mount_root
+        self.proc_root = proc_root
+        self.sleeper = sleeper
+
+    @staticmethod
+    def _read_bounded(path: Path, maximum: int) -> str:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            data = bytearray()
+            while len(data) <= maximum:
+                chunk = os.read(fd, min(16_384, maximum + 1 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            if len(data) > maximum:
+                raise BrokerError(f"oversized cgroup record: {path}")
+        finally:
+            os.close(fd)
+        try:
+            return data.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise BrokerError(f"non-ASCII cgroup record: {path}") from exc
+
+    def _mount_is_cgroup2(self) -> None:
+        root = self.mount_root.lstat()
+        if self.mount_root.is_symlink() or not stat.S_ISDIR(root.st_mode):
+            raise BrokerError("cgroup-v2 mount root is unsafe")
+        mountinfo = self._read_bounded(self.proc_root / "self/mountinfo", 1_048_576)
+        for line in mountinfo.splitlines():
+            fields = line.split()
+            try:
+                split = fields.index("-")
+            except ValueError:
+                continue
+            if (
+                len(fields) > split + 2
+                and fields[4].replace("\\040", " ") == str(self.mount_root)
+                and fields[split + 1] == "cgroup2"
+                and "rw" in fields[5].split(",")
+            ):
+                return
+        raise BrokerError("writable cgroup-v2 mount is unavailable")
+
+    def _current_parent(self) -> Path:
+        self._mount_is_cgroup2()
+        record = self._read_bounded(self.proc_root / "self/cgroup", 16_384)
+        rows = record.splitlines()
+        if len(rows) != 1 or not rows[0].startswith("0::/"):
+            raise BrokerError("broker is not in one unified cgroup-v2 hierarchy")
+        relative = rows[0][3:]
+        if not relative.startswith("/") or ".." in Path(relative).parts:
+            raise BrokerError("broker cgroup path is not canonical")
+        # The public broker runs as root.  Anchor its ownership root directly
+        # below the root-owned cgroup mount instead of below a caller-owned
+        # delegated systemd scope.  Non-root test instances remain confined to
+        # their delegated current cgroup.
+        if self.expected_uid == 0:
+            return self.mount_root
+        return self.mount_root / relative.lstrip("/")
+
+    def _base(self) -> tuple[Path, os.stat_result]:
+        current = self._current_parent()
+        current_info = current.lstat()
+        if current.is_symlink() or not stat.S_ISDIR(current_info.st_mode):
+            raise BrokerError("broker cgroup parent is unsafe")
+        base = current / f"grok-vpn-broker-{self.expected_uid}"
+        try:
+            base.mkdir(mode=0o755)
+        except FileExistsError:
+            pass
+        info = base.lstat()
+        if (
+            base.is_symlink()
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != self.expected_uid
+            or info.st_dev != current_info.st_dev
+            or (
+                self.expected_uid == 0
+                and stat.S_IMODE(info.st_mode) & 0o022
+            )
+        ):
+            raise BrokerError("broker operation cgroup parent is unsafe")
+        return base, info
+
+    def plan(
+        self, preserve: tuple[dict[str, Any], ...] = ()
+    ) -> dict[str, Any]:
+        parent, info = self._base()
+        preserved: dict[Path, dict[str, Any]] = {}
+        for record in preserve:
+            if not self.shape(record, created=True):
+                raise BrokerError("invalid preserved VPN cgroup identity")
+            if (
+                record["parent_path"] != str(parent)
+                or (record["parent_device"], record["parent_inode"])
+                != (info.st_dev, info.st_ino)
+            ):
+                raise BrokerError("preserved VPN cgroup has another parent")
+            self._verify_scope(record)
+            preserved[Path(record["scope_path"])] = record
+        # A broker killed between cgroup creation and durable publication can
+        # leave only an empty, effect-free scope.  Prune only exact-name empty
+        # children; populated scopes remain untouched and must be reconciled
+        # through their durable identity.
+        for child in parent.iterdir():
+            if _SCOPE_NAME.fullmatch(child.name) is None:
+                continue
+            try:
+                child_info = child.lstat()
+                if (
+                    child.is_symlink()
+                    or not stat.S_ISDIR(child_info.st_mode)
+                    or child_info.st_uid != self.expected_uid
+                ):
+                    raise BrokerError("unsafe unrecorded operation cgroup")
+                if child in preserved:
+                    if (
+                        child_info.st_dev,
+                        child_info.st_ino,
+                    ) != (
+                        preserved[child]["scope_device"],
+                        preserved[child]["scope_inode"],
+                    ):
+                        raise BrokerError("preserved VPN cgroup identity changed")
+                    continue
+                events = self._read_bounded(child / "cgroup.events", 4_096)
+                if "populated 0" in events.splitlines():
+                    os.rmdir(child)
+                else:
+                    raise BrokerError("unrecorded populated VPN cgroup blocks mutation")
+            except FileNotFoundError:
+                continue
+        return {
+            "backend": _SCOPE_BACKEND,
+            "parent_path": str(parent),
+            "parent_device": info.st_dev,
+            "parent_inode": info.st_ino,
+            "scope_path": str(parent / f"grok-vpn-{secrets.token_hex(12)}"),
+            "scope_device": None,
+            "scope_inode": None,
+        }
+
+    @staticmethod
+    def shape(value: Any, *, created: bool | None = None) -> bool:
+        if type(value) is not dict or set(value) != {
+            "backend", "parent_path", "parent_device", "parent_inode",
+            "scope_path", "scope_device", "scope_inode",
+        }:
+            return False
+        try:
+            parent = Path(value["parent_path"])
+            scope = Path(value["scope_path"])
+        except TypeError:
+            return False
+        valid = (
+            value["backend"] == _SCOPE_BACKEND
+            and parent.is_absolute()
+            and scope.is_absolute()
+            and scope.parent == parent
+            and _SCOPE_NAME.fullmatch(scope.name) is not None
+            and type(value["parent_device"]) is int
+            and value["parent_device"] > 0
+            and type(value["parent_inode"]) is int
+            and value["parent_inode"] > 0
+            and (
+                (value["scope_device"] is None and value["scope_inode"] is None)
+                or (
+                    type(value["scope_device"]) is int
+                    and value["scope_device"] > 0
+                    and type(value["scope_inode"]) is int
+                    and value["scope_inode"] > 0
+                )
+            )
+        )
+        if not valid:
+            return False
+        is_created = value["scope_device"] is not None
+        return created is None or created == is_created
+
+    def _verify_parent(self, scope: dict[str, Any]) -> Path:
+        if not self.shape(scope):
+            raise BrokerError("invalid operation cgroup identity")
+        self._mount_is_cgroup2()
+        parent = Path(scope["parent_path"])
+        info = parent.lstat()
+        if (
+            parent.is_symlink()
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != self.expected_uid
+            or (info.st_dev, info.st_ino)
+            != (scope["parent_device"], scope["parent_inode"])
+        ):
+            raise BrokerError("operation cgroup parent identity changed")
+        return parent
+
+    def create(self, planned: dict[str, Any]) -> dict[str, Any]:
+        if not self.shape(planned, created=False):
+            raise BrokerError("invalid planned operation cgroup")
+        parent = self._verify_parent(planned)
+        scope = Path(planned["scope_path"])
+        try:
+            os.mkdir(scope, 0o755)
+        except OSError as exc:
+            raise BrokerError("cannot create exact operation cgroup") from exc
+        info = scope.lstat()
+        created = {**planned, "scope_device": info.st_dev, "scope_inode": info.st_ino}
+        try:
+            self._verify_scope(created)
+        except BaseException:
+            try:
+                os.rmdir(scope)
+            except OSError:
+                pass
+            raise
+        return created
+
+    def _verify_scope(self, scope: dict[str, Any]) -> Path:
+        if not self.shape(scope, created=True):
+            raise BrokerError("invalid created operation cgroup")
+        self._verify_parent(scope)
+        path = Path(scope["scope_path"])
+        info = path.lstat()
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != self.expected_uid
+            or (info.st_dev, info.st_ino)
+            != (scope["scope_device"], scope["scope_inode"])
+        ):
+            raise BrokerError("operation cgroup identity changed")
+        for name in ("cgroup.events", "cgroup.kill", "cgroup.procs"):
+            control = path / name
+            control_info = control.stat()
+            if (
+                not stat.S_ISREG(control_info.st_mode)
+                or control_info.st_uid != self.expected_uid
+            ):
+                raise BrokerError(f"unsafe operation cgroup control: {name}")
+        return path
+
+    def _write_control(self, path: Path, value: bytes) -> None:
+        flags = os.O_WRONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != self.expected_uid:
+                raise BrokerError(f"unsafe operation cgroup control: {path.name}")
+            if os.write(fd, value) != len(value):
+                raise BrokerError(f"short operation cgroup control write: {path.name}")
+        finally:
+            os.close(fd)
+
+    def attach(self, scope: dict[str, Any], pid: int) -> None:
+        path = self._verify_scope(scope)
+        self._write_control(path / "cgroup.procs", f"{pid}\n".encode("ascii"))
+        membership = self._read_bounded(self.proc_root / str(pid) / "cgroup", 16_384)
+        expected = "0::/" + str(path.relative_to(self.mount_root))
+        if membership.strip() != expected:
+            raise BrokerError("operation guard did not enter its exact cgroup")
+
+    def contains(self, scope: dict[str, Any], pid: int) -> bool:
+        try:
+            path = self._verify_scope(scope)
+            membership = self._read_bounded(
+                self.proc_root / str(pid) / "cgroup", 16_384
+            )
+        except (BrokerError, OSError):
+            return False
+        expected = "0::/" + str(path.relative_to(self.mount_root))
+        return membership.strip() == expected
+
+    def populated(self, scope: dict[str, Any]) -> bool:
+        path = self._verify_scope(scope)
+        events = self._read_bounded(path / "cgroup.events", 4_096)
+        values: dict[str, str] = {}
+        for row in events.splitlines():
+            fields = row.split()
+            if len(fields) == 2:
+                values[fields[0]] = fields[1]
+        if values.get("populated") not in {"0", "1"}:
+            raise BrokerError("operation cgroup has invalid populated state")
+        return values["populated"] == "1"
+
+    def reconcile(self, scope: dict[str, Any], timeout: float) -> None:
+        path = Path(scope["scope_path"])
+        try:
+            self._verify_scope(scope)
+        except FileNotFoundError:
+            raise BrokerError("recorded operation cgroup is absent")
+        if self.populated(scope):
+            self._write_control(path / "cgroup.kill", b"1\n")
+        deadline = time.monotonic() + timeout
+        while self.populated(scope) and time.monotonic() < deadline:
+            self.sleeper(0.05)
+        if self.populated(scope):
+            raise BrokerError("operation cgroup remains populated after cgroup.kill")
+        try:
+            os.rmdir(path)
+        except OSError as exc:
+            raise BrokerError("empty operation cgroup could not be removed") from exc
+        try:
+            parent = Path(scope["parent_path"])
+            os.rmdir(parent)
+        except OSError:
+            pass
+
+
+@dataclass(frozen=True, slots=True)
+class Request:
+    operation: str
+    mode: str
+    caller_uid: int
+    release_id: str
+    owner_epoch: str
+    generation: int
+    listen_port: int
+    contract_digest: str = "0" * 64
+    vpn_max_tries: int = 1
+    vpn_ranking_version: str = _VPN_RANKING_VERSION
+    vpn_countries: tuple[str, ...] = ()
+    vpn_prefer_countries: tuple[str, ...] = ()
+    vpn_blocked_countries: tuple[str, ...] = ()
+    caller_pid: int = 0
+    caller_start_ticks: int = 0
+    caller_boot_id: str = ""
+    deadline_monotonic_ns: int = 0
+
+    def validate(self) -> None:
+        if self.operation not in _OPERATIONS:
+            raise BrokerError("unsupported broker operation")
+        if self.mode not in _MODES:
+            raise BrokerError("unsupported broker mode")
+        if type(self.caller_uid) is not int or not 0 <= self.caller_uid <= 2**31 - 1:
+            raise BrokerError("invalid caller UID")
+        if _RELEASE.fullmatch(self.release_id) is None:
+            raise BrokerError("invalid release ID")
+        if _TOKEN.fullmatch(self.owner_epoch) is None:
+            raise BrokerError("invalid owner epoch")
+        if type(self.generation) is not int or not 0 <= self.generation <= 2**63 - 1:
+            raise BrokerError("invalid generation")
+        if type(self.listen_port) is not int or not _MIN_PORT <= self.listen_port <= _MAX_PORT:
+            raise BrokerError("invalid private relay port")
+        if self.operation == "migrate-legacy" and self.mode != "compatibility-handoff":
+            raise BrokerError("legacy migration requires compatibility-handoff mode")
+        if self.mode == "compatibility-handoff" and self.operation != "migrate-legacy":
+            raise BrokerError("compatibility-handoff mode permits only legacy migration")
+        if self.mode == "compatibility":
+            if self.owner_epoch != f"compat-{self.caller_uid}" or self.generation != 0:
+                raise BrokerError("invalid compatibility owner identity")
+        elif self.mode == "compatibility-handoff":
+            if self.generation != 1 or self.listen_port != 1080:
+                raise BrokerError("invalid compatibility-handoff identity")
+        elif self.generation == 0:
+            raise BrokerError("supervisor generation must be positive")
+        if _RELEASE.fullmatch(self.contract_digest) is None:
+            raise BrokerError("invalid canonical contract digest")
+        if type(self.vpn_max_tries) is not int or not 1 <= self.vpn_max_tries <= _MAX_VPN_TRIES:
+            raise BrokerError("invalid VPN candidate cap")
+        if self.vpn_ranking_version != _VPN_RANKING_VERSION:
+            raise BrokerError("unsupported VPN ranking version")
+        for label, countries in (
+            ("allowed", self.vpn_countries),
+            ("preferred", self.vpn_prefer_countries),
+            ("blocked", self.vpn_blocked_countries),
+        ):
+            if (
+                type(countries) is not tuple
+                or len(set(countries)) != len(countries)
+                or any(type(country) is not str or _COUNTRY.fullmatch(country) is None for country in countries)
+            ):
+                raise BrokerError(f"invalid {label} VPN country policy")
+        if set(self.vpn_countries) & set(self.vpn_blocked_countries):
+            raise BrokerError("allowed and blocked VPN countries overlap")
+        caller_fields = (
+            self.caller_pid,
+            self.caller_start_ticks,
+            self.caller_boot_id,
+            self.deadline_monotonic_ns,
+        )
+        if caller_fields != (0, 0, "", 0):
+            if (
+                type(self.caller_pid) is not int
+                or not 1 <= self.caller_pid <= 2**31 - 1
+                or type(self.caller_start_ticks) is not int
+                or not 1 <= self.caller_start_ticks <= 2**63 - 1
+                or _BOOT_ID.fullmatch(self.caller_boot_id) is None
+                or type(self.deadline_monotonic_ns) is not int
+                or not 1 <= self.deadline_monotonic_ns <= 2**63 - 1
+            ):
+                raise BrokerError("invalid exact caller/deadline identity")
+
+    def vpn_policy_record(self) -> dict[str, Any]:
+        return {
+            "blocked_countries": list(self.vpn_blocked_countries),
+            "countries": list(self.vpn_countries),
+            "max_tries": self.vpn_max_tries,
+            "prefer_countries": list(self.vpn_prefer_countries),
+            "ranking_version": self.vpn_ranking_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Layout:
+    releases: Path = Path("/usr/local/libexec/grok-proxy/releases")
+    selection: Path = Path("/var/lib/grok-proxy/release-control/selected-release.json")
+    deny: Path = Path("/var/lib/grok-proxy/release-control/rollback-deny.json")
+    state: Path = Path("/var/lib/grok-proxy/broker")
+    vpn_pid: Path = Path("/var/lib/grok-vpngate/openvpn.pid")
+    vpn_start: Path = Path("/var/lib/grok-vpngate/openvpn.start")
+    vpn_boot: Path = Path("/var/lib/grok-vpngate/openvpn.boot")
+    vpn_work: Path = Path("/var/lib/grok-vpngate")
+    netns_dir: Path = Path("/etc/netns/grokvpn")
+    proc: Path = Path("/proc")
+
+    @property
+    def ledger(self) -> Path:
+        return self.state / "ledger.json"
+
+    @property
+    def lock(self) -> Path:
+        return self.state / "broker.lock"
+
+    @property
+    def release_lock(self) -> Path:
+        return self.selection.parent / "install.lock"
+
+    @property
+    def rung_canary(self) -> Path:
+        return self.selection.parent / "rung-canary.json"
+
+    @property
+    def canary_terminal(self) -> Path:
+        return self.selection.parent / "canary-terminal.json"
+
+
+def _canonical(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def _read_json(
+    path: Path,
+    *,
+    maximum: int = 1_048_576,
+    uid: int | None = None,
+    mode: int | None = None,
+) -> dict[str, Any]:
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise BrokerError(f"cannot open {path}: {exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise BrokerError(f"not a regular file: {path}")
+        if uid is not None and info.st_uid != uid:
+            raise BrokerError(f"wrong owner for {path}")
+        if mode is not None and stat.S_IMODE(info.st_mode) != mode:
+            raise BrokerError(f"wrong mode for {path}")
+        data = bytearray()
+        while len(data) <= maximum:
+            chunk = os.read(fd, min(65_536, maximum + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > maximum:
+            raise BrokerError(f"oversized JSON record: {path}")
+    finally:
+        os.close(fd)
+    try:
+        result = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BrokerError(f"invalid JSON record {path}: {exc}") from exc
+    if type(result) is not dict:
+        raise BrokerError(f"JSON record is not an object: {path}")
+    return result
+
+
+def _secure_dir(path: Path, uid: int, mode: int) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    info = path.lstat()
+    if path.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise BrokerError(f"unsafe directory: {path}")
+    if info.st_uid != uid:
+        raise BrokerError(f"wrong owner for {path}")
+    os.chmod(path, mode)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_json(path: Path, value: dict[str, Any], *, uid: int = 0) -> None:
+    _secure_dir(path.parent, uid, 0o700)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        os.fchmod(fd, 0o600)
+        data = _canonical(value) + b"\n"
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise BrokerError("short ledger write")
+            view = view[written:]
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+class Broker:
+    def __init__(
+        self,
+        layout: Layout = Layout(),
+        *,
+        expected_root_uid: int = 0,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        spawner: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
+        sleeper: Callable[[float], None] = time.sleep,
+        operation_scopes: ExactCgroupV2Scope | None = None,
+    ) -> None:
+        self.layout = layout
+        self.expected_root_uid = expected_root_uid
+        self.runner = runner
+        self.spawner = spawner
+        self.sleeper = sleeper
+        self.operation_scopes = operation_scopes or ExactCgroupV2Scope(
+            expected_root_uid, sleeper=sleeper
+        )
+
+    @contextmanager
+    def locked(self, *, create: bool = True) -> Iterator[None]:
+        if create:
+            _secure_dir(self.layout.state, self.expected_root_uid, 0o700)
+            flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        else:
+            try:
+                state_info = self.layout.state.lstat()
+            except OSError as exc:
+                raise BrokerError("stable broker state directory is unavailable") from exc
+            if (
+                self.layout.state.is_symlink()
+                or not stat.S_ISDIR(state_info.st_mode)
+                or state_info.st_uid != self.expected_root_uid
+                or stat.S_IMODE(state_info.st_mode) != 0o700
+            ):
+                raise BrokerError("unsafe stable broker state directory")
+            flags = os.O_RDONLY | os.O_CLOEXEC
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.layout.lock, flags, 0o600)
+        except OSError as exc:
+            raise BrokerError("stable broker lock is unavailable") from exc
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != self.expected_root_uid
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise BrokerError("unsafe broker lock")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    @contextmanager
+    def release_locked(self) -> Iterator[None]:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.layout.release_lock, flags)
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != self.expected_root_uid
+                or stat.S_IMODE(info.st_mode) != 0o644
+            ):
+                raise BrokerError("unsafe release install lock")
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    @contextmanager
+    def inventory_locked(self) -> Iterator[None]:
+        """Serialize read-only inventory without creating broker state."""
+
+        state_present = self.layout.state.exists() or self.layout.state.is_symlink()
+        lock_present = self.layout.lock.exists() or self.layout.lock.is_symlink()
+        if state_present or lock_present:
+            if not state_present or not lock_present:
+                raise BrokerError("partial broker state blocks root inventory")
+            with self.locked(create=False):
+                yield
+            return
+        yield
+        if (
+            self.layout.state.exists()
+            or self.layout.state.is_symlink()
+            or self.layout.lock.exists()
+            or self.layout.lock.is_symlink()
+        ):
+            raise BrokerError("broker state appeared during root inventory")
+
+    def _selection(
+        self,
+        release_id: str,
+        operation: str,
+        *,
+        request: Request | None = None,
+        required_phase: str | None = None,
+        required_operation: str | None = None,
+    ) -> dict[str, str]:
+        vpn_canary_safe = False
+        if self.layout.deny.exists() or self.layout.deny.is_symlink():
+            deny_safe = operation in _DENY_ALLOWED_OPERATIONS
+            if operation == "migrate-legacy":
+                deny = self._deny_record()
+                deny_safe = bool(
+                    deny is not None
+                    and deny.get("operation") == "canary"
+                    and deny.get("from_release") == release_id
+                    and deny.get("to_release") == release_id
+                )
+            elif request is not None and operation in {"up", "next"}:
+                vpn_canary_safe = self._vpn_rung_canary_authorizes(request)
+                deny_safe = vpn_canary_safe
+            if not deny_safe:
+                raise BrokerError("release switching/rollback is fenced")
+        info = self.layout.selection.lstat()
+        if (
+            self.layout.selection.is_symlink()
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != self.expected_root_uid
+            or stat.S_IMODE(info.st_mode) != 0o444
+        ):
+            raise BrokerError("unsafe root release selection record")
+        selected = _read_json(
+            self.layout.selection,
+            uid=self.expected_root_uid,
+            mode=0o444,
+        )
+        if (
+            selected.get("schema_version") != 1
+            or selected.get("release_schema_version") != 2
+            or selected.get("release_id") != release_id
+        ):
+            raise BrokerError("requested release is not the root-selected coherent release")
+        if vpn_canary_safe and (
+            selected.get("selection_phase") != "READY"
+            or type(selected.get("evidence_sha256")) is not str
+            or _RELEASE.fullmatch(selected["evidence_sha256"]) is None
+            or selected.get("evidence_sha256") == "0" * 64
+        ):
+            raise BrokerError("VPN rung canary requires the exact READY selection")
+        if required_phase is not None and (
+            required_phase != "CANARY"
+            or selected.get("selection_phase") != required_phase
+            or selected.get("evidence_sha256") != "0" * 64
+        ):
+            raise BrokerError("requested release is not the exact CANARY selection")
+        if required_operation is not None and (
+            required_operation != "install"
+            or selected.get("operation") != required_operation
+        ):
+            raise BrokerError("requested release is not an install selection")
+        if selected.get("root_release_id") != release_id or selected.get("user_release_id") != release_id:
+            raise BrokerError("selected user/root release IDs differ")
+        root_files = selected.get("root_files")
+        if type(root_files) is not dict or set(root_files) != _ROOT_ROLES:
+            raise BrokerError("root selection has an unexpected helper map")
+        normalized: dict[str, str] = {}
+        for role, relative in root_files.items():
+            if type(role) is not str or type(relative) is not str:
+                raise BrokerError("root helper map has invalid types")
+            candidate = Path(relative)
+            if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+                raise BrokerError("root helper map has an unsafe path")
+            normalized[role] = relative
+        if len(set(normalized.values())) != len(_ROOT_ROLES):
+            raise BrokerError("root helper roles are not distinct")
+        return normalized
+
+    def _prior_release_evidence_ready(self, release_id: str) -> None:
+        """Validate the immutable root half of a prior passing release."""
+
+        evidence = _read_json(
+            self.layout.selection.parent / "evidence" / f"{release_id}.json",
+            uid=self.expected_root_uid,
+            mode=0o444,
+        )
+        fields = {
+            "schema_version", "release_id", "operation", "host_id",
+            "created_unix_ns", "user_manifest_sha256", "root_manifest_sha256",
+            "root_files", "criteria", "overall_pass",
+        }
+        schema = evidence.get("schema_version")
+        criteria_ids = {
+            2: (
+                "release-pair", "target-root-map", "compatibility-matrix",
+                "broker-status-helper-map", "multi-root-inventory-empty",
+            ),
+            3: (
+                "release-pair", "target-root-map", "legacy-root-migration",
+                "compatibility-matrix", "broker-status-helper-map",
+                "multi-root-inventory-empty",
+            ),
+        }
+        root_files = evidence.get("root_files")
+        if (
+            set(evidence) != fields
+            or type(schema) is not int
+            or schema not in criteria_ids
+            or evidence.get("release_id") != release_id
+            or evidence.get("operation") not in {"install", "rollback"}
+            or type(evidence.get("host_id")) is not str
+            or evidence.get("host_id") != self._host_id()
+            or type(evidence.get("created_unix_ns")) is not int
+            or evidence.get("created_unix_ns", 0) <= 0
+            or type(evidence.get("user_manifest_sha256")) is not str
+            or _RELEASE.fullmatch(evidence["user_manifest_sha256"]) is None
+            or type(evidence.get("root_manifest_sha256")) is not str
+            or _RELEASE.fullmatch(evidence["root_manifest_sha256"]) is None
+            or type(root_files) is not dict
+            or set(root_files) != _ROOT_ROLES
+            or evidence.get("overall_pass") is not True
+        ):
+            raise BrokerError("prior release evidence is not a passing root record")
+        normalized: dict[str, str] = {}
+        for role, relative in root_files.items():
+            if type(role) is not str or type(relative) is not str:
+                raise BrokerError("prior release helper map has invalid types")
+            candidate = Path(relative)
+            if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+                raise BrokerError("prior release helper map has an unsafe path")
+            normalized[role] = relative
+        if len(set(normalized.values())) != len(_ROOT_ROLES):
+            raise BrokerError("prior release helper roles are not distinct")
+
+        manifest_path = self.layout.releases / release_id / "release.json"
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(manifest_path, flags)
+        try:
+            info = os.fstat(descriptor)
+            raw = bytearray()
+            while len(raw) <= 1_048_576:
+                chunk = os.read(
+                    descriptor,
+                    min(65_536, 1_048_576 + 1 - len(raw)),
+                )
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            if (
+                len(raw) > 1_048_576
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != self.expected_root_uid
+                or stat.S_IMODE(info.st_mode) != 0o444
+                or hashlib.sha256(raw).hexdigest()
+                != evidence.get("root_manifest_sha256")
+            ):
+                raise BrokerError("prior root manifest differs from passing evidence")
+        finally:
+            os.close(descriptor)
+        self._helpers(release_id, normalized)
+
+        criteria = evidence.get("criteria")
+        expected = criteria_ids[int(schema)]
+        if type(criteria) is not list or len(criteria) != len(expected):
+            raise BrokerError("prior release evidence criteria are incomplete")
+        for criterion_id, criterion in zip(expected, criteria):
+            if (
+                type(criterion) is not dict
+                or set(criterion)
+                != {"id", "passed", "result_sha256", "duration_ms"}
+                or criterion.get("id") != criterion_id
+                or criterion.get("passed") is not True
+                or type(criterion.get("result_sha256")) is not str
+                or _RELEASE.fullmatch(criterion["result_sha256"]) is None
+                or type(criterion.get("duration_ms")) is not int
+                or not 0 <= criterion.get("duration_ms", -1) <= 300_000
+            ):
+                raise BrokerError("prior release evidence criterion is not passing")
+
+    @staticmethod
+    def _host_id() -> str:
+        try:
+            raw = Path("/etc/machine-id").read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise BrokerError("cannot read host identity") from exc
+        if re.fullmatch(r"[0-9a-f]{32}", raw) is None:
+            raise BrokerError("host machine identity is invalid")
+        return hashlib.sha256(raw.encode("ascii")).hexdigest()
+
+    def _deny_record(self) -> dict[str, Any] | None:
+        if not self.layout.deny.exists():
+            return None
+        value = _read_json(
+            self.layout.deny,
+            uid=self.expected_root_uid,
+            mode=0o444,
+        )
+        if (
+            set(value)
+            != {"schema_version", "operation", "from_release", "to_release"}
+            or value.get("schema_version") != 1
+            or value.get("operation") not in {"install", "rollback", "canary"}
+            or type(value.get("to_release")) is not str
+            or _RELEASE.fullmatch(value["to_release"]) is None
+            or not (
+                value.get("from_release") is None
+                or (
+                    type(value.get("from_release")) is str
+                    and _RELEASE.fullmatch(value["from_release"]) is not None
+                )
+            )
+        ):
+            raise BrokerError("invalid release deny record")
+        return value
+
+    def _vpn_rung_canary_authorizes(self, request: Request) -> bool:
+        """Admit only an exact supervisor VPN mutation during its deny fence."""
+
+        deny = self._deny_record()
+        if (
+            request.mode != "supervisor"
+            or request.operation not in {"up", "next"}
+            or self.layout.canary_terminal.exists()
+            or self.layout.canary_terminal.is_symlink()
+            or deny is None
+            or deny.get("operation") != "canary"
+            or deny.get("from_release") != request.release_id
+            or deny.get("to_release") != request.release_id
+        ):
+            return False
+        record = _read_json(
+            self.layout.rung_canary,
+            uid=self.expected_root_uid,
+            mode=0o444,
+        )
+        fields = {
+            "schema_version", "release_id", "host_id", "rung",
+            "route_profile", "contract_sha256", "grok_release_id",
+            "model_id", "canary_kind", "canary_nonce", "created_unix_ns",
+        }
+        route_profile = record.get("route_profile")
+        return bool(
+            set(record) == fields
+            and record.get("schema_version") == _RUNG_CANARY_SCHEMA_VERSION
+            and record.get("release_id") == request.release_id
+            and record.get("host_id") == self._host_id()
+            and record.get("rung") == "vpn"
+            and route_profile in {"vpn", "auto", "auto-no-direct"}
+            and record.get("canary_kind") == "rung"
+            and record.get("contract_sha256") == request.contract_digest
+            and type(record.get("grok_release_id")) is str
+            and _TOKEN.fullmatch(record["grok_release_id"]) is not None
+            and type(record.get("model_id")) is str
+            and _MODEL_ID.fullmatch(record["model_id"]) is not None
+            and type(record.get("canary_nonce")) is str
+            and _RELEASE.fullmatch(record["canary_nonce"]) is not None
+            and type(record.get("created_unix_ns")) is int
+            and record.get("created_unix_ns", 0) > 0
+        )
+
+    def _helpers(self, release_id: str, selected: dict[str, str]) -> dict[str, Path]:
+        release = self.layout.releases / release_id
+        info = release.lstat()
+        if (
+            release.is_symlink()
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != self.expected_root_uid
+            or stat.S_IMODE(info.st_mode) != 0o555
+        ):
+            raise BrokerError("unsafe root release directory")
+        manifest = _read_json(
+            release / "release.json",
+            uid=self.expected_root_uid,
+            mode=0o444,
+        )
+        if (
+            manifest.get("schema_version") != 2
+            or manifest.get("kind") != "root"
+            or manifest.get("release_id") != release_id
+        ):
+            raise BrokerError("root manifest identity mismatch")
+        entries = manifest.get("files")
+        if type(entries) is not list:
+            raise BrokerError("root manifest has no files")
+        by_role: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            if type(entry) is not dict or set(entry) != {"role", "path", "mode", "size", "sha256"}:
+                raise BrokerError("root manifest has an invalid helper entry")
+            role = entry.get("role")
+            relative = entry.get("path")
+            if type(role) is not str or role not in _ROOT_ROLES or role in by_role:
+                raise BrokerError("root manifest has a duplicate or unknown helper role")
+            if type(relative) is not str or relative != selected[role]:
+                raise BrokerError("root manifest helper map differs from root selection")
+            candidate = Path(relative)
+            if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+                raise BrokerError("unsafe root helper path")
+            by_role[role] = entry
+        if set(by_role) != _ROOT_ROLES:
+            raise BrokerError("root manifest helper roles are incomplete")
+
+        helpers: dict[str, Path] = {}
+        for role, entry in by_role.items():
+            helper = release / str(entry["path"])
+            try:
+                resolved = helper.resolve(strict=True)
+                resolved.relative_to(release)
+            except (OSError, ValueError) as exc:
+                raise BrokerError("root helper path escapes its immutable release") from exc
+            if resolved != helper:
+                raise BrokerError("root helper path traverses a link")
+            flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(helper, flags)
+            try:
+                info = os.fstat(fd)
+                data = bytearray()
+                while len(data) <= 16 * 1024 * 1024:
+                    chunk = os.read(fd, min(1_048_576, 16 * 1024 * 1024 + 1 - len(data)))
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                try:
+                    expected_mode = int(str(entry.get("mode", "0")), 8)
+                except ValueError as exc:
+                    raise BrokerError("root manifest helper mode is invalid") from exc
+                if (
+                    len(data) > 16 * 1024 * 1024
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != self.expected_root_uid
+                    or expected_mode not in {0o444, 0o555}
+                    or stat.S_IMODE(info.st_mode) != expected_mode
+                    or type(entry.get("size")) is not int
+                    or len(data) != entry.get("size")
+                    or type(entry.get("sha256")) is not str
+                    or hashlib.sha256(data).hexdigest() != entry.get("sha256")
+                ):
+                    raise BrokerError("root helper does not match its manifest")
+            finally:
+                os.close(fd)
+            helpers[role] = helper
+        if stat.S_IMODE(helpers["relay"].stat().st_mode) != 0o555:
+            raise BrokerError("root relay is not executable")
+        return helpers
+
+    def _helper(self, release_id: str) -> Path:
+        """Compatibility validation seam returning the selected VPN helper."""
+        return self._helpers(
+            release_id, self._selection(release_id, "status")
+        )["vpngate"]
+
+    @staticmethod
+    def _home(uid: int) -> Path:
+        try:
+            return Path(pwd.getpwuid(uid).pw_dir)
+        except KeyError as exc:
+            raise BrokerError("caller UID has no passwd entry") from exc
+
+    @staticmethod
+    def _workspace_tag(owner_epoch: str, generation: int, listen_port: int) -> str:
+        payload = b"\0".join(
+            (
+                owner_epoch.encode("ascii"),
+                str(generation).encode("ascii"),
+                str(listen_port).encode("ascii"),
+            )
+        )
+        return hashlib.sha256(payload).hexdigest()[:24]
+
+    def _relay_pidfile(self, request: Request) -> Path:
+        home = self._home(request.caller_uid)
+        if request.mode == "compatibility":
+            parent = home / ".local/state/grok-proxy/control/compat-vpn"
+            expected_mode = 0o700
+        else:
+            tag = self._workspace_tag(
+                request.owner_epoch, request.generation, request.listen_port
+            )
+            parent = (
+                home
+                / ".local/state/grok-proxy/control/p"
+                / tag
+            )
+            expected_mode = 0o700
+        try:
+            info = parent.lstat()
+            resolved = parent.resolve(strict=True)
+        except OSError as exc:
+            raise BrokerError(f"cannot inspect relay runtime directory: {exc}") from exc
+        if (
+            parent.is_symlink()
+            or resolved != parent
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != request.caller_uid
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or (expected_mode is not None and stat.S_IMODE(info.st_mode) != expected_mode)
+        ):
+            raise BrokerError("unsafe relay runtime directory")
+        return parent / "backend.pid"
+
+    def _remove_empty_relay_pidfile(self, request: Request) -> None:
+        path = self._relay_pidfile(request)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != request.caller_uid
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size != 0
+        ):
+            raise BrokerError("unstarted relay left an unsafe pidfile")
+        path.unlink()
+        _fsync_directory(path.parent)
+
+    @staticmethod
+    def _read_identity_number(
+        path: Path,
+        uid: int,
+        *,
+        maximum: int,
+        mode: int = 0o600,
+    ) -> int:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise BrokerError(f"cannot open pidfile {path}: {exc}") from exc
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) != mode
+                or info.st_size > 32
+            ):
+                raise BrokerError(f"unsafe pidfile: {path}")
+            raw = os.read(fd, 33)
+        finally:
+            os.close(fd)
+        try:
+            value = raw.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise BrokerError(f"invalid pidfile: {path}") from exc
+        if not value.isdecimal() or not 1 <= int(value) <= maximum:
+            raise BrokerError(f"invalid identity number: {path}")
+        return int(value)
+
+    @classmethod
+    def _read_pidfile(cls, path: Path, uid: int, mode: int = 0o600) -> int:
+        return cls._read_identity_number(
+            path,
+            uid,
+            maximum=2**31 - 1,
+            mode=mode,
+        )
+
+    @staticmethod
+    def _read_boot_identity(path: Path, uid: int) -> str:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise BrokerError(f"cannot open boot identity {path}: {exc}") from exc
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size > 64
+            ):
+                raise BrokerError(f"unsafe boot identity: {path}")
+            raw = os.read(fd, 65)
+        finally:
+            os.close(fd)
+        try:
+            value = raw.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise BrokerError(f"invalid boot identity: {path}") from exc
+        if _BOOT_ID.fullmatch(value) is None:
+            raise BrokerError(f"invalid boot identity: {path}")
+        return value
+
+    def _open_relay_pidfile(self, request: Request) -> tuple[int, Path]:
+        path = self._relay_pidfile(request)
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        directory = os.open(path.parent, directory_flags)
+        try:
+            flags = os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+            created = False
+            try:
+                fd = os.open(path.name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+                created = True
+            except FileExistsError:
+                fd = os.open(path.name, flags, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise BrokerError("relay pidfile is not regular")
+                if created:
+                    os.fchown(fd, request.caller_uid, pwd.getpwuid(request.caller_uid).pw_gid)
+                elif info.st_uid != request.caller_uid or stat.S_IMODE(info.st_mode) != 0o600:
+                    raise BrokerError("existing relay pidfile has unsafe ownership or mode")
+                os.fchmod(fd, 0o600)
+                os.ftruncate(fd, 0)
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.set_inheritable(fd, True)
+                return fd, path
+            except BaseException:
+                os.close(fd)
+                if created:
+                    try:
+                        os.unlink(path.name, dir_fd=directory)
+                    except OSError:
+                        pass
+                raise
+        finally:
+            os.close(directory)
+
+    @staticmethod
+    def _proc_start_ticks(pid: int) -> int:
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            fields = raw[raw.rfind(")") + 2 :].split()
+            value = int(fields[19])
+        except (OSError, ValueError, IndexError) as exc:
+            raise BrokerError(f"cannot read process identity for PID {pid}") from exc
+        if value <= 0:
+            raise BrokerError(f"invalid process identity for PID {pid}")
+        return value
+
+    @staticmethod
+    def _proc_args(pid: int) -> tuple[str, ...]:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(Path(f"/proc/{pid}/cmdline"), flags)
+            try:
+                raw = os.read(fd, 131_073)
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            raise BrokerError(f"cannot read process arguments for PID {pid}") from exc
+        if len(raw) > 131_072:
+            raise BrokerError(f"oversized process arguments for PID {pid}")
+        if not raw:
+            return ()
+        if not raw.endswith(b"\0"):
+            raise BrokerError(f"unterminated process arguments for PID {pid}")
+        return tuple(
+            item.decode("utf-8", "surrogateescape")
+            for item in raw[:-1].split(b"\0")
+        )
+
+    @staticmethod
+    def _record_shape(value: Any, *, kind: str) -> bool:
+        fields = {"pid", "start_ticks", "boot_id", "uid", "pidfile"}
+        if kind == "relay":
+            fields |= {"listen_port", "helper"}
+        if kind == "vpn":
+            fields |= {"scope"}
+        return (
+            type(value) is dict
+            and set(value) == fields
+            and type(value.get("pid")) is int
+            and 1 <= value["pid"] <= 2**31 - 1
+            and type(value.get("start_ticks")) is int
+            and 1 <= value["start_ticks"] <= 2**63 - 1
+            and type(value.get("boot_id")) is str
+            and _BOOT_ID.fullmatch(value["boot_id"]) is not None
+            and type(value.get("uid")) is int
+            and 0 <= value["uid"] <= 2**31 - 1
+            and type(value.get("pidfile")) is str
+            and Path(value["pidfile"]).is_absolute()
+            and 1 <= len(value["pidfile"]) <= 4096
+            and (
+                kind != "relay"
+                or (
+                    type(value.get("listen_port")) is int
+                    and _MIN_PORT <= value["listen_port"] <= _MAX_PORT
+                    and type(value.get("helper")) is str
+                    and Path(value["helper"]).is_absolute()
+                    and 1 <= len(value["helper"]) <= 4096
+                )
+            )
+            and (
+                kind != "vpn"
+                or ExactCgroupV2Scope.shape(value.get("scope"), created=True)
+            )
+        )
+
+    @staticmethod
+    def _operation_record_shape(value: Any) -> bool:
+        return (
+            type(value) is dict
+            and set(value) == {
+                "pid", "start_ticks", "pgid", "uid", "helper", "verb",
+                "guard", "argv", "boot_id",
+                "scope",
+            }
+            and type(value.get("pid")) is int
+            and 1 <= value["pid"] <= 2**31 - 1
+            and type(value.get("start_ticks")) is int
+            and 1 <= value["start_ticks"] <= 2**63 - 1
+            and type(value.get("pgid")) is int
+            and value["pgid"] == value["pid"]
+            and type(value.get("uid")) is int
+            and 0 <= value["uid"] <= 2**31 - 1
+            and type(value.get("helper")) is str
+            and Path(value["helper"]).is_absolute()
+            and 1 <= len(value["helper"]) <= 4096
+            and type(value.get("guard")) is str
+            and Path(value["guard"]).is_absolute()
+            and 1 <= len(value["guard"]) <= 4096
+            and type(value.get("boot_id")) is str
+            and _BOOT_ID.fullmatch(value["boot_id"]) is not None
+            and ExactCgroupV2Scope.shape(value.get("scope"), created=True)
+            and value.get("verb") in {"up", "next", "reset", "down"}
+            and type(value.get("argv")) is list
+            and 1 <= len(value["argv"]) <= 64
+            and all(
+                type(argument) is str and 0 < len(argument) <= 4096
+                for argument in value["argv"]
+            )
+        )
+
+    @staticmethod
+    def _argv_pair(argv: tuple[str, ...], name: str, value: str) -> bool:
+        return any(
+            argv[index] == name and argv[index + 1] == value
+            for index in range(len(argv) - 1)
+        )
+
+    @staticmethod
+    def _has_daemon_argument(argv: tuple[str, ...]) -> bool:
+        return any(
+            argument == "--daemon" or argument.startswith("--daemon=")
+            for argument in argv
+        )
+
+    def _vpn_identity(self, scope: dict[str, Any]) -> dict[str, Any]:
+        if not ExactCgroupV2Scope.shape(scope, created=True):
+            raise BrokerError("VPN process lacks an exact cgroup identity")
+        pid = self._read_pidfile(self.layout.vpn_pid, self.expected_root_uid)
+        helper_start = self._read_identity_number(
+            self.layout.vpn_start,
+            self.expected_root_uid,
+            maximum=2**63 - 1,
+        )
+        process_start = self._proc_start_ticks(pid)
+        if helper_start != process_start:
+            raise BrokerError("VPN helper start identity differs from /proc")
+        helper_boot = self._read_boot_identity(
+            self.layout.vpn_boot, self.expected_root_uid
+        )
+        if helper_boot != self._boot_id():
+            raise BrokerError("VPN helper boot identity differs from the current boot")
+        record = {
+            "pid": pid,
+            "start_ticks": process_start,
+            "boot_id": self._boot_id(),
+            "uid": self.expected_root_uid,
+            "pidfile": str(self.layout.vpn_pid),
+            "scope": scope,
+        }
+        if not self.operation_scopes.contains(scope, pid):
+            raise BrokerError("OpenVPN process escaped its exact cgroup")
+        if not self._vpn_process_matches(record):
+            raise BrokerError("OpenVPN process does not match the fixed root pidfile")
+        return record
+
+    def _vpn_process_matches(self, record: Any) -> bool:
+        if not self._record_shape(record, kind="vpn"):
+            return False
+        pid = record["pid"]
+        if record != {
+            "pid": pid,
+            "start_ticks": record["start_ticks"],
+            "boot_id": self._boot_id(),
+            "uid": self.expected_root_uid,
+            "pidfile": str(self.layout.vpn_pid),
+            "scope": record["scope"],
+        }:
+            return False
+        try:
+            if (
+                self._read_identity_number(
+                    self.layout.vpn_start,
+                    self.expected_root_uid,
+                    maximum=2**63 - 1,
+                )
+                != record["start_ticks"]
+            ):
+                return False
+            if (
+                self._read_boot_identity(
+                    self.layout.vpn_boot, self.expected_root_uid
+                )
+                != record["boot_id"]
+            ):
+                return False
+            if Path(f"/proc/{pid}").stat().st_uid != self.expected_root_uid:
+                return False
+            if not self.operation_scopes.contains(record["scope"], pid):
+                return False
+            if self._proc_start_ticks(pid) != record["start_ticks"]:
+                return False
+            argv = self._proc_args(pid)
+            return bool(argv) and argv[0] == "/usr/sbin/openvpn" and all(
+                (
+                    self._argv_pair(
+                        argv, "--config", str(self.layout.vpn_work / "vpngate.ovpn")
+                    ),
+                    self._argv_pair(argv, "--dev", "tun-grok"),
+                    self._argv_pair(
+                        argv, "--up", str(self.layout.vpn_work / "up.sh")
+                    ),
+                    not self._has_daemon_argument(argv),
+                )
+            )
+        except (BrokerError, OSError):
+            return False
+
+    def _listener_owner(self, port: int) -> int | None:
+        result = self.runner(
+            ["ss", "-H", "-lntp", f"sport = :{port}"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise BrokerError("cannot inspect relay listener ownership")
+        rows = [line for line in result.stdout.splitlines() if line.strip()]
+        if not rows:
+            return None
+        owners: set[int] = set()
+        for line in rows:
+            row_owners = {
+                int(value) for value in re.findall(r"pid=([0-9]+)", line)
+            }
+            if len(row_owners) != 1:
+                raise BrokerError("relay port listener ownership is unavailable")
+            owners.update(row_owners)
+        if len(owners) != 1:
+            raise BrokerError("relay port has ambiguous process ownership")
+        return owners.pop()
+
+    @staticmethod
+    def _read_proc_file(directory: int, name: str, maximum: int) -> bytes:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(name, flags, dir_fd=directory)
+        try:
+            data = os.read(fd, maximum + 1)
+            if len(data) > maximum:
+                raise BrokerError(f"oversized /proc process {name} record")
+            return data
+        finally:
+            os.close(fd)
+
+    def _legacy_openvpn_processes(self) -> tuple[int, ...]:
+        """Return every definite or ambiguous process tied to legacy OpenVPN."""
+
+        directory_flags = (
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            proc_fd = os.open(self.layout.proc, directory_flags)
+        except OSError as exc:
+            raise BrokerError("cannot inspect process table for legacy OpenVPN") from exc
+        suspects: list[int] = []
+        legacy_paths = {
+            str(self.layout.vpn_work / "vpngate.ovpn"),
+            str(self.layout.vpn_pid),
+            str(self.layout.vpn_start),
+            str(self.layout.vpn_boot),
+        }
+        try:
+            for name in os.listdir(proc_fd):
+                if not name.isdecimal() or not 1 <= int(name) <= 2**31 - 1:
+                    continue
+                try:
+                    process_fd = os.open(name, directory_flags, dir_fd=proc_fd)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise BrokerError(
+                        f"cannot inspect process {name} for legacy OpenVPN"
+                    ) from exc
+                try:
+                    try:
+                        comm = self._read_proc_file(
+                            process_fd, "comm", 256
+                        ).rstrip(b"\n").decode("utf-8", "surrogateescape")
+                        raw = self._read_proc_file(process_fd, "cmdline", 131_072)
+                        argv = tuple(
+                            item.decode("utf-8", "surrogateescape")
+                            for item in raw.rstrip(b"\0").split(b"\0")
+                            if item
+                        )
+                    except FileNotFoundError:
+                        continue
+                    try:
+                        executable = os.readlink("exe", dir_fd=process_fd)
+                    except OSError:
+                        executable = ""
+                    openvpn_identity = (
+                        comm == "openvpn"
+                        or Path(executable).name == "openvpn"
+                        or bool(argv) and Path(argv[0]).name == "openvpn"
+                    )
+                    legacy_marker = any(
+                        argument in legacy_paths
+                        or any(
+                            argument == f"{option}={path}"
+                            for option in ("--config", "--writepid", "--log")
+                            for path in legacy_paths
+                        )
+                        for argument in argv
+                    ) or any(
+                        self._argv_pair(argv, option, value)
+                        for option, value in (
+                            ("--config", str(self.layout.vpn_work / "vpngate.ovpn")),
+                            ("--writepid", str(self.layout.vpn_pid)),
+                            ("--dev", "tun-grok"),
+                            ("--daemon", "grok-vpngate"),
+                        )
+                    )
+                    if openvpn_identity or legacy_marker:
+                        suspects.append(int(name))
+                except OSError as exc:
+                    try:
+                        os.stat(name, dir_fd=proc_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    raise BrokerError(
+                        f"cannot rule out legacy OpenVPN process {name}"
+                    ) from exc
+                finally:
+                    os.close(process_fd)
+        finally:
+            os.close(proc_fd)
+        return tuple(sorted(suspects))
+
+    def _relay_process_matches(self, record: Any, request: Request, relay: Path) -> bool:
+        if not self._record_shape(record, kind="relay"):
+            return False
+        pid = record["pid"]
+        try:
+            pidfile = self._relay_pidfile(request)
+        except BrokerError:
+            return False
+        if (
+            record["uid"] != request.caller_uid
+            or record["boot_id"] != self._boot_id()
+            or record["listen_port"] != request.listen_port
+            or record["pidfile"] != str(pidfile)
+            or record["helper"] != str(relay)
+        ):
+            return False
+        try:
+            if self._proc_start_ticks(pid) != record["start_ticks"]:
+                return False
+            process_uid = Path(f"/proc/{pid}").stat().st_uid
+            argv = self._proc_args(pid)
+            common = {str(relay), "--pidfile", str(pidfile), "--pid-fd"}
+            stage_one = {
+                "--listen", f"127.0.0.1:{request.listen_port}", "--netns", "grokvpn"
+            }
+            stage_two = {"--serve-fd", "--user", pwd.getpwuid(request.caller_uid).pw_name}
+            return common.issubset(argv) and (
+                (process_uid == self.expected_root_uid and stage_one.issubset(argv))
+                or (process_uid == request.caller_uid and stage_two.issubset(argv))
+            )
+        except (BrokerError, OSError):
+            return False
+
+    def _relay_alive(self, record: Any, request: Request, relay: Path) -> bool:
+        if not self._relay_process_matches(record, request, relay):
+            return False
+        try:
+            if Path(f"/proc/{record['pid']}").stat().st_uid != request.caller_uid:
+                return False
+            if self._read_pidfile(Path(record["pidfile"]), request.caller_uid) != record["pid"]:
+                return False
+            if self._listener_owner(request.listen_port) != record["pid"]:
+                return False
+            return self._proc_start_ticks(record["pid"]) == record["start_ticks"]
+        except BrokerError:
+            return False
+
+    def _spawn_relay(self, request: Request, relay: Path) -> dict[str, Any]:
+        self._assert_request_live(request)
+        pid_fd, pidfile = self._open_relay_pidfile(request)
+        process: subprocess.Popen[Any] | None = None
+        try:
+            account = pwd.getpwuid(request.caller_uid)
+            command = [
+                "/usr/bin/python3",
+                str(relay),
+                "--listen",
+                f"127.0.0.1:{request.listen_port}",
+                "--netns",
+                "grokvpn",
+                "--user",
+                account.pw_name,
+                "--pidfile",
+                str(pidfile),
+                "--pid-fd",
+                str(pid_fd),
+            ]
+            process = self.spawner(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                pass_fds=(pid_fd,),
+                start_new_session=True,
+                cwd="/",
+                env={
+                    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                    "HOME": "/root",
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                },
+            )
+        except BaseException:
+            self._remove_empty_relay_pidfile(request)
+            raise
+        finally:
+            os.close(pid_fd)
+        assert process is not None
+        start_ticks = self._proc_start_ticks(process.pid)
+        record = {
+            "pid": process.pid,
+            "start_ticks": start_ticks,
+            "boot_id": self._boot_id(),
+            "uid": request.caller_uid,
+            "pidfile": str(pidfile),
+            "listen_port": request.listen_port,
+            "helper": str(relay),
+        }
+        try:
+            for _ in range(80):
+                self._assert_request_live(request)
+                if self._relay_alive(record, request, relay):
+                    return record
+                if process.poll() is not None:
+                    break
+                self.sleeper(0.1)
+        except BrokerError:
+            self._stop_relay(record, request, relay)
+            raise
+        try:
+            self._stop_relay(record, request, relay)
+        except BrokerError as exc:
+            raise BrokerError(
+                "immutable root relay failed readiness and exact cleanup"
+            ) from exc
+        raise BrokerError("immutable root relay did not acquire the private listener")
+
+    def _remove_relay_pidfile(self, record: dict[str, Any], request: Request) -> None:
+        path = self._relay_pidfile(request)
+        try:
+            info = path.lstat()
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != request.caller_uid
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size > 32
+            ):
+                raise BrokerError("relay pidfile has unsafe cleanup identity")
+            raw = path.read_bytes()
+            if raw.strip() and raw.strip() != str(record["pid"]).encode("ascii"):
+                raise BrokerError("relay pidfile no longer names the owned process")
+            path.unlink()
+            _fsync_directory(path.parent)
+        except FileNotFoundError:
+            return
+
+    def _unlink_ledger_durable(self) -> None:
+        try:
+            self.layout.ledger.unlink()
+        except FileNotFoundError:
+            return
+        _fsync_directory(self.layout.ledger.parent)
+
+    def _stop_relay(self, record: dict[str, Any], request: Request, relay: Path) -> None:
+        if self._relay_process_matches(record, request, relay):
+            try:
+                pidfd = os.pidfd_open(record["pid"], 0)
+            except OSError as exc:
+                if self._relay_process_matches(record, request, relay):
+                    raise BrokerError("cannot open pidfd for owned relay") from exc
+            else:
+                try:
+                    # pidfd_open binds the kernel object, then the complete
+                    # durable identity is revalidated.  A PID-reuse race can
+                    # therefore never turn the following signal into a signal
+                    # to an unrelated numeric PID.
+                    if not self._relay_process_matches(record, request, relay):
+                        raise BrokerError("relay identity changed after pidfd_open")
+                    signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                    for _ in range(50):
+                        if not self._relay_process_matches(record, request, relay):
+                            break
+                        self.sleeper(0.1)
+                    if self._relay_process_matches(record, request, relay):
+                        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                        for _ in range(50):
+                            if not self._relay_process_matches(record, request, relay):
+                                break
+                            self.sleeper(0.1)
+                finally:
+                    os.close(pidfd)
+        if self._relay_process_matches(record, request, relay):
+            raise BrokerError("owned relay remains after teardown")
+        if self._listener_owner(request.listen_port) is not None:
+            raise BrokerError("private relay listener remains after teardown")
+        self._remove_relay_pidfile(record, request)
+
+    def _fence(self, request: Request) -> None:
+        fence_path = self._home(request.caller_uid) / ".local/state/grok-proxy/control/recovery.fence"
+        if request.mode == "compatibility":
+            if fence_path.exists() or fence_path.is_symlink():
+                raise BrokerError("multi-session recovery fence blocks compatibility VPN mutation")
+            return
+        info = fence_path.lstat()
+        if (
+            fence_path.is_symlink()
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != request.caller_uid
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise BrokerError("unsafe supervisor recovery fence")
+        fence = _read_json(fence_path, uid=request.caller_uid, mode=0o600)
+        fields = {
+            "schema_version", "release_id", "owner_epoch", "pid",
+            "pid_start_ticks", "boot_id", "phase",
+        }
+        if (
+            set(fence) != fields
+            or fence.get("schema_version") != 1
+            or type(fence.get("release_id")) is not str
+            or _RELEASE.fullmatch(fence["release_id"]) is None
+            or type(fence.get("owner_epoch")) is not str
+            or _TOKEN.fullmatch(fence["owner_epoch"]) is None
+            or type(fence.get("pid")) is not int
+            or not 1 <= fence["pid"] <= 2**31 - 1
+            or type(fence.get("pid_start_ticks")) is not int
+            or not 1 <= fence["pid_start_ticks"] <= 2**63 - 1
+            or type(fence.get("boot_id")) is not str
+            or _BOOT_ID.fullmatch(fence["boot_id"]) is None
+            or fence.get("phase") not in _FENCE_PHASES
+        ):
+            raise BrokerError("invalid supervisor recovery fence schema")
+        if (
+            fence["owner_epoch"] != request.owner_epoch
+            or fence["release_id"] != request.release_id
+        ):
+            raise BrokerError("supervisor request does not own the durable recovery fence")
+
+    def _load_ledger(self) -> dict[str, Any] | None:
+        if not self.layout.ledger.exists():
+            return None
+        value = _read_json(
+            self.layout.ledger,
+            uid=self.expected_root_uid,
+            mode=0o600,
+        )
+        fields = {
+            "schema_version", "protocol_version", "caller_uid", "release_id",
+            "owner_epoch", "generation", "listen_port", "contract_digest",
+            "vpn_policy", "phase", "vpn", "relay", "operation",
+        }
+        if set(value) != fields or value.get("schema_version") != SCHEMA_VERSION:
+            raise BrokerError("unsupported broker ledger schema")
+        if (
+            value.get("protocol_version") != PROTOCOL_VERSION
+            or type(value.get("caller_uid")) is not int
+            or type(value.get("release_id")) is not str
+            or _RELEASE.fullmatch(value["release_id"]) is None
+            or type(value.get("owner_epoch")) is not str
+            or _TOKEN.fullmatch(value["owner_epoch"]) is None
+            or type(value.get("generation")) is not int
+            or type(value.get("listen_port")) is not int
+            or not _MIN_PORT <= value["listen_port"] <= _MAX_PORT
+            or type(value.get("contract_digest")) is not str
+            or _RELEASE.fullmatch(value["contract_digest"]) is None
+            or type(value.get("vpn_policy")) is not dict
+            or value.get("phase") not in _LEDGER_PHASES
+            or (value.get("vpn") is not None and not self._record_shape(value["vpn"], kind="vpn"))
+            or (value.get("relay") is not None and not self._record_shape(value["relay"], kind="relay"))
+            or (
+                value.get("operation") is not None
+                and not self._operation_record_shape(value["operation"])
+            )
+            or (
+                value.get("operation") is not None
+                and value["operation"]["uid"] != self.expected_root_uid
+            )
+            or (value.get("phase") == "ACTIVE" and (value.get("vpn") is None or value.get("relay") is None))
+            or (value.get("phase") == "ACTIVE" and value.get("operation") is not None)
+        ):
+            raise BrokerError("invalid broker ledger record")
+        try:
+            policy = value["vpn_policy"]
+            policy_request = Request(
+                operation="status",
+                mode="compatibility" if value["generation"] == 0 else "supervisor",
+                caller_uid=value["caller_uid"],
+                release_id=value["release_id"],
+                owner_epoch=value["owner_epoch"],
+                generation=value["generation"],
+                listen_port=value["listen_port"],
+                contract_digest=value["contract_digest"],
+                vpn_max_tries=policy["max_tries"],
+                vpn_ranking_version=policy["ranking_version"],
+                vpn_countries=tuple(policy["countries"]),
+                vpn_prefer_countries=tuple(policy["prefer_countries"]),
+                vpn_blocked_countries=tuple(policy["blocked_countries"]),
+            )
+            policy_request.validate()
+        except (KeyError, TypeError, BrokerError) as exc:
+            raise BrokerError("invalid broker ledger VPN policy") from exc
+        if policy_request.vpn_policy_record() != value["vpn_policy"]:
+            raise BrokerError("noncanonical broker ledger VPN policy")
+        return value
+
+    def _write_phase(
+        self,
+        request: Request,
+        phase: str,
+        *,
+        vpn: dict[str, Any] | None,
+        relay: dict[str, Any] | None,
+        operation: dict[str, Any] | None = None,
+    ) -> None:
+        if phase not in _LEDGER_PHASES:
+            raise BrokerError("invalid broker ledger phase")
+        _atomic_json(
+            self.layout.ledger,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "protocol_version": PROTOCOL_VERSION,
+                "caller_uid": request.caller_uid,
+                "release_id": request.release_id,
+                "owner_epoch": request.owner_epoch,
+                "generation": request.generation,
+                "listen_port": request.listen_port,
+                "contract_digest": request.contract_digest,
+                "vpn_policy": request.vpn_policy_record(),
+                "phase": phase,
+                "vpn": vpn,
+                "relay": relay,
+                "operation": operation,
+            },
+            uid=self.expected_root_uid,
+        )
+
+    @staticmethod
+    def _same_owner(ledger: dict[str, Any], request: Request) -> bool:
+        return all(
+            ledger.get(key) == value
+            for key, value in (
+                ("caller_uid", request.caller_uid),
+                ("release_id", request.release_id),
+                ("owner_epoch", request.owner_epoch),
+                ("generation", request.generation),
+                ("listen_port", request.listen_port),
+                ("contract_digest", request.contract_digest),
+                ("vpn_policy", request.vpn_policy_record()),
+            )
+        )
+
+    @staticmethod
+    def _helper_environment(request: Request) -> dict[str, str]:
+        attempt_scope = hashlib.sha256(
+            request.release_id.encode("ascii")
+            + b"\0"
+            + request.owner_epoch.encode("ascii")
+            + b"\0"
+            + str(request.generation).encode("ascii")
+            + b"\0"
+            + request.contract_digest.encode("ascii")
+        ).hexdigest()
+        env = {
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME": "/root",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "SUDO_UID": str(request.caller_uid),
+            "SUDO_GID": str(pwd.getpwuid(request.caller_uid).pw_gid),
+            "SUDO_USER": pwd.getpwuid(request.caller_uid).pw_name,
+            "GROK_BLOCKED_CC": " ".join(request.vpn_blocked_countries),
+            "VPNGATE_CANDIDATES": str(request.vpn_max_tries),
+            "VPNGATE_ATTEMPT_SCOPE": attempt_scope,
+            "VPNGATE_PROVIDER_MODE": "1" if request.mode == "supervisor" else "0",
+        }
+        if request.vpn_countries:
+            env["VPNGATE_COUNTRIES"] = " ".join(request.vpn_countries)
+        else:
+            env["VPNGATE_PREFER"] = " ".join(request.vpn_prefer_countries)
+        return env
+
+    @staticmethod
+    def _boot_id() -> str:
+        try:
+            value = Path("/proc/sys/kernel/random/boot_id").read_text(
+                encoding="ascii"
+            ).strip()
+        except OSError as exc:
+            raise BrokerError("cannot read kernel boot identity") from exc
+        if _BOOT_ID.fullmatch(value) is None:
+            raise BrokerError("invalid kernel boot identity")
+        return value
+
+    def _operation_process_matches(self, record: Any) -> bool:
+        if not self._operation_record_shape(record):
+            return False
+        if record["uid"] != self.expected_root_uid:
+            return False
+        if record["boot_id"] != self._boot_id():
+            return False
+        try:
+            return bool(
+                Path(f"/proc/{record['pid']}").stat().st_uid
+                == self.expected_root_uid
+                and self._proc_start_ticks(record["pid"]) == record["start_ticks"]
+                and os.getpgid(record["pid"]) == record["pgid"]
+                and self._proc_args(record["pid"]) == tuple(record["argv"])
+                and self.operation_scopes.contains(record["scope"], record["pid"])
+            )
+        except (BrokerError, OSError):
+            return False
+
+    @staticmethod
+    def _process_group_exists(pgid: int) -> bool:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                raw = (entry / "stat").read_text(encoding="ascii")
+                fields = raw[raw.rfind(")") + 2 :].split()
+                if (
+                    len(fields) > 2
+                    and fields[0] != "Z"
+                    and int(fields[2]) == pgid
+                ):
+                    return True
+            except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
+                continue
+        return False
+
+    def _stop_operation_group(self, record: dict[str, Any]) -> None:
+        if not self._operation_record_shape(record):
+            raise BrokerError("invalid durable VPN operation identity")
+        if record["boot_id"] != self._boot_id():
+            raise BrokerError("VPN operation cgroup belongs to another boot")
+        # Numeric PGIDs are never recovery authority.  Exact cgroup path,
+        # device, and inode identity is the sole descendant ownership proof.
+        self.operation_scopes.reconcile(record["scope"], 10.0)
+
+    def _remove_partial_vpn_identity(self, durable_vpn: dict[str, Any] | None) -> None:
+        if durable_vpn is not None and self._vpn_process_matches(durable_vpn):
+            return
+        changed = False
+        for path in (
+            self.layout.vpn_pid, self.layout.vpn_start, self.layout.vpn_boot
+        ):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != self.expected_root_uid
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size > (64 if path == self.layout.vpn_boot else 32)
+            ):
+                raise BrokerError("unsafe partial OpenVPN identity residue")
+            path.unlink()
+            changed = True
+        if changed and self.layout.vpn_work.exists():
+            _fsync_directory(self.layout.vpn_work)
+
+    def _operation_effects_empty(self, vpn: dict[str, Any] | None) -> bool:
+        return bool(
+            not self._namespace_exists()
+            and not self._tun_alive()
+            and not self._host_tun_alive()
+            and not self._root_artifact_residue()
+            and (vpn is None or not self._vpn_process_matches(vpn))
+        )
+
+    def _caller_matches(self, request: Request) -> bool:
+        # All-zero caller fields are a direct in-process unit-test seam.  The
+        # public CLI requires and authenticates every field.
+        if request.caller_pid == 0:
+            return True
+        try:
+            raw = Path(f"/proc/{request.caller_pid}/stat").read_text(
+                encoding="ascii"
+            )
+            fields = raw[raw.rfind(")") + 2 :].split()
+            return bool(
+                len(fields) > 19
+                and fields[0] != "Z"
+                and int(fields[19]) == request.caller_start_ticks
+                and Path(f"/proc/{request.caller_pid}").stat().st_uid
+                == request.caller_uid
+                and self._boot_id() == request.caller_boot_id
+            )
+        except (OSError, ValueError):
+            return False
+
+    def _assert_request_live(self, request: Request) -> None:
+        if (
+            request.deadline_monotonic_ns
+            and time.monotonic_ns() >= request.deadline_monotonic_ns
+        ):
+            raise BrokerError("provider deadline expired")
+        if not self._caller_matches(request):
+            raise BrokerError("provider caller identity died or changed")
+
+    def _recover_operation(
+        self,
+        request: Request,
+        *,
+        phase: str,
+        vpn: dict[str, Any] | None,
+        relay: dict[str, Any] | None,
+        operation: dict[str, Any],
+    ) -> None:
+        try:
+            self._stop_operation_group(operation)
+        except BrokerError:
+            # A cgroup path/inode mismatch or disappearance is never converted
+            # into numeric-PID authority.  It is safe to clear only when every
+            # possible fixed root effect is independently proved absent.
+            if not self._operation_effects_empty(vpn):
+                raise
+        surviving_vpn = vpn if vpn is not None and self._vpn_process_matches(vpn) else None
+        self._remove_partial_vpn_identity(surviving_vpn)
+        self._write_phase(
+            request,
+            phase,
+            vpn=surviving_vpn,
+            relay=relay,
+            operation=None,
+        )
+
+    @staticmethod
+    def _operation_timeout(operation: str, request: Request) -> float:
+        if operation in {"down", "reset"}:
+            return 45.0
+        # VPNGate fetch is bounded at 40 seconds.  The helper admits at most
+        # max_tries total probes; each has a 5-second reachability bound, a
+        # 15-second OpenVPN wait, and a worst-case 10-second exact teardown.
+        # The fixed 120 seconds also covers the 20-second egress-IP check,
+        # bounded parsing, process publication, and loaded-host jitter.
+        return float(120 + 30 * request.vpn_max_tries)
+
+    def _read_operation_result(
+        self, fd: int, timeout: float, request: Request
+    ) -> int:
+        local_deadline_ns = time.monotonic_ns() + int(timeout * 1_000_000_000)
+        if request.deadline_monotonic_ns:
+            local_deadline_ns = min(
+                local_deadline_ns, request.deadline_monotonic_ns
+            )
+        while True:
+            self._assert_request_live(request)
+            remaining = (local_deadline_ns - time.monotonic_ns()) / 1_000_000_000
+            if remaining <= 0:
+                raise BrokerError("VPN helper operation timed out")
+            ready, _, _ = select.select([fd], [], [], min(0.05, remaining))
+            if ready:
+                break
+        self._assert_request_live(request)
+        data = os.read(fd, 32)
+        if not data.endswith(b"\n") or not data[:-1].isdigit():
+            raise BrokerError("VPN helper guard returned an invalid result")
+        result = int(data[:-1])
+        if not 0 <= result <= 255:
+            raise BrokerError("VPN helper guard returned an invalid exit status")
+        return result
+
+    def _invoke(
+        self,
+        helper: Path,
+        broker_guard: Path,
+        operation: str,
+        request: Request,
+        *,
+        phase: str,
+        vpn: dict[str, Any] | None,
+        relay: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        barrier_read, barrier_write = os.pipe2(os.O_CLOEXEC)
+        result_read, result_write = os.pipe2(os.O_CLOEXEC)
+        ack_read, ack_write = os.pipe2(os.O_CLOEXEC)
+        stdout_read, stdout_write = os.pipe2(os.O_CLOEXEC)
+        stderr_read, stderr_write = os.pipe2(os.O_CLOEXEC)
+        process: subprocess.Popen[Any] | None = None
+        record: dict[str, Any] | None = None
+        scope: dict[str, Any] | None = None
+        captures = {
+            "stdout": {"fd": stdout_read, "data": bytearray(), "over": False},
+            "stderr": {"fd": stderr_read, "data": bytearray(), "over": False},
+        }
+
+        def drain(capture: dict[str, Any]) -> None:
+            try:
+                while True:
+                    chunk = os.read(capture["fd"], 65_536)
+                    if not chunk:
+                        return
+                    remaining = 1_048_576 - len(capture["data"])
+                    if remaining > 0:
+                        capture["data"].extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        capture["over"] = True
+            finally:
+                os.close(capture["fd"])
+                capture["fd"] = -1
+
+        drainers = [
+            threading.Thread(target=drain, args=(capture,), daemon=True)
+            for capture in captures.values()
+        ]
+        drainers_started = False
+        try:
+            self._assert_request_live(request)
+            preserved = (vpn["scope"],) if vpn is not None else ()
+            scope = self.operation_scopes.create(
+                self.operation_scopes.plan(preserved)
+            )
+            parent_pid = os.getpid()
+            parent_start = self._proc_start_ticks(parent_pid)
+            argv = [
+                "/usr/bin/python3",
+                "-I",
+                str(broker_guard),
+                "--internal-guard",
+                "--parent-pid", str(parent_pid),
+                "--parent-uid", str(self.expected_root_uid),
+                "--parent-start-ticks", str(parent_start),
+                "--parent-boot-id", self._boot_id(),
+                "--barrier-fd", str(barrier_read),
+                "--result-fd", str(result_write),
+                "--ack-fd", str(ack_read),
+                "--",
+                str(helper),
+                operation,
+            ]
+            process = self.spawner(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_write,
+                stderr=stderr_write,
+                close_fds=True,
+                pass_fds=(barrier_read, result_write, ack_read),
+                start_new_session=True,
+                cwd="/",
+                env=self._helper_environment(request),
+            )
+            for drainer in drainers:
+                drainer.start()
+            drainers_started = True
+            os.close(barrier_read)
+            barrier_read = -1
+            os.close(result_write)
+            result_write = -1
+            os.close(ack_read)
+            ack_read = -1
+            os.close(stdout_write)
+            stdout_write = -1
+            os.close(stderr_write)
+            stderr_write = -1
+            guard_start = self._proc_start_ticks(process.pid)
+            self.operation_scopes.attach(scope, process.pid)
+            if self._proc_start_ticks(process.pid) != guard_start:
+                raise BrokerError("VPN operation guard changed during cgroup attachment")
+            record = {
+                "pid": process.pid,
+                "start_ticks": guard_start,
+                "pgid": process.pid,
+                "uid": self.expected_root_uid,
+                "helper": str(helper),
+                "verb": operation,
+                "guard": str(broker_guard),
+                "argv": argv,
+                "boot_id": self._boot_id(),
+                "scope": scope,
+            }
+            if not self._operation_process_matches(record):
+                raise BrokerError("VPN operation guard identity mismatch")
+            self._write_phase(
+                request,
+                phase,
+                vpn=vpn,
+                relay=relay,
+                operation=record,
+            )
+            self._assert_request_live(request)
+            os.write(barrier_write, b"G")
+            os.close(barrier_write)
+            barrier_write = -1
+            returncode = self._read_operation_result(
+                result_read, self._operation_timeout(operation, request), request
+            )
+            for drainer in drainers:
+                drainer.join(timeout=5)
+            if any(drainer.is_alive() for drainer in drainers):
+                raise BrokerError("VPN helper output drain did not terminate")
+            stdout = bytes(captures["stdout"]["data"])
+            stderr = bytes(captures["stderr"]["data"])
+            if captures["stdout"]["over"] or captures["stderr"]["over"]:
+                raise BrokerError("VPN helper output exceeded its fixed bound")
+            if returncode:
+                detail = _bounded_failure_detail(stderr or stdout, returncode)
+                raise BrokerError(f"VPN helper {operation} failed: {detail}")
+            self._assert_request_live(request)
+            current_vpn = vpn
+            if operation in {"up", "next"}:
+                current_vpn = self._vpn_identity(scope)
+            elif operation == "reset":
+                if vpn is None or not self._vpn_process_matches(vpn):
+                    raise BrokerError("reset lost the existing OpenVPN identity")
+                current_vpn = vpn
+            elif operation == "down":
+                current_vpn = None
+            # Persist the completed effect while the guard is still held at
+            # its acknowledgement barrier.  A crash from this point can
+            # reconcile the exact cgroup and the fixed root artifacts.
+            self._write_phase(
+                request,
+                phase,
+                vpn=current_vpn,
+                relay=relay,
+                operation=record,
+            )
+            self._assert_request_live(request)
+            os.write(ack_write, b"A")
+            os.close(ack_write)
+            ack_write = -1
+            try:
+                guard_status = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._stop_operation_group(record)
+                process.wait(timeout=5)
+                raise BrokerError("VPN operation guard did not exit after acknowledgement")
+            if guard_status != 0:
+                raise BrokerError("VPN operation guard rejected the durable acknowledgement")
+            if (
+                operation in {"next", "down"}
+                and vpn is not None
+                and vpn["scope"] != scope
+            ):
+                self.operation_scopes.reconcile(vpn["scope"], 10.0)
+            self._write_phase(
+                request,
+                phase,
+                vpn=current_vpn,
+                relay=relay,
+                operation=None,
+            )
+            # Once the transient operation record is durably cleared, an
+            # empty reset/down scope is merely effect-free residue.  Removing
+            # it last avoids a crash window with a durable record naming an
+            # already-removed scope while preserving the old VPN identity.
+            if operation in {"reset", "down"}:
+                self.operation_scopes.reconcile(scope, 10.0)
+            return current_vpn
+        except BaseException as exc:
+            cleanup_error: BaseException | None = None
+            if record is not None:
+                try:
+                    self._stop_operation_group(record)
+                    surviving_vpn = (
+                        vpn if vpn is not None and self._vpn_process_matches(vpn) else None
+                    )
+                    self._remove_partial_vpn_identity(surviving_vpn)
+                    self._write_phase(
+                        request,
+                        "FAILED",
+                        vpn=surviving_vpn,
+                        relay=relay,
+                        operation=None,
+                    )
+                except BaseException as stop_exc:
+                    cleanup_error = stop_exc
+                    self._write_phase(
+                        request,
+                        "FAILED",
+                        vpn=vpn,
+                        relay=relay,
+                        operation=record,
+                    )
+            elif scope is not None:
+                try:
+                    self.operation_scopes.reconcile(scope, 10.0)
+                except BaseException as stop_exc:
+                    cleanup_error = stop_exc
+            if cleanup_error is not None:
+                raise BrokerError(
+                    f"VPN operation failed and exact cgroup cleanup failed: {cleanup_error}"
+                ) from exc
+            raise
+        finally:
+            if process is not None:
+                try:
+                    process.wait(timeout=1)
+                except (subprocess.TimeoutExpired, ChildProcessError):
+                    pass
+            for fd in (
+                barrier_read, barrier_write, result_read, result_write,
+                ack_read, ack_write, stdout_write, stderr_write,
+            ):
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            for capture in captures.values():
+                if capture["fd"] >= 0:
+                    try:
+                        os.close(capture["fd"])
+                    except OSError:
+                        pass
+                    capture["fd"] = -1
+            if drainers_started:
+                for drainer in drainers:
+                    drainer.join(timeout=1)
+
+    def _namespace_exists(self) -> bool:
+        result = self.runner(
+            ["ip", "netns", "list"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise BrokerError("cannot inspect VPN namespace inventory")
+        if type(result.stdout) is not str or len(result.stdout) > 1_048_576:
+            raise BrokerError("invalid VPN namespace inventory")
+        matches = [
+            line for line in result.stdout.splitlines()
+            if line.split(maxsplit=1)[:1] == ["grokvpn"]
+        ]
+        if len(matches) > 1:
+            raise BrokerError("ambiguous fixed VPN namespace inventory")
+        return bool(matches)
+
+    def _tun_alive(self) -> bool:
+        if not self._namespace_exists():
+            return False
+        result = self.runner(
+            ["ip", "netns", "exec", "grokvpn", "ip", "-json", "link", "show"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise BrokerError("cannot inspect links in the fixed VPN namespace")
+        if type(result.stdout) is not str or len(result.stdout) > 1_048_576:
+            raise BrokerError("invalid VPN namespace link inventory")
+        try:
+            links = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise BrokerError("invalid VPN namespace link inventory") from exc
+        if (
+            type(links) is not list
+            or any(
+                type(link) is not dict or type(link.get("ifname")) is not str
+                for link in links
+            )
+        ):
+            raise BrokerError("invalid VPN namespace link inventory")
+        matches = [link for link in links if link["ifname"] == "tun-grok"]
+        if len(matches) > 1:
+            raise BrokerError("ambiguous fixed VPN tun inventory")
+        return bool(matches)
+
+    def _host_tun_alive(self) -> bool:
+        """Report a fixed-name tun in the host namespace without touching it."""
+
+        result = self.runner(
+            ["ip", "-json", "link", "show"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise BrokerError("cannot inspect links in the host namespace")
+        if type(result.stdout) is not str or len(result.stdout) > 1_048_576:
+            raise BrokerError("invalid host namespace link inventory")
+        try:
+            links = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise BrokerError("invalid host namespace link inventory") from exc
+        if (
+            type(links) is not list
+            or any(
+                type(link) is not dict or type(link.get("ifname")) is not str
+                for link in links
+            )
+        ):
+            raise BrokerError("invalid host namespace link inventory")
+        matches = [link for link in links if link["ifname"] == "tun-grok"]
+        if len(matches) > 1:
+            raise BrokerError("ambiguous fixed host tun inventory")
+        return bool(matches)
+
+    def _root_artifact_residue(self) -> bool:
+        return any(
+            path.exists() or path.is_symlink()
+            for path in (self.layout.vpn_work, self.layout.netns_dir)
+        )
+
+    def release_root_inventory(self, release_id: str) -> dict[str, Any]:
+        """Return the installer-only, deny-safe fixed root inventory."""
+
+        if _RELEASE.fullmatch(release_id) is None:
+            raise BrokerError("invalid root inventory release ID")
+        with self.release_locked():
+            selected = self._selection(release_id, "status")
+            helpers = self._helpers(release_id, selected)
+            with self.inventory_locked():
+                ledger = self._load_ledger()
+                namespace_alive = self._namespace_exists()
+                tun_alive = self._tun_alive()
+                host_tun_alive = self._host_tun_alive()
+                vpn_alive = False
+                relay_alive = False
+                if ledger is not None:
+                    owned = self._request_from_ledger(ledger, "status")
+                    vpn_alive = self._vpn_process_matches(ledger["vpn"])
+                    relay_alive = self._relay_alive(
+                        ledger["relay"], owned, helpers["relay"]
+                    )
+                root_artifact_residue = self._root_artifact_residue()
+                active = bool(
+                    ledger
+                    and ledger["phase"] == "ACTIVE"
+                    and namespace_alive
+                    and tun_alive
+                    and not host_tun_alive
+                    and vpn_alive
+                    and relay_alive
+                )
+                return {
+                    "ok": True,
+                    "active": active,
+                    "namespace_alive": namespace_alive,
+                    "tun_alive": tun_alive,
+                    "host_tun_alive": host_tun_alive,
+                    "vpn_alive": vpn_alive,
+                    "relay_alive": relay_alive,
+                    "root_artifact_residue": root_artifact_residue,
+                    "ledger": ledger,
+                    "release_id": release_id,
+                    "root_files": dict(sorted(selected.items())),
+                }
+
+    @staticmethod
+    def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+        return (
+            left.st_dev,
+            left.st_ino,
+            left.st_uid,
+            stat.S_IMODE(left.st_mode),
+            left.st_size,
+            left.st_nlink,
+        ) == (
+            right.st_dev,
+            right.st_ino,
+            right.st_uid,
+            stat.S_IMODE(right.st_mode),
+            right.st_size,
+            right.st_nlink,
+        )
+
+    @staticmethod
+    def _same_directory_identity(
+        left: os.stat_result, right: os.stat_result
+    ) -> bool:
+        # Directory size and link count may legitimately change as entries are
+        # removed.  The opened object is pinned by device/inode; ownership,
+        # type, and mode are the stable safety attributes.
+        return (
+            left.st_dev,
+            left.st_ino,
+            left.st_uid,
+            stat.S_IFMT(left.st_mode),
+            stat.S_IMODE(left.st_mode),
+        ) == (
+            right.st_dev,
+            right.st_ino,
+            right.st_uid,
+            stat.S_IFMT(right.st_mode),
+            stat.S_IMODE(right.st_mode),
+        )
+
+    @staticmethod
+    def _fd_mount_id(descriptor: int) -> int:
+        """Return the kernel mount identity for one already-open object."""
+
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(f"/proc/self/fdinfo/{descriptor}", flags)
+        try:
+            data = os.read(fd, 16_385)
+            if len(data) > 16_384:
+                raise BrokerError("oversized descriptor mount identity")
+        finally:
+            os.close(fd)
+        matches: list[int] = []
+        for line in data.splitlines():
+            if line.startswith(b"mnt_id:"):
+                value = line.split(b":", 1)[1].strip()
+                if not value.isdigit():
+                    raise BrokerError("invalid descriptor mount identity")
+                matches.append(int(value))
+        if len(matches) != 1 or matches[0] <= 0:
+            raise BrokerError("descriptor mount identity is unavailable")
+        return matches[0]
+
+    def _assert_legacy_migration_inactive(
+        self, listen_port: int, ledger: dict[str, Any] | None
+    ) -> None:
+        if ledger is not None:
+            raise BrokerError("broker ledger blocks legacy migration")
+        if self._namespace_exists() or self._tun_alive() or self._host_tun_alive():
+            raise BrokerError("legacy VPN namespace or tun is active")
+        if self.layout.netns_dir.exists() or self.layout.netns_dir.is_symlink():
+            raise BrokerError("legacy VPN namespace configuration remains")
+        if self._listener_owner(listen_port) is not None:
+            raise BrokerError("legacy VPN relay listener is active")
+        suspects = self._legacy_openvpn_processes()
+        if suspects:
+            raise BrokerError(
+                "matching or ambiguous legacy OpenVPN process exists: "
+                + ",".join(str(pid) for pid in suspects)
+            )
+
+    def _migrate_legacy_at_port(
+        self, listen_port: int, ledger: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        self._assert_legacy_migration_inactive(listen_port, ledger)
+        parent_flags = (
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            parent_fd = os.open(self.layout.vpn_work.parent, parent_flags)
+        except OSError as exc:
+            raise BrokerError("cannot open legacy VPN work parent") from exc
+        work_fd: int | None = None
+        files: dict[str, tuple[int, os.stat_result]] = {}
+        try:
+            parent_info = os.fstat(parent_fd)
+            parent_mount_id = self._fd_mount_id(parent_fd)
+            if (
+                not stat.S_ISDIR(parent_info.st_mode)
+                or parent_info.st_uid != self.expected_root_uid
+                or stat.S_IMODE(parent_info.st_mode) & 0o022
+            ):
+                raise BrokerError("unsafe legacy VPN work parent")
+            try:
+                work_fd = os.open(
+                    self.layout.vpn_work.name, parent_flags, dir_fd=parent_fd
+                )
+            except FileNotFoundError:
+                return {"ok": True, "active": False, "migrated": False}
+            except OSError as exc:
+                raise BrokerError("unsafe legacy VPN work directory") from exc
+            work_info = os.fstat(work_fd)
+            work_mount_id = self._fd_mount_id(work_fd)
+            named_work = os.stat(
+                self.layout.vpn_work.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISDIR(work_info.st_mode)
+                or work_info.st_uid != self.expected_root_uid
+                or stat.S_IMODE(work_info.st_mode) != 0o700
+                or work_info.st_dev != parent_info.st_dev
+                or work_mount_id != parent_mount_id
+                or not self._same_directory_identity(work_info, named_work)
+            ):
+                raise BrokerError("unsafe legacy VPN work directory")
+
+            names = os.listdir(work_fd)
+            unexpected = set(names) - set(_LEGACY_INERT_FILES)
+            if unexpected:
+                active = {
+                    name for name in unexpected
+                    if name in _LEGACY_ACTIVE_NAMES or name.startswith("cand-")
+                }
+                raise BrokerError(
+                    "active or unknown legacy VPN work entries: "
+                    f"active_count={len(active)} "
+                    f"unknown_count={len(unexpected - active)} "
+                    f"entries_sha256={_name_set_fingerprint(unexpected)}"
+                )
+            file_flags = (
+                os.O_RDONLY
+                | os.O_CLOEXEC
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            for name in sorted(names):
+                expected_modes, maximum = _LEGACY_INERT_FILES[name]
+                try:
+                    descriptor = os.open(name, file_flags, dir_fd=work_fd)
+                except OSError as exc:
+                    raise BrokerError(f"unsafe legacy VPN file: {name}") from exc
+                try:
+                    info = os.fstat(descriptor)
+                    if (
+                        not stat.S_ISREG(info.st_mode)
+                        or info.st_uid != self.expected_root_uid
+                        or stat.S_IMODE(info.st_mode) not in expected_modes
+                        or not 0 <= info.st_size <= maximum
+                        or info.st_nlink != 1
+                        or info.st_dev != work_info.st_dev
+                        or self._fd_mount_id(descriptor) != work_mount_id
+                    ):
+                        raise BrokerError(f"unsafe legacy VPN file: {name}")
+                    files[name] = (descriptor, info)
+                    descriptor = -1
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+
+            if set(os.listdir(work_fd)) != set(names):
+                raise BrokerError("legacy VPN work entries changed during validation")
+            self._assert_legacy_migration_inactive(listen_port, ledger)
+            named_work_fd = os.open(
+                self.layout.vpn_work.name,
+                parent_flags,
+                dir_fd=parent_fd,
+            )
+            try:
+                if (
+                    not self._same_directory_identity(
+                        work_info, os.fstat(named_work_fd)
+                    )
+                    or self._fd_mount_id(named_work_fd) != work_mount_id
+                ):
+                    raise BrokerError("legacy VPN work mount identity changed")
+            finally:
+                os.close(named_work_fd)
+            for name in sorted(files):
+                _descriptor, original = files[name]
+                current_fd = os.open(name, file_flags, dir_fd=work_fd)
+                try:
+                    current = os.fstat(current_fd)
+                    if (
+                        not self._same_file_identity(original, current)
+                        or self._fd_mount_id(current_fd) != work_mount_id
+                    ):
+                        raise BrokerError(
+                            f"legacy VPN file identity changed before unlink: {name}"
+                        )
+                finally:
+                    os.close(current_fd)
+                os.unlink(name, dir_fd=work_fd)
+            os.fsync(work_fd)
+            if os.listdir(work_fd):
+                raise BrokerError("legacy VPN work directory changed before removal")
+            named_work_fd = os.open(
+                self.layout.vpn_work.name,
+                parent_flags,
+                dir_fd=parent_fd,
+            )
+            try:
+                current_work = os.fstat(named_work_fd)
+                if (
+                    not self._same_directory_identity(work_info, current_work)
+                    or self._fd_mount_id(named_work_fd) != work_mount_id
+                ):
+                    raise BrokerError("legacy VPN work directory identity changed")
+            finally:
+                os.close(named_work_fd)
+            os.rmdir(self.layout.vpn_work.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            return {"ok": True, "active": False, "migrated": True}
+        finally:
+            for descriptor, _info in files.values():
+                os.close(descriptor)
+            if work_fd is not None:
+                os.close(work_fd)
+            os.close(parent_fd)
+
+    def release_bootstrap_migration(self, release_id: str) -> dict[str, Any]:
+        """Remove only strictly validated inert legacy files during install.
+
+        The generated immutable broker gate supplies the exact installer
+        authorization descriptor.  This second boundary independently binds
+        the operation to one coherent CANARY install selection and its durable
+        deny record; no caller-controlled path or filename reaches migration.
+        """
+
+        if _RELEASE.fullmatch(release_id) is None:
+            raise BrokerError("invalid bootstrap migration release ID")
+        with self.release_locked():
+            selected = self._selection(
+                release_id,
+                "recover",
+                required_phase="CANARY",
+                required_operation="install",
+            )
+            self._helpers(release_id, selected)
+            deny = self._deny_record()
+            if (
+                deny is None
+                or deny.get("operation") != "install"
+                or deny.get("to_release") != release_id
+                or deny.get("from_release") == release_id
+            ):
+                raise BrokerError(
+                    "bootstrap migration requires the exact fenced install target"
+                )
+            source_release = deny.get("from_release")
+            if source_release is not None:
+                self._prior_release_evidence_ready(str(source_release))
+            with self.locked(create=True):
+                ledger = self._load_ledger()
+                before = self._root_artifact_residue()
+                result = self._migrate_legacy_at_port(1080, ledger)
+                after = self._root_artifact_residue()
+                if after or self._load_ledger() is not None:
+                    raise BrokerError("bootstrap migration did not prove root state empty")
+                return {
+                    "ok": True,
+                    "active": False,
+                    "migrated": result.get("migrated") is True,
+                    "pre_root_artifact_residue": before,
+                    "post_root_artifact_residue": after,
+                    "release_id": release_id,
+                }
+
+    @staticmethod
+    def _request_from_ledger(
+        ledger: dict[str, Any], operation: str, authority: Request | None = None
+    ) -> Request:
+        return Request(
+            operation=operation,
+            mode="compatibility" if ledger["generation"] == 0 else "supervisor",
+            caller_uid=ledger["caller_uid"],
+            release_id=ledger["release_id"],
+            owner_epoch=ledger["owner_epoch"],
+            generation=ledger["generation"],
+            listen_port=ledger["listen_port"],
+            contract_digest=ledger["contract_digest"],
+            vpn_max_tries=ledger["vpn_policy"]["max_tries"],
+            vpn_ranking_version=ledger["vpn_policy"]["ranking_version"],
+            vpn_countries=tuple(ledger["vpn_policy"]["countries"]),
+            vpn_prefer_countries=tuple(ledger["vpn_policy"]["prefer_countries"]),
+            vpn_blocked_countries=tuple(ledger["vpn_policy"]["blocked_countries"]),
+            caller_pid=authority.caller_pid if authority is not None else 0,
+            caller_start_ticks=(
+                authority.caller_start_ticks if authority is not None else 0
+            ),
+            caller_boot_id=authority.caller_boot_id if authority is not None else "",
+            deadline_monotonic_ns=(
+                authority.deadline_monotonic_ns if authority is not None else 0
+            ),
+        )
+
+    def _cleanup_owned(
+        self,
+        request: Request,
+        broker_guard: Path,
+        vpn_helper: Path,
+        relay_helper: Path,
+        *,
+        vpn: dict[str, Any] | None,
+        relay: dict[str, Any] | None,
+        operation: dict[str, Any] | None,
+    ) -> None:
+        issues: list[str] = []
+        operation_ready = True
+        if operation is not None:
+            try:
+                self._recover_operation(
+                    request,
+                    phase="DRAINING",
+                    vpn=vpn,
+                    relay=relay,
+                    operation=operation,
+                )
+                operation = None
+            except BrokerError as exc:
+                issues.append(str(exc))
+                operation_ready = False
+        if relay is not None:
+            try:
+                self._stop_relay(relay, request, relay_helper)
+            except BrokerError as exc:
+                issues.append(str(exc))
+        else:
+            try:
+                if self._listener_owner(request.listen_port) is not None:
+                    issues.append("private relay listener has no ledger identity")
+                else:
+                    self._remove_empty_relay_pidfile(request)
+            except BrokerError as exc:
+                issues.append(str(exc))
+
+        # The fixed helper owns OpenVPN and the named namespace.  Run it even
+        # when relay cleanup failed so teardown attempts every isolated root
+        # resource, then retain FAILED ownership until every absence is proved.
+        if operation_ready:
+            try:
+                self._invoke(
+                    vpn_helper,
+                    broker_guard,
+                    "down",
+                    request,
+                    phase="DRAINING",
+                    vpn=vpn,
+                    relay=relay,
+                )
+            except BrokerError as exc:
+                issues.append(str(exc))
+        if self._namespace_exists():
+            issues.append("VPN namespace remains after teardown")
+        if self._tun_alive():
+            issues.append("VPN tun remains after teardown")
+        if self._host_tun_alive():
+            issues.append("host tun-grok collision remains after teardown")
+        if vpn is not None and self._vpn_process_matches(vpn):
+            issues.append("owned OpenVPN process remains after teardown")
+        if self._root_artifact_residue():
+            issues.append("VPN root work artifacts remain after teardown")
+        try:
+            if self._listener_owner(request.listen_port) is not None:
+                issues.append("private relay listener remains after teardown")
+        except BrokerError as exc:
+            issues.append(str(exc))
+        if issues:
+            raise BrokerError("; ".join(dict.fromkeys(issues)))
+
+    def execute(self, request: Request) -> dict[str, Any]:
+        request.validate()
+        self._assert_request_live(request)
+        with self.release_locked(), self.locked(create=request.operation != "status"):
+            selected = self._selection(
+                request.release_id,
+                request.operation,
+                request=request,
+            )
+            self._fence(request)
+            helpers = self._helpers(request.release_id, selected)
+            broker_guard = helpers["broker"]
+            vpn_helper = helpers["vpngate"]
+            relay_helper = helpers["relay"]
+            ledger = self._load_ledger()
+            if request.operation == "migrate-legacy":
+                deny = self._deny_record()
+                if deny is not None:
+                    if (
+                        deny.get("operation") != "canary"
+                        or deny.get("from_release") != request.release_id
+                        or deny.get("to_release") != request.release_id
+                    ):
+                        raise BrokerError(
+                            "legacy handoff is not authorized by this release deny"
+                        )
+                # Public warm handoff never owns destructive root migration.
+                # The installer bootstrap path has already proved and removed
+                # any bounded inert legacy tree.  This compatibility verb only
+                # proves root inactivity/absence while the caller holds the
+                # stable singleton lock and clears user-side legacy state.
+                self._assert_legacy_migration_inactive(
+                    request.listen_port, ledger
+                )
+                if self._root_artifact_residue():
+                    raise BrokerError(
+                        "compatibility handoff requires absent legacy root artifacts"
+                    )
+                return {"ok": True, "active": False, "migrated": False}
+            if request.operation == "status":
+                namespace_exists = self._namespace_exists()
+                tun_alive = self._tun_alive()
+                host_tun_alive = self._host_tun_alive()
+                relay_alive = False
+                vpn_alive = False
+                if ledger is not None:
+                    owned = self._request_from_ledger(ledger, "status", request)
+                    vpn_alive = self._vpn_process_matches(ledger["vpn"])
+                    relay_alive = self._relay_alive(ledger["relay"], owned, relay_helper)
+                active = bool(
+                    ledger
+                    and ledger["phase"] == "ACTIVE"
+                    and namespace_exists
+                    and tun_alive
+                    and not host_tun_alive
+                    and vpn_alive
+                    and relay_alive
+                )
+                return {
+                    "ok": True,
+                    "active": active,
+                    "namespace_alive": namespace_exists,
+                    "tun_alive": tun_alive,
+                    "host_tun_alive": host_tun_alive,
+                    "vpn_alive": vpn_alive,
+                    "relay_alive": relay_alive,
+                    "relay_pid": ledger["relay"]["pid"] if ledger and ledger["relay"] else None,
+                    "root_artifact_residue": self._root_artifact_residue(),
+                    "ledger": ledger,
+                }
+            if request.operation == "recover":
+                if ledger is None:
+                    if (
+                        self._namespace_exists()
+                        or self._tun_alive()
+                        or self._host_tun_alive()
+                        or self._root_artifact_residue()
+                        or self._listener_owner(request.listen_port) is not None
+                    ):
+                        raise BrokerError("unowned VPN/relay residue requires manual investigation")
+                    return {"ok": True, "active": False, "recovered": False}
+                if not self._same_owner(ledger, request):
+                    raise BrokerError("VPN recovery request does not own the resources")
+                owned = self._request_from_ledger(ledger, "recover", request)
+                self._write_phase(
+                    owned,
+                    "DRAINING",
+                    vpn=ledger["vpn"],
+                    relay=ledger["relay"],
+                    operation=ledger["operation"],
+                )
+                try:
+                    self._cleanup_owned(
+                        owned,
+                        broker_guard,
+                        vpn_helper,
+                        relay_helper,
+                        vpn=ledger["vpn"],
+                        relay=ledger["relay"],
+                        operation=ledger["operation"],
+                    )
+                except BrokerError:
+                    failed = self._load_ledger()
+                    self._write_phase(
+                        owned,
+                        "FAILED",
+                        vpn=ledger["vpn"],
+                        relay=ledger["relay"],
+                        operation=(
+                            failed["operation"] if failed is not None else None
+                        ),
+                    )
+                    raise
+                self._unlink_ledger_durable()
+                return {"ok": True, "active": False, "recovered": True}
+            if request.operation in {"up", "next", "reset"}:
+                if ledger is not None and not self._same_owner(ledger, request):
+                    raise BrokerError("VPN resources belong to a different owner/generation")
+                if ledger is None and request.operation != "up":
+                    raise BrokerError("next/reset requires an active owned VPN generation")
+                if ledger is None and (
+                    self._namespace_exists()
+                    or self._tun_alive()
+                    or self._host_tun_alive()
+                    or self._root_artifact_residue()
+                    or self._listener_owner(request.listen_port) is not None
+                ):
+                    raise BrokerError("unowned VPN/relay residue blocks activation")
+                if ledger is not None:
+                    if ledger["phase"] != "ACTIVE":
+                        raise BrokerError("incomplete VPN transaction requires teardown or recovery")
+                    if not (
+                        self._namespace_exists()
+                        and self._tun_alive()
+                        and not self._host_tun_alive()
+                        and self._vpn_process_matches(ledger["vpn"])
+                        and self._relay_alive(ledger["relay"], request, relay_helper)
+                    ):
+                        raise BrokerError("owned VPN generation is degraded; teardown or recover it")
+                    if request.operation == "up":
+                        return {"ok": True, "active": True, "operation": "up", "idempotent": True}
+                old_vpn = ledger["vpn"] if ledger else None
+                old_relay = ledger["relay"] if ledger else None
+                self._write_phase(
+                    request,
+                    "PREPARED",
+                    vpn=old_vpn,
+                    relay=old_relay,
+                    operation=None,
+                )
+                vpn = old_vpn
+                relay = old_relay
+                try:
+                    invoked_vpn = self._invoke(
+                        vpn_helper,
+                        broker_guard,
+                        request.operation,
+                        request,
+                        phase="PREPARED",
+                        vpn=old_vpn,
+                        relay=old_relay,
+                    )
+                    if (
+                        not self._namespace_exists()
+                        or not self._tun_alive()
+                        or self._host_tun_alive()
+                    ):
+                        raise BrokerError("VPN helper returned success without the fixed tun")
+                    if invoked_vpn is None:
+                        raise BrokerError("VPN helper did not publish a process identity")
+                    current_vpn = invoked_vpn
+                    if request.operation == "reset" and current_vpn != old_vpn:
+                        raise BrokerError("reset unexpectedly changed the owned OpenVPN process")
+                    vpn = current_vpn
+                    if relay is None:
+                        self._assert_request_live(request)
+                        relay = self._spawn_relay(request, relay_helper)
+                        self._write_phase(
+                            request,
+                            "PREPARED",
+                            vpn=vpn,
+                            relay=relay,
+                            operation=None,
+                        )
+                    elif not self._relay_alive(relay, request, relay_helper):
+                        raise BrokerError("owned relay changed during VPN transition")
+                    self._assert_request_live(request)
+                except Exception:
+                    failed = self._load_ledger()
+                    failed_vpn = failed["vpn"] if failed is not None else vpn
+                    failed_relay = failed["relay"] if failed is not None else relay
+                    self._write_phase(
+                        request,
+                        "FAILED",
+                        vpn=failed_vpn,
+                        relay=failed_relay,
+                        operation=(
+                            failed["operation"] if failed is not None else None
+                        ),
+                    )
+                    if ledger is None:
+                        try:
+                            self._cleanup_owned(
+                                request,
+                                broker_guard,
+                                vpn_helper,
+                                relay_helper,
+                                vpn=failed_vpn,
+                                relay=failed_relay,
+                                operation=(
+                                    failed["operation"]
+                                    if failed is not None else None
+                                ),
+                            )
+                        except BrokerError:
+                            raise
+                        self._unlink_ledger_durable()
+                    raise
+                self._write_phase(
+                    request,
+                    "ACTIVE",
+                    vpn=vpn,
+                    relay=relay,
+                    operation=None,
+                )
+                return {"ok": True, "active": True, "operation": request.operation}
+            # down is owner-scoped and is successful only after absence is proved.
+            if ledger is not None and not self._same_owner(ledger, request):
+                raise BrokerError("VPN teardown request does not own the resources")
+            if ledger is None:
+                if (
+                    self._namespace_exists()
+                    or self._tun_alive()
+                    or self._host_tun_alive()
+                    or self._root_artifact_residue()
+                    or self._listener_owner(request.listen_port) is not None
+                ):
+                    raise BrokerError("unowned VPN/relay residue blocks owner-scoped teardown")
+                return {"ok": True, "active": False, "operation": "down", "idempotent": True}
+            self._write_phase(
+                request,
+                "DRAINING",
+                vpn=ledger["vpn"],
+                relay=ledger["relay"],
+                operation=ledger["operation"],
+            )
+            try:
+                self._cleanup_owned(
+                    request,
+                    broker_guard,
+                    vpn_helper,
+                    relay_helper,
+                    vpn=ledger["vpn"],
+                    relay=ledger["relay"],
+                    operation=ledger["operation"],
+                )
+            except BrokerError:
+                failed = self._load_ledger()
+                self._write_phase(
+                    request,
+                    "FAILED",
+                    vpn=ledger["vpn"],
+                    relay=ledger["relay"],
+                    operation=(
+                        failed["operation"] if failed is not None else None
+                    ),
+                )
+                raise
+            self._unlink_ledger_durable()
+            return {"ok": True, "active": False, "operation": "down"}
+
+
+class _StoreOnce(argparse.Action):
+    """Reject duplicate security-sensitive broker options before execution."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error(f"duplicate option: {option_string}")
+        setattr(namespace, self.dest, values)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        allow_abbrev=False,
+    )
+
+    def required(name: str, **options: Any) -> None:
+        parser.add_argument(
+            name,
+            required=True,
+            action=_StoreOnce,
+            **options,
+        )
+
+    required("--operation", choices=sorted(_OPERATIONS))
+    required("--mode", choices=sorted(_MODES))
+    required("--release-id")
+    required("--owner-epoch")
+    required("--generation", type=int)
+    required("--listen-port", type=int)
+    required("--contract-digest")
+    required("--vpn-max-tries", type=int)
+    required("--vpn-ranking-version")
+    required("--vpn-countries")
+    required("--vpn-prefer-countries")
+    required("--vpn-blocked-countries")
+    required("--caller-pid", type=int)
+    required("--caller-start-ticks", type=int)
+    required("--caller-boot-id")
+    required("--deadline-monotonic-ns", type=int)
+    return parser
+
+
+def _country_tuple(value: str) -> tuple[str, ...]:
+    if value == "":
+        return ()
+    return tuple(value.split(","))
+
+
+def _inventory_layout_from_environment() -> Layout:
+    if os.environ.get("GROK_TESTING") != "1":
+        return Layout()
+
+    control_raw = os.environ.get("GROK_TEST_ROOT_RELEASE_CONTROL", "")
+    root_raw = os.environ.get("GROK_TEST_ROOT_ROOT", "")
+    state_raw = os.environ.get("GROK_TEST_BROKER_STATE", "")
+    if not control_raw or not root_raw:
+        raise BrokerError("test root inventory paths are incomplete")
+    control = Path(control_raw)
+    root = Path(root_raw)
+    for label, path in (("control", control), ("root", root)):
+        if not path.is_absolute() or path.resolve(strict=False) != path:
+            raise BrokerError(f"test root inventory {label} path is not canonical")
+
+    def prefix_for(path: Path, suffix: Path) -> Path:
+        suffix_parts = suffix.parts[1:]
+        if tuple(path.parts[-len(suffix_parts) :]) != suffix_parts:
+            raise BrokerError("test root inventory paths do not use fixed suffixes")
+        prefix = Path(*path.parts[: -len(suffix_parts)])
+        if not prefix.is_absolute():
+            raise BrokerError("test root inventory prefix is not absolute")
+        return prefix
+
+    control_prefix = prefix_for(
+        control, Path("/var/lib/grok-proxy/release-control")
+    )
+    root_prefix = prefix_for(root, Path("/usr/local/libexec/grok-proxy"))
+    if control_prefix != root_prefix:
+        raise BrokerError("test root inventory prefixes disagree")
+    prefix = control_prefix
+    state = (
+        Path(state_raw)
+        if state_raw
+        else prefix / "var/lib/grok-proxy/broker"
+    )
+    if not state.is_absolute() or state.resolve(strict=False) != state:
+        raise BrokerError("test broker inventory state path is not canonical")
+    try:
+        state.relative_to(prefix)
+    except ValueError as exc:
+        raise BrokerError("test broker inventory state escapes its prefix") from exc
+    return Layout(
+        releases=root / "releases",
+        selection=control / "selected-release.json",
+        deny=control / "rollback-deny.json",
+        state=state,
+        vpn_pid=prefix / "var/lib/grok-vpngate/openvpn.pid",
+        vpn_start=prefix / "var/lib/grok-vpngate/openvpn.start",
+        vpn_boot=prefix / "var/lib/grok-vpngate/openvpn.boot",
+        vpn_work=prefix / "var/lib/grok-vpngate",
+        netns_dir=prefix / "etc/netns/grokvpn",
+    )
+
+
+def _authorize_release_inventory(layout: Layout, expected_uid: int) -> str:
+    raw_fd = os.environ.get("GROK_RELEASE_INVENTORY_FD", "")
+    release_id = os.environ.get("GROK_RELEASE_INVENTORY_RELEASE_ID", "")
+    if (
+        not raw_fd.isascii()
+        or not raw_fd.isdecimal()
+        or str(int(raw_fd)) != raw_fd
+        or int(raw_fd) < 3
+        or _RELEASE.fullmatch(release_id) is None
+    ):
+        raise BrokerError("invalid root inventory authorization environment")
+    inherited_fd = int(raw_fd)
+    expected_path = layout.selection.parent / "canary-auth.lock"
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    expected_fd = -1
+    try:
+        inherited = os.fstat(inherited_fd)
+        expected_fd = os.open(expected_path, flags)
+        expected = os.fstat(expected_fd)
+        if (
+            not stat.S_ISREG(inherited.st_mode)
+            or not stat.S_ISREG(expected.st_mode)
+            or inherited.st_uid != expected_uid
+            or expected.st_uid != expected_uid
+            or inherited.st_gid != expected.st_gid
+            or stat.S_IMODE(inherited.st_mode) != 0o600
+            or stat.S_IMODE(expected.st_mode) != 0o600
+            or inherited.st_nlink != 1
+            or expected.st_nlink != 1
+            or (inherited.st_dev, inherited.st_ino)
+            != (expected.st_dev, expected.st_ino)
+        ):
+            raise BrokerError("root inventory authorization FD is not exact")
+    except OSError as exc:
+        raise BrokerError("cannot authenticate root inventory authorization FD") from exc
+    finally:
+        if expected_fd >= 0:
+            os.close(expected_fd)
+        try:
+            os.close(inherited_fd)
+        except OSError:
+            pass
+    return release_id
+
+
+def _guard_start_ticks(pid: int) -> int:
+    raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    fields = raw[raw.rfind(")") + 2 :].split()
+    if len(fields) <= 19 or not fields[19].isdecimal():
+        raise BrokerError("invalid guard parent process identity")
+    return int(fields[19])
+
+
+def _caller_is_ancestor(caller_pid: int, descendant_pid: int) -> bool:
+    """Authenticate that the egress shell is in this broker's live ancestry."""
+
+    current = descendant_pid
+    seen: set[int] = set()
+    for _ in range(64):
+        if current == caller_pid:
+            return True
+        if current <= 1 or current in seen:
+            return False
+        seen.add(current)
+        try:
+            raw = Path(f"/proc/{current}/stat").read_text(encoding="ascii")
+            fields = raw[raw.rfind(")") + 2 :].split()
+            if len(fields) <= 1 or not fields[1].isdecimal():
+                return False
+            current = int(fields[1])
+        except OSError:
+            return False
+    return False
+
+
+def _root_guard_parent_is_public_broker(parent_pid: int) -> bool:
+    try:
+        argv = Broker._proc_args(parent_pid)
+        executable = Path(f"/proc/{parent_pid}/exe").resolve(strict=True)
+        executable_info = executable.stat()
+        script = Path(__file__).resolve(strict=True)
+        script_info = script.stat()
+        if (
+            len(argv) < 3
+            or not Path(argv[0]).name.startswith("python3")
+            or Path(argv[1]).resolve(strict=True) != script
+            or "--internal-guard" in argv[2:]
+            or executable_info.st_uid != 0
+            or stat.S_IMODE(executable_info.st_mode) & 0o022
+            or script_info.st_uid != 0
+            or stat.S_IMODE(script_info.st_mode) != 0o555
+        ):
+            return False
+        parsed = _parser().parse_args(list(argv[2:]))
+        sudo_uid = os.environ.get("SUDO_UID", "")
+        if not sudo_uid.isdecimal():
+            return False
+        Request(
+            operation=parsed.operation,
+            mode=parsed.mode,
+            caller_uid=int(sudo_uid),
+            release_id=parsed.release_id,
+            owner_epoch=parsed.owner_epoch,
+            generation=parsed.generation,
+            listen_port=parsed.listen_port,
+            contract_digest=parsed.contract_digest,
+            vpn_max_tries=parsed.vpn_max_tries,
+            vpn_ranking_version=parsed.vpn_ranking_version,
+            vpn_countries=_country_tuple(parsed.vpn_countries),
+            vpn_prefer_countries=_country_tuple(parsed.vpn_prefer_countries),
+            vpn_blocked_countries=_country_tuple(parsed.vpn_blocked_countries),
+            caller_pid=parsed.caller_pid,
+            caller_start_ticks=parsed.caller_start_ticks,
+            caller_boot_id=parsed.caller_boot_id,
+            deadline_monotonic_ns=parsed.deadline_monotonic_ns,
+        ).validate()
+        return True
+    except (BrokerError, OSError, ValueError, SystemExit):
+        return False
+
+
+def _internal_guard_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--parent-pid", required=True, type=int)
+    parser.add_argument("--parent-uid", required=True, type=int)
+    parser.add_argument("--parent-start-ticks", required=True, type=int)
+    parser.add_argument("--parent-boot-id", required=True)
+    parser.add_argument("--barrier-fd", required=True, type=int)
+    parser.add_argument("--result-fd", required=True, type=int)
+    parser.add_argument("--ack-fd", required=True, type=int)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    descriptors = (args.barrier_fd, args.result_fd, args.ack_fd)
+    if (
+        os.geteuid() != args.parent_uid
+        or not command
+        or any(fd < 3 for fd in descriptors)
+        or len(set(descriptors)) != len(descriptors)
+        or _BOOT_ID.fullmatch(args.parent_boot_id) is None
+    ):
+        return 125
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    def parent_died(_signum: int, _frame: Any) -> None:
+        # The guard is the exact session/process-group leader.  If the broker
+        # disappears, synchronously kill the complete group as an immediate
+        # defence-in-depth action; durable recovery still uses only cgroup.kill.
+        try:
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+        finally:
+            os._exit(125)
+
+    signal.signal(signal.SIGUSR1, parent_died)
+    if libc.prctl(1, signal.SIGUSR1, 0, 0, 0) != 0:
+        return 125
+    try:
+        if (
+            os.getppid() != args.parent_pid
+            or Path(f"/proc/{args.parent_pid}").stat().st_uid != args.parent_uid
+            or _guard_start_ticks(args.parent_pid) != args.parent_start_ticks
+            or Broker._boot_id() != args.parent_boot_id
+            or os.getsid(0) != os.getpid()
+            or os.getpgrp() != os.getpid()
+            or (
+                os.geteuid() == 0
+                and not _root_guard_parent_is_public_broker(args.parent_pid)
+            )
+        ):
+            return 125
+        if os.read(args.barrier_fd, 1) != b"G":
+            return 125
+    except (BrokerError, OSError):
+        return 125
+    finally:
+        try:
+            os.close(args.barrier_fd)
+        except OSError:
+            pass
+
+    child = os.fork()
+    if child == 0:
+        try:
+            os.close(args.result_fd)
+            os.close(args.ack_fd)
+            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+                os._exit(125)
+            if os.getppid() != os.getpgrp():
+                os._exit(125)
+            os.execv(command[0], command)
+        except BaseException:
+            os._exit(127)
+    # The helper child alone owns the captured output descriptors.  Closing
+    # them here lets the broker read complete bounded output while this guard
+    # remains alive awaiting the durable-effect acknowledgement.
+    for descriptor in (1, 2):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    while True:
+        try:
+            _pid, status = os.waitpid(child, 0)
+            break
+        except InterruptedError:
+            continue
+    if os.WIFEXITED(status):
+        returncode = os.WEXITSTATUS(status)
+    elif os.WIFSIGNALED(status):
+        returncode = 128 + os.WTERMSIG(status)
+    else:
+        returncode = 125
+    try:
+        os.write(args.result_fd, f"{returncode}\n".encode("ascii"))
+        os.close(args.result_fd)
+        acknowledged = os.read(args.ack_fd, 1) == b"A"
+    except OSError:
+        acknowledged = False
+    finally:
+        try:
+            os.close(args.ack_fd)
+        except OSError:
+            pass
+    return 0 if acknowledged else 125
+
+
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv[:1] == ["--internal-guard"]:
+        return _internal_guard_main(argv[1:])
+    if argv in (
+        ["--release-root-inventory"],
+        ["--release-bootstrap-migrate"],
+    ):
+        layout = _inventory_layout_from_environment()
+        expected_uid = 0
+        if os.environ.get("GROK_TESTING") == "1":
+            try:
+                control_info = layout.selection.parent.lstat()
+            except OSError as exc:
+                raise BrokerError("test root inventory control is unavailable") from exc
+            if (
+                layout.selection.parent.is_symlink()
+                or not stat.S_ISDIR(control_info.st_mode)
+            ):
+                raise BrokerError("test root inventory control is unsafe")
+            expected_uid = control_info.st_uid
+        if os.geteuid() != expected_uid:
+            raise BrokerError("vpn-broker installer operation has the wrong identity")
+        release_id = _authorize_release_inventory(layout, expected_uid)
+        broker = Broker(layout, expected_root_uid=expected_uid)
+        result = (
+            broker.release_root_inventory(release_id)
+            if argv == ["--release-root-inventory"]
+            else broker.release_bootstrap_migration(release_id)
+        )
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+    if os.geteuid() != 0:
+        raise BrokerError("vpn-broker must run as root")
+    sudo_uid = os.environ.get("SUDO_UID")
+    if sudo_uid is None or not sudo_uid.isdecimal():
+        raise BrokerError("vpn-broker requires a sudo caller identity")
+    args = _parser().parse_args(argv)
+    request = Request(
+        operation=args.operation,
+        mode=args.mode,
+        caller_uid=int(sudo_uid),
+        release_id=args.release_id,
+        owner_epoch=args.owner_epoch,
+        generation=args.generation,
+        listen_port=args.listen_port,
+        contract_digest=args.contract_digest,
+        vpn_max_tries=args.vpn_max_tries,
+        vpn_ranking_version=args.vpn_ranking_version,
+        vpn_countries=_country_tuple(args.vpn_countries),
+        vpn_prefer_countries=_country_tuple(args.vpn_prefer_countries),
+        vpn_blocked_countries=_country_tuple(args.vpn_blocked_countries),
+        caller_pid=args.caller_pid,
+        caller_start_ticks=args.caller_start_ticks,
+        caller_boot_id=args.caller_boot_id,
+        deadline_monotonic_ns=args.deadline_monotonic_ns,
+    )
+    request.validate()
+    if not _caller_is_ancestor(request.caller_pid, os.getpid()):
+        raise BrokerError("broker caller is not an ancestor of the public broker")
+    result = Broker().execute(request)
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (BrokerError, OSError, subprocess.SubprocessError) as exc:
+        print(f"vpn-broker: {exc}", file=sys.stderr)
+        raise SystemExit(2)

@@ -25,12 +25,15 @@ test harness and the "direct" rung use.
 """
 
 import argparse
+import ctypes
 import errno
 import os
 import pwd
+import resource
 import selectors
 import signal
 import socket
+import stat
 import struct
 import sys
 import threading
@@ -64,6 +67,7 @@ HANDSHAKE_TIMEOUT = 10.0
 LISTEN_BACKLOG = 128
 BUF = 65536
 MAX_CONNECTIONS = 256
+MAX_BUFFER_PER_DIRECTION = 4 * BUF
 
 # Kernel TCP keepalive reaps a peer that has gone silently unreachable (e.g. a collapsed
 # tun) without a data-idle timeout, which would wrongly cut a long but byte-silent
@@ -78,6 +82,9 @@ KEEPALIVE_CNT = 8
 
 # Cap concurrent relays so a flood of half-open handshakes cannot spawn unbounded threads.
 CONN_SEMAPHORE = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+PR_GET_DUMPABLE = 3
+PR_SET_DUMPABLE = 4
 
 
 def log(msg):
@@ -173,30 +180,90 @@ def enable_keepalive(sock):
 
 
 def pump(client, upstream):
-    """Relay both directions until either side closes. A silently-dead peer is reaped by
-    kernel TCP keepalive (enable_keepalive), never by a wall-clock idle timeout that would
-    wrongly cut a long but byte-silent reasoning stream."""
+    """Relay ordered bytes with bounded backpressure and duplex half-closes.
+
+    Output is attempted only when the destination reports write readiness. EOF
+    closes just that direction: buffered bytes drain before SHUT_WR reaches the
+    peer, while the reverse direction remains available for a delayed response.
+    There is deliberately no application-idle timeout.
+    """
     sel = selectors.DefaultSelector()
     enable_keepalive(client)
     enable_keepalive(upstream)
     client.setblocking(False)
     upstream.setblocking(False)
-    sel.register(client, selectors.EVENT_READ, upstream)
-    sel.register(upstream, selectors.EVENT_READ, client)
+    peers = {client: upstream, upstream: client}
+    pending = {client: bytearray(), upstream: bytearray()}
+    read_open = {client: True, upstream: True}
+    write_closed = {client: False, upstream: False}
+    registered = set()
+
+    def close_write(sock):
+        if write_closed[sock]:
+            return
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        write_closed[sock] = True
+
+    def refresh(sock):
+        peer = peers[sock]
+        events = 0
+        # Stop reading at the high-water mark. Sending below it re-enables reads
+        # on the next loop, bounding each direction without dropping bytes.
+        if read_open[sock] and len(pending[peer]) < MAX_BUFFER_PER_DIRECTION:
+            events |= selectors.EVENT_READ
+        if pending[sock] and not write_closed[sock]:
+            events |= selectors.EVENT_WRITE
+        if events:
+            if sock in registered:
+                sel.modify(sock, events)
+            else:
+                sel.register(sock, events)
+                registered.add(sock)
+        elif sock in registered:
+            sel.unregister(sock)
+            registered.remove(sock)
+
+    refresh(client)
+    refresh(upstream)
     try:
-        while True:
-            for key, _ in sel.select(timeout=None):
-                src, dst = key.fileobj, key.data
-                try:
-                    data = src.recv(BUF)
-                except OSError:
-                    return
-                if not data:
-                    return
-                try:
-                    dst.sendall(data)
-                except OSError:
-                    return
+        while registered:
+            for key, mask in sel.select(timeout=None):
+                sock = key.fileobj
+                peer = peers[sock]
+                if mask & selectors.EVENT_READ:
+                    try:
+                        room = MAX_BUFFER_PER_DIRECTION - len(pending[peer])
+                        data = sock.recv(min(BUF, room))
+                    except BlockingIOError:
+                        data = None
+                    except OSError:
+                        return
+                    if data == b"":
+                        read_open[sock] = False
+                        if not pending[peer]:
+                            close_write(peer)
+                    elif data:
+                        pending[peer].extend(data)
+
+                if mask & selectors.EVENT_WRITE and pending[sock]:
+                    try:
+                        sent = sock.send(pending[sock])
+                    except BlockingIOError:
+                        sent = 0
+                    except OSError:
+                        return
+                    if sent:
+                        del pending[sock][:sent]
+                    # The opposite read side reached EOF. Propagate its FIN only
+                    # after every byte it produced has been delivered.
+                    if not pending[sock] and not read_open[peer]:
+                        close_write(sock)
+
+                refresh(sock)
+                refresh(peer)
     finally:
         sel.close()
 
@@ -245,11 +312,82 @@ def drop_privileges(username):
     os.setuid(entry.pw_uid)
 
 
-def serve(listener, username, pidfile):
+def write_pidfile(pidfile, pid_fd=-1):
+    """Publish this process ID without following a caller-controlled file link.
+
+    The fixed root broker passes an already-open, ownership-checked descriptor.
+    Direct/unprivileged use keeps the path form, but opens it with O_NOFOLLOW and
+    verifies the resulting regular file before writing.
+    """
+    data = f"{os.getpid()}\n".encode("ascii")
+    owned_fd = pid_fd < 0
+    if owned_fd:
+        if not pidfile:
+            return
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_TRUNC
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        pid_fd = os.open(pidfile, flags, 0o600)
+    try:
+        info = os.fstat(pid_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise RuntimeError("unsafe pidfile descriptor")
+        os.fchmod(pid_fd, 0o600)
+        os.ftruncate(pid_fd, 0)
+        os.lseek(pid_fd, 0, os.SEEK_SET)
+        view = memoryview(data)
+        while view:
+            count = os.write(pid_fd, view)
+            if count <= 0:
+                raise RuntimeError("short pidfile write")
+            view = view[count:]
+        os.fsync(pid_fd)
+    finally:
+        os.close(pid_fd)
+
+
+def enable_same_uid_fd_inspection(username):
+    """Expose only the demoted relay's descriptors to its owning UID.
+
+    Linux clears dumpability when the root broker drops to the requesting
+    account.  The supervisor must still bind the host listener inode to this
+    exact process through ``/proc/<pid>/fd``.  Restore that same-UID read
+    boundary only after the broker-owned pid descriptor has been closed.
+    """
+    entry = pwd.getpwnam(username)
+    if (
+        entry.pw_uid == 0
+        or os.getresuid() != (entry.pw_uid, entry.pw_uid, entry.pw_uid)
+        or os.getresgid() != (entry.pw_gid, entry.pw_gid, entry.pw_gid)
+    ):
+        raise RuntimeError("relay credentials were not fully demoted")
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    libc = ctypes.CDLL(None, use_errno=True)
+    prctl = libc.prctl
+    prctl.argtypes = (
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    )
+    prctl.restype = ctypes.c_int
+    if prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    if prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 1:
+        raise RuntimeError("relay dumpability did not read back as enabled")
+
+
+def serve(listener, username, pidfile, pid_fd=-1):
     drop_privileges(username)
-    if pidfile:
-        with open(pidfile, "w") as handle_:
-            handle_.write(str(os.getpid()))
+    write_pidfile(pidfile, pid_fd)
+    if username:
+        enable_same_uid_fd_inspection(username)
     # listen() only AFTER the pidfile exists, so the port never accepts -- and egress.sh's
     # port_listening readiness probe never passes -- before socks_alive can see the pidfile.
     listener.listen(LISTEN_BACKLOG)
@@ -262,9 +400,14 @@ def serve(listener, username, pidfile):
             if exc.errno == errno.EINTR:
                 continue
             raise
-        # Bound concurrency: block accepting past MAX_CONNECTIONS in-flight relays. The
-        # permit is released in handle()'s finally (one acquire here per one release there).
-        CONN_SEMAPHORE.acquire()
+        # Reject overload immediately rather than blocking the accept loop after
+        # it has already consumed a socket and allowing the kernel backlog to grow.
+        if not CONN_SEMAPHORE.acquire(blocking=False):
+            try:
+                client.close()
+            except OSError:
+                pass
+            continue
         try:
             threading.Thread(target=handle, args=(client,), daemon=True).start()
         except Exception:
@@ -291,18 +434,19 @@ def main():
     parser.add_argument("--user", default="", help="drop privileges to this user once inside the namespace")
     parser.add_argument("--pidfile", default="")
     parser.add_argument("--serve-fd", type=int, default=-1, help=argparse.SUPPRESS)  # stage 2 only
+    parser.add_argument("--pid-fd", type=int, default=-1, help=argparse.SUPPRESS)  # broker-owned fd
     args = parser.parse_args()
 
     if args.serve_fd >= 0:
         listener = socket.socket(fileno=args.serve_fd)
-        serve(listener, args.user, args.pidfile)
+        serve(listener, args.user, args.pidfile, args.pid_fd)
         return
 
     host, _, port = args.listen.rpartition(":")
     listener = bind_listener(host, int(port))
 
     if not args.netns:
-        serve(listener, args.user, args.pidfile)
+        serve(listener, args.user, args.pidfile, args.pid_fd)
         return
 
     # Stage 1 -> stage 2. The fd must survive execve, so clear CLOEXEC. `ip netns exec`
@@ -310,6 +454,8 @@ def main():
     # inherited by a process whose *new* sockets will belong to the VPN namespace.
     fd = listener.fileno()
     os.set_inheritable(fd, True)
+    if args.pid_fd >= 0:
+        os.set_inheritable(args.pid_fd, True)
     argv = [
         "ip", "netns", "exec", args.netns,
         sys.executable, os.path.abspath(__file__),
@@ -317,6 +463,8 @@ def main():
         "--user", args.user,
         "--pidfile", args.pidfile,
     ]
+    if args.pid_fd >= 0:
+        argv.extend(["--pid-fd", str(args.pid_fd)])
     os.execvp("ip", argv)
 
 

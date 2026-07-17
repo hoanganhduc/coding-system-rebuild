@@ -8,7 +8,10 @@
 #   entries:  id, root, match (list of globs on paths relative to root; first segment
 #             matching governs fail-closed), class, dest|dest_dir (repo-relative),
 #             template (verbs), include/exclude (globs within matched trees), keys
-#             (for key-redact), note.
+#             (for key-redact), note. An authoritative public-copy entry requires
+#             literal existing match paths, stages before publish, and exactly
+#             replaces dest_dir; preserve_dest lists repository-local paths kept
+#             across that replacement.
 #   classes:  public-copy | public-template | private-archive | exclude-cache |
 #             exclude-private-data | exclude-generated | delegate
 #   template verbs: home-substitute, key-redact, emit-keys, secret-env-split
@@ -416,14 +419,22 @@ entries:
   # ---------------------------------------------------------------- grok-proxy toolkit
   - id: grokproxy-scripts
     root: grok-proxy
-    match: ["README.md", "grok-remote", "egress.sh", "socks-netns.py", "sanitize.awk", "vpngate-connect.sh", "dist", "tests"]
+    match: ["README.md", "SPEC.md", "PLAN.md", "TASKS.md", "grok-remote", "egress.sh",
+            "socks-netns.py", "sanitize.awk", "vpngate-connect.sh", "vpn-broker",
+            "install-release.py", "grok_ms", "dist", "tests"]
+    exclude: ["**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**"]
     class: public-copy
     dest_dir: system/grok-proxy
+    authoritative: true
+    preserve_dest: [".planning", ".learnings"]
+    source_transaction_lock: ".grok-source-restore.lock"
+    source_transaction_marker: ".grok-source-restore.json"
     note: >
-      Sanitized documentation + SOCKS-over-Tailscale egress wrapper + VPN Gate
-      network-namespace fallback + the Windows/Arch SSH-server setup scripts.
-      Reusable and topology-generic; the dist scripts embed the proxy PUBLIC key,
-      which is safe to publish.
+      Exact public backup mirror of the canonical ~/grok-proxy authoring source.
+      Repository-local planning/learnings are preserved; stale public paths are
+      pruned. Sanitized documentation + SOCKS-over-Tailscale egress wrapper +
+      VPN Gate network-namespace fallback + the Windows/Arch SSH-server setup
+      scripts are reusable and topology-generic; dist embeds only a public key.
 
   - id: grokproxy-private
     root: grok-proxy
@@ -436,7 +447,7 @@ entries:
 
   - id: grokproxy-exclude
     root: grok-proxy
-    match: [".tunnel.*", ".egress.state", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-remote.lock", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", "__pycache__"]
+    match: [".tunnel.*", ".egress.state", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-remote.lock", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", ".grok-source-restore*", "__pycache__"]
     class: exclude-generated
     note: SSH control sockets + tunnel/leader runtime state + per-run egress/model cache (regenerated)
 

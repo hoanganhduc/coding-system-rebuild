@@ -18,8 +18,6 @@ done
 ARGS=(--repo "$REPO" --manifest "$MANIFEST")
 if [[ "$APPLY" -eq 1 ]]; then
   ARGS+=(--apply)
-else
-  rm -rf "$REPO/.staging"
 fi
 python3 "$REPO/bin/lib/manifest_sync.py" "${ARGS[@]}"
 rc=$?

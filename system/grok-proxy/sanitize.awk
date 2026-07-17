@@ -18,11 +18,13 @@
 # is preserved byte-for-byte, and a non-allowlisted block is consumed and dropped whole. An
 # unterminated block is a hard error (exit 3) so the caller discards the config.
 #
-# Exit: 0 = sanitized OK; 3 = unterminated inline block (fail closed).
+# Exit: 0 = sanitized OK; 3 = unterminated inline block or ambiguous NUL input
+# (fail closed).
 
 BEGIN {
   # openvpn's isspace() class minus \n (our record separator): space, tab, VT, FF, CR.
   SP = sprintf(" \t%c%c%c", 11, 12, 13)
+  NUL = sprintf("%c", 0)
 
   split("client dev dev-type proto remote resolv-retry nobind persist-key persist-tun " \
         "remote-cert-tls cipher data-ciphers data-ciphers-fallback auth key-direction " \
@@ -35,6 +37,15 @@ BEGIN {
 
   in_block = 0        # 0 = normal, 1 = inside a kept block, 2 = inside a dropped block
   close_tag = ""
+  rejected = 0
+}
+
+# OpenVPN is a C parser, so an embedded NUL can terminate its view of a line
+# before awk's view.  Reject the complete config instead of emitting an
+# apparently normalized record with ambiguous trailing bytes.
+index($0, NUL) > 0 {
+  rejected = 1
+  next
 }
 
 # --- inside a block: copy (kept) or drop the body verbatim until the matching close tag ---
@@ -75,7 +86,7 @@ in_block {
 }
 
 END {
-  if (in_block) exit 3               # unterminated inline block -> fail closed
+  if (in_block || rejected) exit 3   # malformed input -> fail closed
 }
 
 # Tokenize a line the way openvpn's parse_line does: skip the isspace class, treat a

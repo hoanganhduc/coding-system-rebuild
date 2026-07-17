@@ -67,8 +67,9 @@ fi
 
 # 6 ─ render public configs
 if (( START <= 6 )); then
-  phase 6 "render-install (configs, shell blocks, scripts, symlinks)"
+  phase 6 "render-install (configs, shell blocks, scripts, symlinks, atomic Grok release)"
   bash "$REPO/bin/render-install.sh"
+  gate "grok-proxy user/root selectors name one validated immutable release"
   # ~/.local/bin wrappers from system/bin
   mkdir -p "$HOME/.local/bin"
   for f in "$REPO"/system/bin/*; do

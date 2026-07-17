@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # grok-remote — run the grok CLI through an egress that actually offers the model you want.
 #
 # grok.com gates models on the region of the requesting IP, and this VM sits in a blocked one.
@@ -16,6 +16,7 @@
 #   grok-remote --host LABEL     force one home PC from hosts.conf
 #   grok-remote --iphone         force the configured iPhone exit node
 #   grok-remote --vpn            skip the home PCs; start on VPN Gate
+#   grok-remote --direct         use the committed direct backend only (feature-on)
 #   grok-remote --no-direct      never fall back to the direct connection
 #   grok-remote --pick-model     re-open the model menu even if nothing has changed
 #
@@ -26,25 +27,232 @@
 # swappable underneath a running grok.
 set -uo pipefail
 
-SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-DIR="$(cd "$(dirname "$SELF")" && pwd)"
-# shellcheck source=egress.sh
-. "$DIR/egress.sh"
+SELF="$(/usr/bin/readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+DIR="$(cd "$(/usr/bin/dirname "$SELF")" && pwd -P)"
 
-LEADER="$DIR/.grok-leader.sock"   # dedicated leader, so the proxy env always applies
-CHOICE="$DIR/.model.choice"       # the model you last settled on (empty = let grok decide)
-SEEN="$DIR/.model.seen"           # the unlocked set you were last offered
+# Pure compatibility classifier shared by the live lane and the installer-owned
+# hermetic matrix below.  It performs no file, process, route, or network work.
+compatibility_classify(){
+  local -a args=("$@")
+  case "${args[0]:-}" in
+    -h|--help|help) printf usage; return 0 ;;
+    inspect|--version|version|completions|worktree|leader) printf bare; return 0 ;;
+    status) [[ ${#args[@]} == 1 ]] || return 2; printf status; return 0 ;;
+    ip) [[ ${#args[@]} == 1 ]] || return 2; printf ip; return 0 ;;
+    stop) [[ ${#args[@]} == 1 ]] || return 2; printf maintenance; return 0 ;;
+    iphone-setup) [[ ${#args[@]} -le 2 ]] || return 2; printf maintenance; return 0 ;;
+  esac
+  local index=0 forced=0
+  while (( index < ${#args[@]} )); do
+    case "${args[$index]}" in
+      --host)
+        (( index + 1 < ${#args[@]} )) && [[ -n "${args[$((index + 1))]}" ]] || return 2
+        forced=$((forced + 1)); index=$((index + 2)) ;;
+      --iphone|--vpn)
+        forced=$((forced + 1)); index=$((index + 1)) ;;
+      --no-direct|--pick-model|--direct)
+        index=$((index + 1)) ;;
+      --) index=$((index + 1)); break ;;
+      *) break ;;
+    esac
+  done
+  (( forced <= 1 )) || return 2
+  case "${args[$index]:-}" in
+    completions|worktree|leader) printf bare; return 0 ;;
+  esac
+  printf gated
+}
+
+RELEASE_ADMITTED=0
+self_admit_release(){
+  (( RELEASE_ADMITTED == 0 )) || return 0
+  local control=/var/lib/grok-proxy/release-control
+  if [[ "${GROK_TESTING:-0}" == 1 && -n "${GROK_TEST_ROOT_RELEASE_CONTROL:-}" ]]; then
+    control="$GROK_TEST_ROOT_RELEASE_CONTROL"
+  fi
+  exec {GROK_SELF_RELEASE_LOCK_FD}<"$control/install.lock" \
+    || return 78
+  local -a admission=(
+    /usr/bin/python3 -I "$DIR/grok_ms/release_admission.py"
+    "$DIR" "$SELF" "$GROK_SELF_RELEASE_LOCK_FD"
+  )
+  if (( RELEASE_CANARY == 1 )); then
+    admission+=("$GROK_RELEASE_CANARY_FD")
+  elif (( $# == 1 )) && [[ "$1" == recover ]]; then
+    admission+=(--public-recovery)
+  fi
+  if ! "${admission[@]}"; then
+    exec {GROK_SELF_RELEASE_LOCK_FD}<&-
+    return 78
+  fi
+  RELEASE_ADMITTED=1
+  if [[ "${GROK_RELEASE_LOCK_FD:-}" =~ ^[0-9]+$ ]]; then
+    exec {GROK_RELEASE_LOCK_FD}<&-
+  fi
+  unset GROK_RELEASE_LOCK_FD
+}
+
+# The release installer alone may run this bounded, non-networked feature-off
+# smoke.  Its generated gate first binds the inherited descriptor to the fixed
+# root-owned authorization inode; the wrapper independently requires a root
+# 0600 descriptor before providing a safe release version that never invokes
+# Grok's stateful `inspect`/`--version` path.
+RELEASE_CANARY=0
+if [[ "${GROK_RELEASE_CANARY_MODE:-0}" == 1 ]]; then
+  [[ "${GROK_RELEASE_CANARY_FD:-}" =~ ^[0-9]+$ ]] \
+    || { printf '[egress] invalid release canary descriptor\n' >&2; exit 78; }
+  /usr/bin/python3 -I - "${GROK_RELEASE_CANARY_FD}" "${GROK_TESTING:-0}" <<'PY' \
+    || { printf '[egress] unauthorized release canary\n' >&2; exit 78; }
+import os
+import stat
+import sys
+
+descriptor = int(sys.argv[1])
+expected_uid = os.getuid() if sys.argv[2] == "1" else 0
+value = os.fstat(descriptor)
+if (
+    not stat.S_ISREG(value.st_mode)
+    or value.st_uid != expected_uid
+    or stat.S_IMODE(value.st_mode) != 0o600
+):
+    raise SystemExit(1)
+PY
+  case "$#:${1:-}" in
+    1:--help|1:--version|1:status|1:--release-compatibility-smoke) ;;
+    *) [[ "${GROK_RELEASE_RUNG_CANARY:-0}" == 1 ]] \
+         || { printf '[egress] unsupported release canary command\n' >&2; exit 78; } ;;
+  esac
+  RELEASE_CANARY=1
+  RELEASE_CANARY_ID="${GROK_RELEASE_CANARY_RELEASE_ID:-}"
+  [[ "$RELEASE_CANARY_ID" =~ ^[0-9a-f]{64}$ ]] \
+    || { printf '[egress] invalid release canary identity\n' >&2; exit 78; }
+  self_admit_release "$@" \
+    || { printf '[egress] unauthorized release canary\n' >&2; exit 78; }
+  if [[ "${GROK_RELEASE_RUNG_CANARY:-0}" == 1 ]]; then
+    # Keep the exact inherited capability and binding for a live, unqualified
+    # rung canary.  The Python client revalidates all of it before constructing
+    # the one-rung contract; ordinary callers cannot manufacture this FD.
+    [[ "${GROK_RELEASE_CANARY_NONCE:-}" =~ ^[0-9a-f]{64}$ ]] \
+      || { printf '[egress] invalid rung canary nonce\n' >&2; exit 78; }
+    canary_classification="$(compatibility_classify "$@")" \
+      || { printf '[egress] invalid rung canary command\n' >&2; exit 78; }
+    case "$canary_classification" in
+      usage|bare|maintenance)
+        printf '[egress] forbidden rung canary command class\n' >&2
+        exit 78
+        ;;
+    esac
+  else
+    exec {GROK_RELEASE_CANARY_FD}<&-
+    unset GROK_RELEASE_CANARY_MODE GROK_RELEASE_CANARY_FD \
+      GROK_RELEASE_CANARY_RELEASE_ID
+  fi
+  if [[ "${1:-}" == --release-compatibility-smoke ]]; then
+    tmp="$(/usr/bin/mktemp -d)" || exit 1
+    trap '/bin/rm -rf -- "$tmp"' EXIT
+    (
+      set -euo pipefail
+      export HOME="$tmp/home" GROK_TESTING=1
+      export GROK_TEST_CONTROL_DIR="$tmp/control"
+      /bin/mkdir -p "$HOME/grok-proxy" "$GROK_TEST_CONTROL_DIR"
+      /bin/chmod 700 "$GROK_TEST_CONTROL_DIR"
+      # This is the selected release's real compatibility provider.  All
+      # transport entry points are replaced only after it has been sourced.
+      . "$DIR/egress.sh"
+      local_up(){ : > "$tmp/local"; set_active "local:$1" "fixture@$1" 22; }
+      local_alive(){ [[ -f "$tmp/local" ]]; }
+      local_down(){ /bin/rm -f "$tmp/local"; }
+      iphone_up(){ : > "$tmp/iphone"; set_active iphone; }
+      iphone_alive(){ [[ -f "$tmp/iphone" ]]; }
+      iphone_down(){ /bin/rm -f "$tmp/iphone"; }
+      vpn_up(){ : > "$tmp/vpn"; set_active vpn; }
+      vpn_alive(){ [[ -f "$tmp/vpn" ]]; }
+      vpn_down(){ /bin/rm -f "$tmp/vpn"; }
+      [[ "$(compatibility_classify --help)" == usage ]]
+      [[ "$(compatibility_classify status)" == status ]]
+      [[ "$(compatibility_classify stop)" == maintenance ]]
+      [[ "$(compatibility_classify iphone-setup fixture)" == maintenance ]]
+      [[ "$(compatibility_classify --host fixture -m model)" == gated ]]
+      [[ "$(compatibility_classify --iphone -m model)" == gated ]]
+      [[ "$(compatibility_classify --vpn -m model)" == gated ]]
+      ! compatibility_classify --host fixture --vpn >/dev/null
+      for rung in direct local:fixture iphone vpn; do
+        rung_up "$rung"
+        [[ "$(active_rung)" == "$rung" ]]
+        rung_alive "$rung"
+        teardown_all
+        [[ ! -e "$STATE" && ! -e "$tmp/local" && ! -e "$tmp/iphone" && ! -e "$tmp/vpn" ]]
+      done
+      printf '%s\n' 'compatibility-matrix-v1:pass'
+    )
+    rc=$?
+    /bin/rm -rf -- "$tmp"
+    trap - EXIT
+    exit "$rc"
+  fi
+  if [[ "${GROK_RELEASE_RUNG_CANARY:-0}" == 1 ]]; then
+    : # continue into the real opt-in client below
+  else
+    if [[ "${1:-}" == --version ]]; then
+      printf 'grok-remote release %s\n' "$RELEASE_CANARY_ID"
+      exit 0
+    fi
+    if [[ "${1:-}" == --help ]]; then
+      /usr/bin/sed -n '2,26p' "$SELF" | /usr/bin/sed 's/^# \{0,1\}//'
+      exit 0
+    fi
+    if [[ "${1:-}" == status ]]; then
+      printf '[egress] no active egress (release canary)\n' >&2
+      exit 0
+    fi
+  fi
+elif [[ -n "${GROK_RELEASE_CANARY_MODE:-}${GROK_RELEASE_CANARY_FD:-}${GROK_RELEASE_CANARY_RELEASE_ID:-}${GROK_RELEASE_RUNG_CANARY:-}${GROK_RELEASE_CANARY_RUNG:-}${GROK_RELEASE_CANARY_ROUTE_PROFILE:-}${GROK_RELEASE_CANARY_CONTRACT:-}${GROK_RELEASE_CANARY_GROK_RELEASE:-}${GROK_RELEASE_CANARY_KIND:-}${GROK_RELEASE_CANARY_MODEL:-}${GROK_RELEASE_CANARY_NONCE:-}" ]]; then
+  printf '[egress] incomplete release canary authorization\n' >&2
+  exit 78
+fi
+
+require_installed_release(){
+  self_admit_release "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]] && ! require_installed_release "$@"; then
+  printf '[egress] editable source tree is not executable; use ~/.local/bin/grok-remote\n' >&2
+  exit 78
+fi
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+  unset PYTHONPATH PYTHONHOME BASH_ENV ENV
+  while IFS= read -r variable; do unset "$variable"; done < <(compgen -A variable LD_)
+fi
+
+# The reviewed multi-session lane is opt-in by one exact value.  Dispatch
+# before sourcing the compatibility provider so pure classification/admission
+# cannot inherit legacy state or acquire its singleton lock.  Every other value
+# remains on the literal compatibility path below.
+if [[ "${BASH_SOURCE[0]}" == "${0}" \
+   && ( "${GROK_MULTI_SESSION:-}" == 1 \
+        || ( $# == 1 && "${1:-}" == recover ) ) ]]; then
+  export GROK_FRONTEND_RELEASE_LOCK_FD="$GROK_SELF_RELEASE_LOCK_FD"
+  exec /usr/bin/python3 -E -s -P -c \
+    'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("grok_ms.client",run_name="__main__",alter_sys=True)' \
+    "$DIR" --release-dir "$DIR" -- "$@"
+fi
+# shellcheck source=egress.sh
+if ! . "$DIR/egress.sh"; then
+  exit 1
+fi
+
+PRIVATE_DIR="$HOME/grok-proxy"
+[[ -e "$DIR/hosts.conf" || -e "$DIR/.model.choice" ]] && PRIVATE_DIR="$DIR"
+LEADER="$PRIVATE_DIR/.grok-leader.sock"   # compatibility lane's dedicated leader
+CHOICE="$PRIVATE_DIR/.model.choice"       # remembered model (private mutable state)
+SEEN="$PRIVATE_DIR/.model.seen"           # last offered set (private mutable state)
 FORCE_PICK=0
 
 usage(){ sed -n '2,26p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 acquire_session_lock(){
-  command -v flock >/dev/null 2>&1 || { eg_err "flock is required to protect the shared egress"; return 1; }
-  exec 9>"$SESSION_LOCK"
-  if ! flock -n 9; then
-    eg_err "another grok-remote session owns the shared egress ($SESSION_LOCK)"
-    return 1
-  fi
+  acquire_stable_mutation_lock
 }
 
 no_egress_help(){ cat >&2 <<EOF
@@ -60,16 +268,21 @@ EOF
 proxy_for(){ [[ "$1" == direct ]] && printf '' || printf '%s' "$PROXY"; }
 
 cmd_status(){
-  local r; r="$(active_rung)"
+  local r unlocked_ok=1 choice_ok=1; r="$(active_rung)"
+  sanitize_model_state_file "$UNLOCKED" || unlocked_ok=0
+  sanitize_model_state_file "$CHOICE" || choice_ok=0
   [[ -z "$r" ]] && { eg_log "no egress selected"; return 0; }
   if rung_alive "$r"; then
     eg_ok "active rung: $r"
     eg_log "grok.com sees: $(egress_ip "$(proxy_for "$r")")"
-    [[ -s "$UNLOCKED" && "$r" != direct ]] && eg_log "unlocked: $(paste -sd, "$UNLOCKED")"
-    [[ -s "$CHOICE" ]] && eg_log "remembered model: $(cat "$CHOICE")   (--pick-model to change)"
+    (( unlocked_ok )) && [[ -s "$UNLOCKED" && "$r" != direct ]] \
+      && eg_log "unlocked: $(paste -sd, "$UNLOCKED")"
+    (( choice_ok )) && [[ -s "$CHOICE" ]] \
+      && eg_log "remembered model: $(cat "$CHOICE")   (--pick-model to change)"
   else
     eg_warn "active rung: $r (DOWN — the next grok-remote run will rebuild it)"
   fi
+  return 0
 }
 
 # ---------------------------------------------------------------- model selection
@@ -112,6 +325,7 @@ interactive(){
 pick_model(){
   local -a opts=("$@")
   local cur i def=1 ans
+  discard_invalid_model_state_file "$CHOICE"
   cur="$(cat "$CHOICE" 2>/dev/null)"
   for i in "${!opts[@]}"; do [[ "${opts[$i]}" == "$cur" ]] && def=$((i+1)); done
   {
@@ -132,7 +346,11 @@ pick_model(){
   : > "$CHOICE"
 }
 
-grok_default_model(){ sed -n 's/^default *= *"\(.*\)"/\1/p' "$HOME/.grok/config.toml" 2>/dev/null | head -1; }
+grok_default_model(){
+  local value
+  value="$(sed -n 's/^default *= *"\(.*\)"/\1/p' "$HOME/.grok/config.toml" 2>/dev/null | head -1)"
+  model_id_valid "$value" && printf '%s' "$value"
+}
 
 # grok keeps using its own default even when a rung has unlocked a better model, so hand it the one
 # you want explicitly. The choice is remembered: you are asked again only when this egress starts
@@ -143,6 +361,9 @@ model_args(){
   local -a unlocked=() new=()
   local choice m
 
+  discard_invalid_model_state_file "$UNLOCKED"
+  discard_invalid_model_state_file "$CHOICE"
+  discard_invalid_model_state_file "$SEEN"
   [[ "$rung" == direct ]] && return 0
   [[ -s "$UNLOCKED" ]] || return 0
   mapfile -t unlocked < "$UNLOCKED"
@@ -151,6 +372,10 @@ model_args(){
   if caller_picked_model "$@"; then
     m="$(caller_model "$@")"
     if [[ -n "$m" ]]; then
+      if ! model_id_valid "$m"; then
+        eg_warn "invalid model id"
+        return 1
+      fi
       printf '%s\n' "$m" > "$CHOICE"
       # Record what this egress currently offers as already seen, so a later interactive run does not
       # re-open the menu just because you named a model on the command line this time.
@@ -231,12 +456,14 @@ launch(){
   # not offer it would break the running session with "unknown model id".
   if (( ${#marg[@]} == 2 )); then
     REQUIRE_MODEL="${marg[1]}"
+    model_id_valid "$REQUIRE_MODEL" || { eg_err "invalid remembered model id"; return 2; }
     eg_log "failover will only accept a rung that still offers $REQUIRE_MODEL"
   elif caller_picked_model "$@"; then
     # model_args returns early on the caller's own -m, so marg never carries it; pin from the caller's
     # argv directly, or the watchdog could fail over to a rung that no longer offers that model.
     local cm; cm="$(caller_model "$@")"
     if [[ -n "$cm" ]]; then
+      model_id_valid "$cm" || { eg_err "invalid caller model id"; return 2; }
       REQUIRE_MODEL="$cm"
       eg_log "failover will only accept a rung that still offers $REQUIRE_MODEL"
     fi
@@ -285,6 +512,9 @@ launch(){
 }
 
 main(){
+  local classification
+  classification="$(compatibility_classify "$@")" \
+    || { eg_err "invalid or conflicting compatibility command"; exit 2; }
   case "${1:-}" in
     -h|--help|help) usage; exit 0 ;;
     inspect|--version|version)
@@ -295,7 +525,12 @@ main(){
             rung_alive "$(active_rung)" || select_egress >/dev/null || { no_egress_help; exit 1; }
             egress_ip "$(proxy_for "$(active_rung)")"; echo; exit 0 ;;
     stop)   acquire_session_lock || exit 1
-            teardown_all; eg_ok "egress torn down"; exit 0 ;;
+            if teardown_all; then
+              eg_ok "egress torn down"
+              exit 0
+            fi
+            eg_err "egress teardown failed; ownership state was preserved for recovery"
+            exit 1 ;;
     iphone-setup)
             acquire_session_lock || exit 1
             shift; [[ $# -le 1 ]] || { eg_err "usage: grok-remote iphone-setup [NODE]"; exit 2; }
@@ -306,6 +541,7 @@ main(){
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --host)       [[ $# -ge 2 && -n "$2" ]] || { eg_err "--host requires a label"; exit 2; }
+                    home_label_valid "$2" || { eg_err "invalid host label"; exit 2; }
                     force_host="$2"; shift 2 ;;
       --iphone)     force_iphone=1; shift ;;
       --vpn)        force_vpn=1; shift ;;
@@ -323,6 +559,15 @@ main(){
   case "${1:-}" in
     completions|help|worktree|leader) exec "$GROK_BIN" "$@" ;;
   esac
+
+  if caller_picked_model "$@"; then
+    local requested_model
+    requested_model="$(caller_model "$@")"
+    if [[ -n "$requested_model" ]] && ! model_id_valid "$requested_model"; then
+      eg_err "invalid model id"
+      exit 2
+    fi
+  fi
 
   local forced=0
   [[ -n "$force_host" ]] && forced=$((forced + 1))
@@ -354,7 +599,10 @@ main(){
   # makes every preferred home-PC bind fail and incorrectly pushes selection down.
   if (( ! reusable )) && [[ -n "$cur" ]]; then
     eg_warn "discarding stale or non-requested egress: $cur"
-    teardown_all
+    if ! teardown_all; then
+      eg_err "cannot replace stale egress because exact teardown failed"
+      exit 1
+    fi
     cur=""
   fi
   if (( reusable )); then
@@ -365,18 +613,27 @@ main(){
     eg_log "reusing the egress already up: $cur"
   elif [[ -n "$force_host" ]]; then
     rm -f "$BASELINE"
-    [[ -n "$cur" && "$cur" != "$want" ]] && teardown_all   # free the shared SOCKS port from the old rung
+    if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then
+      eg_err "cannot switch providers because exact teardown failed"
+      exit 1
+    fi
     rung_up "local:$force_host" && rung_probe "local:$force_host" \
       || { eg_err "forced host '$force_host' unlocks nothing"; rung_down "local:$force_host"; clear_active; exit 1; }
   elif (( force_iphone )); then
     rm -f "$BASELINE"
-    [[ -n "$cur" && "$cur" != "$want" ]] && teardown_all
+    if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then
+      eg_err "cannot switch providers because exact teardown failed"
+      exit 1
+    fi
     learn_baseline
     rung_up iphone && rung_probe iphone \
       || { eg_err "configured iPhone is unavailable or unlocks nothing"; rung_down iphone; clear_active; exit 1; }
   elif (( force_vpn )); then
     rm -f "$BASELINE"
-    [[ -n "$cur" && "$cur" != "$want" ]] && teardown_all
+    if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then
+      eg_err "cannot switch providers because exact teardown failed"
+      exit 1
+    fi
     learn_baseline; try_vpn_sequence || { vpn_down; clear_active; no_egress_help; exit 1; }
   else
     rm -f "$BASELINE"

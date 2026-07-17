@@ -25,17 +25,164 @@
 set -uo pipefail
 
 EG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONF="$EG_DIR/hosts.conf"
-KEY="$EG_DIR/id_grokproxy"
-CTL="$EG_DIR/.tunnel.ctl"
-STATE="$EG_DIR/.egress.state"
-SESSION_LOCK="${GROK_SESSION_LOCK:-$EG_DIR/.grok-remote.lock}"
-VPNGATE="${GROK_VPNGATE:-$EG_DIR/vpngate-connect.sh}"
-SOCKS_NETNS="$EG_DIR/socks-netns.py"
-SOCKS_PID="$EG_DIR/.socks-netns.pid"
-# Empty namespace = serve from the current one. Only the test harness does that; in normal
-# use the VPN rung must egress from inside 'grokvpn', which is what keeps it fail-closed.
-NS="${GROK_VPN_NETNS-grokvpn}"
+
+require_frozen_egress_release(){
+  local control=/var/lib/grok-proxy/release-control
+  local -a admission
+  local provider_command=0 provider_canary=0 canary_binding=0
+  local canary_extra=0 rc=0 name
+  if [[ "${GROK_TESTING:-0}" == 1 && -n "${GROK_TEST_ROOT_RELEASE_CONTROL:-}" ]]; then
+    control="$GROK_TEST_ROOT_RELEASE_CONTROL"
+  fi
+  exec {EGRESS_SELF_RELEASE_LOCK_FD}<"$control/install.lock" \
+    || return 78
+  admission=(/usr/bin/python3 -I "$EG_DIR/grok_ms/release_admission.py" \
+    "$EG_DIR" "$EG_DIR/egress.sh" "$EGRESS_SELF_RELEASE_LOCK_FD"
+  )
+  if [[ "${GROK_PROVIDER_MODE:-0}" == 1 && $# == 2 ]]; then
+    case "$1" in
+      provider-up|provider-next|provider-recover|provider-stop|provider-prove-empty)
+        provider_command=1 ;;
+    esac
+  fi
+  [[ -v GROK_RELEASE_CANARY_FD || -v GROK_RELEASE_CANARY_RELEASE_ID ]] \
+    && canary_binding=1
+  for name in GROK_RELEASE_CANARY_MODE GROK_RELEASE_RUNG_CANARY \
+              GROK_RELEASE_CANARY_RUNG GROK_RELEASE_CANARY_ROUTE_PROFILE \
+              GROK_RELEASE_CANARY_CONTRACT GROK_RELEASE_CANARY_GROK_RELEASE \
+              GROK_RELEASE_CANARY_KIND GROK_RELEASE_CANARY_MODEL \
+              GROK_RELEASE_CANARY_NONCE; do
+    [[ -v $name ]] && canary_extra=1
+  done
+  if (( canary_binding == 1 || canary_extra == 1 )); then
+    (( provider_command == 1 )) \
+      && (( canary_binding == 1 && canary_extra == 0 )) \
+      && [[ "${GROK_RELEASE_CANARY_FD:-}" =~ ^[0-9]+$ ]] \
+      && (( GROK_RELEASE_CANARY_FD >= 3 )) \
+      && [[ "${GROK_RELEASE_CANARY_RELEASE_ID:-}" =~ ^[0-9a-f]{64}$ ]] \
+      || { exec {EGRESS_SELF_RELEASE_LOCK_FD}<&-; return 78; }
+    admission+=("$GROK_RELEASE_CANARY_FD")
+    provider_canary=1
+  elif [[ "${GROK_HANDOFF_MODE:-0}" == 1 && $# == 1 \
+     && "$1" == compatibility-handoff ]]; then
+    admission+=(--public-recovery)
+  elif (( provider_command == 1 )) \
+       && [[ "$1" == provider-recover || "$1" == provider-prove-empty ]]; then
+    admission+=(--public-recovery --provider-recovery)
+  fi
+  "${admission[@]}" || rc=$?
+  if (( provider_command == 1 )); then
+    exec {EGRESS_SELF_RELEASE_LOCK_FD}<&-
+    if (( provider_canary == 1 )); then
+      exec {GROK_RELEASE_CANARY_FD}<&-
+    fi
+    unset GROK_RELEASE_CANARY_FD GROK_RELEASE_CANARY_RELEASE_ID
+  fi
+  return "$rc"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]] && ! require_frozen_egress_release "$@"; then
+  printf '[egress] editable source tree is not executable; use ~/.local/bin/grok-remote\n' >&2
+  exit 78
+fi
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+  unset PYTHONPATH PYTHONHOME BASH_ENV ENV
+  while IFS= read -r variable; do unset "$variable"; done < <(compgen -A variable LD_)
+fi
+
+PRIVATE_DIR="$HOME/grok-proxy"
+[[ -e "$EG_DIR/hosts.conf" || -e "$EG_DIR/id_grokproxy" ]] && PRIVATE_DIR="$EG_DIR"
+CONF="$PRIVATE_DIR/hosts.conf"
+KEY="$PRIVATE_DIR/id_grokproxy"
+
+# The supervisor invokes a narrow generation-aware provider protocol.  Its
+# mutable paths are isolated under a pre-created 0700 generation directory;
+# ordinary/live callers cannot redirect compatibility state there.
+PROVIDER_MODE=0
+HANDOFF_MODE=0
+if [[ "${GROK_HANDOFF_MODE:-0}" == 1 ]]; then
+  HANDOFF_MODE=1
+elif [[ -n "${GROK_HANDOFF_MODE:-}" && "${GROK_HANDOFF_MODE:-}" != 0 ]]; then
+  printf '[egress] GROK_HANDOFF_MODE must be 0 or 1\n' >&2
+  return 1 2>/dev/null || exit 1
+fi
+if [[ "${GROK_PROVIDER_MODE:-}" == 1 ]]; then
+  (( HANDOFF_MODE == 0 )) || {
+    printf '[egress] provider and compatibility-handoff modes are exclusive\n' >&2
+    return 1 2>/dev/null || exit 1
+  }
+  PROVIDER_MODE=1
+  for required in GROK_PROVIDER_OWNER_EPOCH GROK_PROVIDER_TRANSITION_ID \
+                  GROK_PROVIDER_GENERATION GROK_EGRESS_RUNTIME_DIR \
+                  GROK_PROVIDER_INVENTORY GROK_PROXY_PORT GROK_REQUIRE_MODEL \
+                  GROK_PROVIDER_CONTRACT_DIGEST GROK_ACTIVE_RELEASE_ID \
+                  GROK_PROVIDER_DEADLINE_NS; do
+    [[ -n "${!required:-}" ]] || {
+      printf '[egress] provider mode is missing %s\n' "$required" >&2
+      return 1 2>/dev/null || exit 1
+    }
+  done
+elif [[ -n "${GROK_EGRESS_RUNTIME_DIR:-}${GROK_PROVIDER_OWNER_EPOCH:-}${GROK_PROVIDER_TRANSITION_ID:-}${GROK_PROVIDER_GENERATION:-}${GROK_PROVIDER_INVENTORY:-}${GROK_PROVIDER_CONTRACT_DIGEST:-}${GROK_ACTIVE_RELEASE_ID:-}${GROK_PROVIDER_DEADLINE_NS:-}${GROK_PROVIDER_HOME_LABEL:-}${GROK_PROVIDER_HOME_HOST:-}${GROK_PROVIDER_HOME_USER:-}${GROK_PROVIDER_HOME_PORT:-}${GROK_PROVIDER_IPHONE_NODE_ID:-}${GROK_PROVIDER_VPN_NAMESPACE:-}${GROK_PROVIDER_VPN_MAX_TRIES:-}${GROK_PROVIDER_VPN_RANKING_VERSION:-}${GROK_PROVIDER_VPN_COUNTRIES:-}${GROK_PROVIDER_VPN_BLOCKED_COUNTRIES:-}" ]]; then
+  printf '[egress] provider runtime variables require GROK_PROVIDER_MODE=1\n' >&2
+  return 1 2>/dev/null || exit 1
+fi
+EG_RUNTIME_DIR="${GROK_EGRESS_RUNTIME_DIR:-$EG_DIR}"
+if (( PROVIDER_MODE == 1 )); then
+  CTL="$EG_RUNTIME_DIR/c"
+  STATE="$EG_RUNTIME_DIR/egress.state"
+else
+  CTL="$PRIVATE_DIR/.tunnel.ctl"
+  STATE="$PRIVATE_DIR/.egress.state"
+fi
+
+# Locks and the crash-persistent recovery fence must outlive any selected code
+# release. Live callers cannot redirect them; the root broker derives the same
+# location from the account database rather than caller-controlled HOME/XDG.
+ACCOUNT_HOME="$(python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir, end="")')" \
+  || { printf '[egress] cannot resolve the current account home\n' >&2; return 1 2>/dev/null || exit 1; }
+[[ "$ACCOUNT_HOME" == /* ]] \
+  || { printf '[egress] current account home is not absolute\n' >&2; return 1 2>/dev/null || exit 1; }
+CONTROL_DIR="$ACCOUNT_HOME/.local/state/grok-proxy/control"
+if [[ "${GROK_TESTING:-0}" == 1 && -n "${GROK_TEST_CONTROL_DIR:-}" ]]; then
+  CONTROL_DIR="$GROK_TEST_CONTROL_DIR"
+elif [[ -n "${GROK_TEST_CONTROL_DIR:-}" ]]; then
+  printf '[egress] GROK_TEST_CONTROL_DIR requires GROK_TESTING=1\n' >&2
+  return 1 2>/dev/null || exit 1
+fi
+if [[ -n "${GROK_SESSION_LOCK:-}" && "${GROK_TESTING:-0}" != 1 ]]; then
+  printf '[egress] GROK_SESSION_LOCK is not supported in live operation\n' >&2
+  return 1 2>/dev/null || exit 1
+fi
+SESSION_LOCK="${GROK_SESSION_LOCK:-$CONTROL_DIR/compatibility.lock}"
+RECOVERY_FENCE="$CONTROL_DIR/recovery.fence"
+
+# Privileged code is selected only from one installed root-owned broker path.
+# A test broker is an explicitly non-live seam and is never passed through sudo.
+if [[ -n "${GROK_VPNGATE:-}" ]]; then
+  printf '[egress] GROK_VPNGATE is not supported; the VPN broker path is fixed\n' >&2
+  return 1 2>/dev/null || exit 1
+fi
+VPN_BROKER="/usr/local/libexec/grok-proxy/vpn-broker"
+VPN_BROKER_MODE=live
+if [[ -n "${GROK_TEST_VPN_BROKER:-}" ]]; then
+  if [[ "${GROK_TESTING:-0}" != 1 ]]; then
+    printf '[egress] GROK_TEST_VPN_BROKER requires GROK_TESTING=1\n' >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  VPN_BROKER="$GROK_TEST_VPN_BROKER"
+  VPN_BROKER_MODE=test
+fi
+SOCKS_RUNTIME_DIR="$CONTROL_DIR/compat-vpn"
+SOCKS_PID="$SOCKS_RUNTIME_DIR/backend.pid"
+(( PROVIDER_MODE == 0 )) || SOCKS_PID="$EG_RUNTIME_DIR/backend.pid"
+# Production has one broker-owned namespace. A different user-side name would
+# split liveness checks from the privileged resource and defeat fail-closed DNS.
+NS=grokvpn
+if [[ -n "${GROK_VPN_NETNS+x}" && "${GROK_VPN_NETNS}" != "$NS" ]]; then
+  printf '[egress] GROK_VPN_NETNS is fixed to grokvpn\n' >&2
+  return 1 2>/dev/null || exit 1
+fi
 
 PORT="${GROK_PROXY_PORT:-1080}"
 PROXY="socks5h://127.0.0.1:$PORT"
@@ -50,10 +197,14 @@ TAILSCALE_BIN="${GROK_TAILSCALE_BIN:-$(command -v tailscale 2>/dev/null || true)
 TAILSCALED_BIN="${GROK_TAILSCALED_BIN:-$(command -v tailscaled 2>/dev/null || true)}"
 PRIMARY_TAILSCALE_BIN="${GROK_PRIMARY_TAILSCALE_BIN:-$TAILSCALE_BIN}"
 IPHONE_STATE_DIR="${GROK_IPHONE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/grok-proxy/iphone}"
+IPHONE_RUNTIME_DIR="$IPHONE_STATE_DIR"
+(( PROVIDER_MODE == 0 )) || IPHONE_RUNTIME_DIR="$EG_RUNTIME_DIR"
 IPHONE_STATE="$IPHONE_STATE_DIR/tailscaled.state"
-IPHONE_SOCKET="$IPHONE_STATE_DIR/tailscaled.sock"
-IPHONE_PID="$IPHONE_STATE_DIR/tailscaled.pid"
-IPHONE_LOG="$IPHONE_STATE_DIR/tailscaled.log"
+IPHONE_SOCKET="$IPHONE_RUNTIME_DIR/tailscaled.sock"
+(( PROVIDER_MODE == 0 )) || IPHONE_SOCKET="$IPHONE_RUNTIME_DIR/t"
+IPHONE_PID="$IPHONE_RUNTIME_DIR/tailscaled.pid"
+IPHONE_PID_IDENTITY="$IPHONE_RUNTIME_DIR/tailscaled.identity.json"
+IPHONE_LOG="$IPHONE_RUNTIME_DIR/tailscaled.log"
 IPHONE_NODE_FILE="$IPHONE_STATE_DIR/exit-node"
 IPHONE_READY_FILE="$IPHONE_STATE_DIR/ready"
 IPHONE_HOSTNAME="${GROK_IPHONE_HOSTNAME:-grok-iphone-relay}"
@@ -66,9 +217,11 @@ CLEAN_PROXY_ENV=(env
   -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY -u FTP_PROXY
   -u http_proxy -u https_proxy -u all_proxy -u no_proxy -u ftp_proxy)
 
-BASELINE="$EG_DIR/.baseline.models"               # what the VM is offered with no tunnel at all
+BASELINE="$PRIVATE_DIR/.baseline.models"            # what the VM is offered with no tunnel at all
+(( PROVIDER_MODE == 0 )) || BASELINE="$EG_RUNTIME_DIR/baseline.models"
 BASELINE_TTL="${GROK_BASELINE_TTL:-21600}"        # re-measure the baseline once it is older than this (s)
-UNLOCKED="$EG_DIR/.unlocked.models"               # what the active rung added on top of that
+UNLOCKED="$PRIVATE_DIR/.unlocked.models"            # what the active rung added on top of that
+(( PROVIDER_MODE == 0 )) || UNLOCKED="$EG_RUNTIME_DIR/unlocked.models"
 # Optional pin. Left unset (the default), a rung is accepted when it unlocks any model the direct
 # egress cannot see -- see learn_baseline() for why that beats naming a model.
 REQUIRE_MODEL="${GROK_REQUIRE_MODEL:-}"
@@ -76,7 +229,10 @@ RUNG_RETRIES="${GROK_RUNG_RETRIES:-2}"            # repairs of the same rung bef
 WATCH_INTERVAL="${GROK_WATCH_INTERVAL:-10}"       # seconds between liveness checks
 DEEP_EVERY="${GROK_DEEP_EVERY:-6}"                # every Nth check, prove real egress
 VPN_MAX_TRIES="${GROK_VPN_MAX_TRIES:-6}"          # VPN Gate servers to walk before giving up
+VPN_EXPLICIT_COUNTRIES="${VPNGATE_COUNTRIES:-${VPNGATE_COUNTRY:-}}"
+VPN_PREFER_COUNTRIES="${VPNGATE_PREFER:-VN JP KR TH ID}"
 ALLOW_DIRECT="${GROK_ALLOW_DIRECT:-1}"
+VPN_STABILITY_CHECKS="${GROK_VPN_STABILITY_CHECKS:-3}"
 
 # EU (AI Act) + the countries where X itself is banned: grok-4.5 is not served from any of
 # them, so an exit there is useless no matter how healthy the tunnel is.
@@ -88,31 +244,386 @@ eg_ok(){   printf '%s[egress]%s %s\n' "$c_grn"  "$c_rst" "$*" >&2; }
 eg_warn(){ printf '%s[egress]%s %s\n' "$c_yel"  "$c_rst" "$*" >&2; }
 eg_err(){  printf '%s[egress]%s %s\n' "$c_red"  "$c_rst" "$*" >&2; }
 
-# An empty namespace serves the VPN rung from the host namespace, which disables the fail-closed
-# kill switch. Only the test harness wants that, and only when it opts in explicitly.
-if [[ -z "$NS" && "${GROK_ALLOW_HOSTNS_EGRESS:-0}" != 1 ]]; then
-  eg_err "GROK_VPN_NETNS is empty — that serves the VPN rung from the host namespace and disables the kill switch; set GROK_ALLOW_HOSTNS_EGRESS=1 to allow it"
-  exit 1
-fi
+model_id_valid(){
+  local value="${1-}"
+  ( export LC_ALL=C; [[ "$value" =~ ^[A-Za-z0-9._:+/@-]{1,128}$ ]] )
+}
+
+home_label_valid(){
+  local value="${1-}"
+  ( export LC_ALL=C; [[ "$value" =~ ^[A-Za-z0-9._:+@-]{1,120}$ ]] )
+}
+
+route_token_valid(){
+  local value="${1-}"
+  ( export LC_ALL=C; [[ "$value" =~ ^[A-Za-z0-9._:+/@-]{1,256}$ ]] )
+}
+
+filter_model_ids(){
+  LC_ALL=C awk '
+    length($0) >= 1 && length($0) <= 128 && $0 ~ /^[A-Za-z0-9._:+\/@-]+$/ { print }
+  ' | sort -u
+}
+
+model_state_file_valid(){
+  local path="$1" size
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  size="$(stat -c %s -- "$path" 2>/dev/null)" || return 1
+  [[ "$size" =~ ^[0-9]+$ ]] && (( size <= 65536 )) || return 1
+  LC_ALL=C awk '
+    length($0) == 0 || length($0) > 128 || $0 !~ /^[A-Za-z0-9._:+\/@-]+$/ { bad=1 }
+    END { exit bad ? 1 : 0 }
+  ' "$path"
+}
+
+sanitize_model_state_file(){
+  local path="$1"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  if ! model_state_file_valid "$path"; then
+    eg_warn "invalid stored model metadata was ignored"
+    return 1
+  fi
+}
+
+discard_invalid_model_state_file(){
+  local path="$1"
+  if ! sanitize_model_state_file "$path"; then
+    rm -f -- "$path"
+    eg_warn "discarded invalid stored model metadata"
+  fi
+}
+
+normalize_ip(){
+  python3 - "$1" <<'PY' 2>/dev/null
+import ipaddress
+import sys
+
+value = sys.argv[1]
+if len(value.encode("utf-8", "strict")) > 64:
+    raise SystemExit(1)
+try:
+    parsed = ipaddress.ip_address(value)
+except ValueError:
+    raise SystemExit(1)
+print(str(parsed), end="")
+PY
+}
+
+bounded_probe_output(){
+  head -c 65537
+}
+
+iphone_log_fingerprint(){
+  python3 - "$IPHONE_LOG" <<'PY' 2>/dev/null
+import hashlib
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(path, flags)
+except OSError:
+    print("log_unavailable")
+    raise SystemExit(0)
+try:
+    info = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        print("log_unavailable")
+        raise SystemExit(0)
+    if info.st_size > 16 * 1024 * 1024:
+        print(f"log_bytes={info.st_size} log_sha256=oversize")
+        raise SystemExit(0)
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        chunk = os.read(descriptor, 65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        digest.update(chunk)
+    print(f"log_bytes={total} log_sha256={digest.hexdigest()}")
+finally:
+    os.close(descriptor)
+PY
+}
+
+ensure_control_dir(){
+  local uid mode owner
+  uid="$(id -u)"
+  if [[ -e "$CONTROL_DIR" ]]; then
+    [[ -d "$CONTROL_DIR" && ! -L "$CONTROL_DIR" ]] \
+      || { eg_err "unsafe control directory: $CONTROL_DIR"; return 1; }
+    owner="$(stat -c '%u' "$CONTROL_DIR" 2>/dev/null)"
+    [[ "$owner" == "$uid" ]] \
+      || { eg_err "control directory is not owned by the current user"; return 1; }
+  else
+    ( umask 077; mkdir -p "$CONTROL_DIR" ) || return 1
+  fi
+  chmod 700 "$CONTROL_DIR" || return 1
+  mode="$(stat -c '%a' "$CONTROL_DIR" 2>/dev/null)"
+  [[ "$mode" == 700 ]] || { eg_err "control directory must be mode 700"; return 1; }
+}
+
+fence_owner_epoch(){
+  [[ -f "$RECOVERY_FENCE" && ! -L "$RECOVERY_FENCE" ]] || return 1
+  local owner mode uid
+  uid="$(id -u)"
+  [[ "$(stat -c '%u' "$RECOVERY_FENCE" 2>/dev/null)" == "$uid" ]] || return 1
+  mode="$(stat -c '%a' "$RECOVERY_FENCE" 2>/dev/null)"
+  [[ "$mode" == 600 ]] || return 1
+  # The supervisor publishes a canonical JSON fence.  Parse it as data and
+  # require the exact typed record shape; never source an ownership file.
+  owner="$(python3 - "$RECOVERY_FENCE" 2>/dev/null <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1], "rb") as handle:
+        raw = handle.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("oversized")
+    value = json.loads(raw)
+    expected = {
+        "boot_id", "owner_epoch", "phase", "pid", "pid_start_ticks",
+        "release_id", "schema_version",
+    }
+    if type(value) is not dict or set(value) != expected:
+        raise ValueError("shape")
+    owner = value["owner_epoch"]
+    if type(owner) is not str or re.fullmatch(r"[A-Za-z0-9._:+@-]{1,256}", owner) is None:
+        raise ValueError("owner")
+    print(owner, end="")
+except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+)" || return 1
+  [[ "$owner" =~ ^[A-Za-z0-9._:+@-]{1,256}$ ]] || return 1
+  printf '%s' "$owner"
+}
+
+# File presence is fail-closed. A malformed or stale-looking fence is recovery
+# work, never permission for the compatibility lane to guess that it is safe.
+interlock_check_mutation(){
+  [[ -e "$RECOVERY_FENCE" ]] || return 0
+  local owner=""
+  owner="$(fence_owner_epoch)" || {
+    eg_err "recovery fence is present but invalid — run gated recovery"
+    return 1
+  }
+  if [[ -n "${GROK_INTERLOCK_OWNER_EPOCH:-}" && "$GROK_INTERLOCK_OWNER_EPOCH" == "$owner" ]]; then
+    return 0
+  fi
+  eg_err "multi-session recovery fence is active — mutation refused"
+  return 1
+}
+
+acquire_stable_mutation_lock(){
+  command -v flock >/dev/null 2>&1 \
+    || { eg_err "flock is required to protect the shared egress"; return 1; }
+  ensure_control_dir || return 1
+  exec 9>"$SESSION_LOCK" || return 1
+  chmod 600 "$SESSION_LOCK" 2>/dev/null || return 1
+  flock -n 9 || {
+    eg_err "another grok-remote session owns the shared egress ($SESSION_LOCK)"
+    return 1
+  }
+  interlock_check_mutation || { flock -u 9 2>/dev/null || true; return 1; }
+}
+
+release_identity(){
+  python3 - "$EG_DIR/release.json" 2>/dev/null <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1], "rb") as handle:
+        value = json.load(handle)
+    release = value["release_id"]
+    if type(release) is not str or re.fullmatch(r"[0-9a-f]{64}", release) is None:
+        raise ValueError("release")
+    print(release, end="")
+except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+}
+
+provider_workspace_tag(){
+  python3 - "$1" "$2" "$3" <<'PY'
+import hashlib
+import sys
+
+owner, generation, port = (value.encode("ascii") for value in sys.argv[1:])
+print(
+    hashlib.sha256(owner + b"\0" + generation + b"\0" + port)
+    .hexdigest()[:24],
+    end="",
+)
+PY
+}
+
+provider_validate_context(){
+  local allow_missing="${1:-0}"
+  (( PROVIDER_MODE == 1 )) || { eg_err "provider command requires GROK_PROVIDER_MODE=1"; return 1; }
+  local owner="$GROK_PROVIDER_OWNER_EPOCH" transition="$GROK_PROVIDER_TRANSITION_ID"
+  local generation="$GROK_PROVIDER_GENERATION" expected resolved inventory release
+  [[ "$owner" =~ ^[A-Za-z0-9._:+@-]{1,128}$ ]] \
+    || { eg_err "invalid provider owner epoch"; return 1; }
+  [[ "$transition" =~ ^[A-Za-z0-9._:+@-]{1,128}$ ]] \
+    || { eg_err "invalid provider transition id"; return 1; }
+  [[ "$generation" =~ ^[1-9][0-9]{0,18}$ ]] \
+    || { eg_err "invalid provider generation"; return 1; }
+  [[ "$PORT" =~ ^[0-9]+$ ]] && (( 10#$PORT >= 1024 && 10#$PORT <= 65535 )) \
+    || { eg_err "invalid private provider port"; return 1; }
+  [[ "$REQUIRE_MODEL" =~ ^[A-Za-z0-9._:+/@-]{1,128}$ ]] \
+    || { eg_err "invalid concrete provider model"; return 1; }
+  [[ "$GROK_PROVIDER_CONTRACT_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
+    || { eg_err "invalid provider contract digest"; return 1; }
+  [[ "$GROK_ACTIVE_RELEASE_ID" =~ ^[0-9a-f]{64}$ ]] \
+    || { eg_err "invalid provider release identity"; return 1; }
+  [[ "${GROK_INTERLOCK_OWNER_EPOCH:-}" == "$owner" ]] \
+    || { eg_err "provider interlock owner mismatch"; return 1; }
+  expected="$CONTROL_DIR/p/$(provider_workspace_tag "$owner" "$generation" "$PORT")" \
+    || { eg_err "cannot derive provider runtime tag"; return 1; }
+  if [[ -e "$EG_RUNTIME_DIR" || -L "$EG_RUNTIME_DIR" ]]; then
+    [[ -d "$EG_RUNTIME_DIR" && ! -L "$EG_RUNTIME_DIR" ]] \
+      || { eg_err "provider runtime is not a real directory"; return 1; }
+    [[ "$(stat -c '%u:%a' "$EG_RUNTIME_DIR" 2>/dev/null)" == "$(id -u):700" ]] \
+      || { eg_err "provider runtime has unsafe owner or mode"; return 1; }
+    resolved="$(readlink -f -- "$EG_RUNTIME_DIR" 2>/dev/null)" || return 1
+  else
+    (( allow_missing == 1 )) \
+      || { eg_err "provider runtime is missing"; return 1; }
+    resolved="$(readlink -m -- "$EG_RUNTIME_DIR" 2>/dev/null)" || return 1
+  fi
+  [[ "$resolved" == "$expected" ]] \
+    || { eg_err "provider runtime does not match owner/generation/port"; return 1; }
+  inventory="$(readlink -m -- "$GROK_PROVIDER_INVENTORY" 2>/dev/null)" || return 1
+  [[ "$inventory" == "$expected/inventory.json" ]] \
+    || { eg_err "provider inventory path is not generation-scoped"; return 1; }
+  [[ ! -L "$GROK_PROVIDER_INVENTORY" ]] \
+    || { eg_err "provider inventory must not be a link"; return 1; }
+  [[ "$(fence_owner_epoch 2>/dev/null)" == "$owner" ]] \
+    || { eg_err "provider does not own the durable recovery fence"; return 1; }
+  release="$(release_identity)" \
+    || { eg_err "provider release has no coherent release identity"; return 1; }
+  [[ "$GROK_ACTIVE_RELEASE_ID" == "$release" ]] \
+    || { eg_err "provider release identity mismatch"; return 1; }
+  [[ "$GROK_PROVIDER_DEADLINE_NS" =~ ^[1-9][0-9]{0,18}$ ]] \
+    && (( 10#$GROK_PROVIDER_DEADLINE_NS <= 9223372036854775807 )) \
+    || { eg_err "invalid provider monotonic deadline"; return 1; }
+}
+
+provider_validate_country_list(){
+  local value="$1" allow_empty="${2:-0}" country seen=" "
+  if [[ -z "$value" ]]; then
+    (( allow_empty == 1 ))
+    return
+  fi
+  [[ "$value" =~ ^[A-Z]{2}(\ [A-Z]{2})*$ ]] || return 1
+  for country in $value; do
+    [[ "$seen" != *" $country "* ]] || return 1
+    seen+="$country "
+  done
+}
+
+provider_validate_frozen_rung(){
+  local rung="$1" require_state="${2:-0}" label country
+  case "$rung" in
+    home:*)
+      for required in GROK_PROVIDER_HOME_LABEL GROK_PROVIDER_HOME_HOST \
+                      GROK_PROVIDER_HOME_USER GROK_PROVIDER_HOME_PORT; do
+        [[ -n "${!required:-}" ]] \
+          || { eg_err "provider home route is missing $required"; return 1; }
+      done
+      label="${rung#home:}"
+      [[ "$GROK_PROVIDER_HOME_LABEL" == "$label" \
+         && "$GROK_PROVIDER_HOME_LABEL" =~ ^[A-Za-z0-9._:+@-]{1,120}$ ]] \
+        || { eg_err "provider home label mismatch"; return 1; }
+      [[ "$GROK_PROVIDER_HOME_HOST" =~ ^[A-Za-z0-9._:+/@-]{1,255}$ \
+         && "$GROK_PROVIDER_HOME_HOST" != -* ]] \
+        || { eg_err "invalid frozen provider home host"; return 1; }
+      [[ "$GROK_PROVIDER_HOME_USER" =~ ^[A-Za-z0-9._:+/@-]{1,128}$ \
+         && "$GROK_PROVIDER_HOME_USER" != -* ]] \
+        || { eg_err "invalid frozen provider home user"; return 1; }
+      [[ "$GROK_PROVIDER_HOME_PORT" =~ ^[1-9][0-9]{0,4}$ ]] \
+        && (( 10#$GROK_PROVIDER_HOME_PORT <= 65535 )) \
+        || { eg_err "invalid frozen provider home port"; return 1; }
+      ;;
+    iphone)
+      [[ "${GROK_PROVIDER_IPHONE_NODE_ID:-}" =~ ^[A-Za-z0-9._:+/@-]{1,256}$ ]] \
+        || { eg_err "invalid frozen provider iPhone node ID"; return 1; }
+      if (( require_state == 1 )); then
+        iphone_configured \
+          || { eg_err "frozen provider iPhone state no longer matches"; return 1; }
+      fi
+      ;;
+    vpn)
+      for required in GROK_PROVIDER_VPN_NAMESPACE GROK_PROVIDER_VPN_MAX_TRIES \
+                      GROK_PROVIDER_VPN_RANKING_VERSION; do
+        [[ -n "${!required:-}" ]] \
+          || { eg_err "provider VPN route is missing $required"; return 1; }
+      done
+      [[ -v GROK_PROVIDER_VPN_COUNTRIES \
+         && -v GROK_PROVIDER_VPN_BLOCKED_COUNTRIES ]] \
+        || { eg_err "provider VPN route is missing its frozen country policy"; return 1; }
+      [[ "${GROK_PROVIDER_VPN_NAMESPACE:-}" == grokvpn \
+         && "${GROK_VPN_NETNS:-}" == grokvpn ]] \
+        || { eg_err "provider VPN namespace mismatch"; return 1; }
+      [[ "$GROK_PROVIDER_VPN_MAX_TRIES" =~ ^[1-8]$ \
+         && "$GROK_PROVIDER_VPN_MAX_TRIES" == "$VPN_MAX_TRIES" ]] \
+        || { eg_err "provider VPN max-tries mismatch"; return 1; }
+      [[ "$GROK_PROVIDER_VPN_RANKING_VERSION" == vpngate-score-uptime-v1 ]] \
+        || { eg_err "unsupported provider VPN ranking policy"; return 1; }
+      provider_validate_country_list "$GROK_PROVIDER_VPN_COUNTRIES" 1 \
+        || { eg_err "invalid provider VPN country list"; return 1; }
+      provider_validate_country_list "${GROK_PROVIDER_VPN_BLOCKED_COUNTRIES:-}" 1 \
+        || { eg_err "invalid provider VPN blocked-country list"; return 1; }
+      [[ "${VPNGATE_COUNTRIES:-}" == "$GROK_PROVIDER_VPN_COUNTRIES" \
+         && "$GROK_BLOCKED_CC" == "${GROK_PROVIDER_VPN_BLOCKED_COUNTRIES:-}" ]] \
+        || { eg_err "provider VPN policy aliases mismatch"; return 1; }
+      for country in $GROK_PROVIDER_VPN_COUNTRIES; do
+        [[ " ${GROK_PROVIDER_VPN_BLOCKED_COUNTRIES:-} " != *" $country "* ]] \
+          || { eg_err "provider VPN allowed/blocked countries overlap"; return 1; }
+      done
+      ;;
+    *) eg_err "unsupported provider rung"; return 1 ;;
+  esac
+}
 
 # Reject junk in the watchdog tunables so a bad value cannot kill the watchdog or divide by zero.
 [[ "$WATCH_INTERVAL" =~ ^[1-9][0-9]*$ ]] || { eg_warn "GROK_WATCH_INTERVAL='$WATCH_INTERVAL' is not a positive integer — using 10"; WATCH_INTERVAL=10; }
 [[ "$DEEP_EVERY" =~ ^(0|[1-9][0-9]*)$ ]] || { eg_warn "GROK_DEEP_EVERY='$DEEP_EVERY' is not a non-negative integer — using 6"; DEEP_EVERY=6; }
+if [[ ! "$VPN_STABILITY_CHECKS" =~ ^(0|[1-9][0-9]*)$ ]]; then
+  eg_warn "GROK_VPN_STABILITY_CHECKS='$VPN_STABILITY_CHECKS' is not a non-negative integer — using 3"
+  VPN_STABILITY_CHECKS=3
+elif (( VPN_STABILITY_CHECKS > 10 )); then
+  eg_warn "GROK_VPN_STABILITY_CHECKS='$VPN_STABILITY_CHECKS' is above the safety cap — using 10"
+  VPN_STABILITY_CHECKS=10
+fi
 
 # ---------------------------------------------------------------- state
 
 set_active(){
-  case "$1" in direct|iphone|vpn|local:?*) ;; *) return 1 ;; esac
-  [[ "$1" != *[$' \t\r\n']* ]] || return 1
-  [[ "${2:-}" != *[$' \t\r\n']* && "${3:-22}" =~ ^[0-9]+$ ]] || return 1
+  case "$1" in
+    direct|iphone|vpn) ;;
+    local:*) home_label_valid "${1#local:}" || return 1 ;;
+    *) return 1 ;;
+  esac
+  [[ -z "${2:-}" ]] || route_token_valid "$2" || return 1
+  [[ "${3:-22}" =~ ^[1-9][0-9]{0,4}$ ]] \
+    && (( 10#${3:-22} <= 65535 )) || return 1
   # Atomic: write a temp file in the state dir, then rename onto $STATE. A reader always sees a
   # complete fixed-format record, never a half-written one or executable shell input.
   local tmp; tmp="$(mktemp "$STATE.XXXXXX")" || return 1
-  if printf 'RUNG=%s\nDEST=%s\nSPORT=%s\n' "$1" "${2:-}" "${3:-22}" > "$tmp"; then
-    mv -f "$tmp" "$STATE"
-  else
-    rm -f "$tmp"; return 1
+  if printf 'RUNG=%s\nDEST=%s\nSPORT=%s\n' \
+      "$1" "${2:-}" "${3:-22}" > "$tmp" \
+      && mv -fT -- "$tmp" "$STATE"; then
+    return 0
   fi
+  rm -f -- "$tmp"
+  return 1
 }
 state_value(){
   [[ -f "$STATE" ]] || return 1
@@ -120,13 +631,16 @@ state_value(){
 }
 active_rung(){
   local value; value="$(state_value RUNG)" || return 1
-  case "$value" in direct|iphone|vpn|local:?*) ;; *) return 1 ;; esac
-  [[ "$value" != *[$' \t\r\n']* ]] || return 1
+  case "$value" in
+    direct|iphone|vpn) ;;
+    local:*) home_label_valid "${value#local:}" || return 1 ;;
+    *) return 1 ;;
+  esac
   printf '%s' "$value"
 }
 active_dest(){
   local value; value="$(state_value DEST)" || return 1
-  [[ "$value" != *[$' \t\r\n']* ]] || return 1
+  [[ -z "$value" ]] || route_token_valid "$value" || return 1
   printf '%s' "$value"
 }
 clear_active(){ rm -f "$STATE"; }
@@ -192,17 +706,20 @@ eg_curl(){
 # lookup was blocked, which rung_probe treats as "unknown", not "dead".
 egress_ip(){
   local proxy="${1-$PROXY}" trace ip
-  trace="$(eg_curl "$proxy" https://1.1.1.1/cdn-cgi/trace)"
+  trace="$(eg_curl "$proxy" https://1.1.1.1/cdn-cgi/trace | bounded_probe_output)"
+  (( ${#trace} <= 65536 )) || trace=""
   ip="$(sed -n 's/^ip=//p' <<<"$trace" | head -1)"
-  [[ -n "$ip" ]] || ip="$(eg_curl "$proxy" https://api.ipify.org)"
-  printf '%s' "$ip"
+  [[ -n "$ip" ]] || ip="$(eg_curl "$proxy" https://api.ipify.org | head -c 257)"
+  (( ${#ip} <= 256 )) || ip=""
+  normalize_ip "$ip" || true
 }
 egress_country(){
   local proxy="${1-$PROXY}" trace cc
-  trace="$(eg_curl "$proxy" https://1.1.1.1/cdn-cgi/trace)"
-  cc="$(sed -n 's/^loc=//p' <<<"$trace" | head -1 | tr -d '[:space:]')"
-  [[ -n "$cc" ]] || cc="$(eg_curl "$proxy" https://ipinfo.io/country | tr -d '[:space:]')"
-  printf '%s' "$cc"
+  trace="$(eg_curl "$proxy" https://1.1.1.1/cdn-cgi/trace | bounded_probe_output)"
+  (( ${#trace} <= 65536 )) || trace=""
+  cc="$(sed -n 's/^loc=//p' <<<"$trace" | head -1)"
+  [[ -n "$cc" ]] || cc="$(eg_curl "$proxy" https://ipinfo.io/country | head -c 17)"
+  ( export LC_ALL=C; [[ "$cc" =~ ^[A-Z]{2}$ ]] ) && printf '%s' "$cc"
 }
 
 country_allowed(){ [[ -n "$1" && " $GROK_BLOCKED_CC " != *" $1 "* ]]; }
@@ -218,16 +735,22 @@ GROK_MODELS_CACHE="${GROK_MODELS_CACHE:-$HOME/.grok/models_cache.json}"
 models_via(){
   local proxy="${1-$PROXY}" out
   if [[ -n "${GROK_MODELS_CMD:-}" ]]; then
-    GROK_PROBE_RUNG="${2:-}" bash -c "$GROK_MODELS_CMD" | sort -u; return
+    out="$(GROK_PROBE_RUNG="${2:-}" bash -c "$GROK_MODELS_CMD" 2>/dev/null | head -c 1048577)"
+    (( ${#out} <= 1048576 )) || return 1
+    printf '%s\n' "$out" | filter_model_ids
+    return
   fi
   rm -f "$GROK_MODELS_CACHE"   # force a fresh fetch through THIS egress, not grok's cached list
   if [[ -n "$proxy" ]]; then
     out="$("${CLEAN_PROXY_ENV[@]}" ALL_PROXY="$proxy" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
-      timeout 90 "$GROK_BIN" models 2>/dev/null)"
+      timeout 90 "$GROK_BIN" models 2>/dev/null | head -c 1048577)"
   else
-    out="$("${CLEAN_PROXY_ENV[@]}" timeout 90 "$GROK_BIN" models 2>/dev/null)"
+    out="$("${CLEAN_PROXY_ENV[@]}" timeout 90 "$GROK_BIN" models 2>/dev/null | head -c 1048577)"
   fi
-  grep -oE '^[[:space:]]+[-*][[:space:]]+[^[:space:]]+' <<<"$out" | awk '{print $2}' | sort -u
+  (( ${#out} <= 1048576 )) || return 1
+  grep -oE '^[[:space:]]+[-*][[:space:]]+[^[:space:]]+' <<<"$out" \
+    | awk '{print $2}' \
+    | filter_model_ids
 }
 
 # What this VM is offered with no tunnel at all. Every rung is judged against it: a rung is worth
@@ -243,6 +766,7 @@ models_via(){
 # model that becomes available everywhere eventually joins the baseline instead of being mistaken
 # for something a tunnel unlocked.
 learn_baseline(){
+  discard_invalid_model_state_file "$BASELINE"
   if [[ -f "$BASELINE" ]]; then
     local now mtime
     now="$(date +%s)"; mtime="$(stat -c %Y "$BASELINE" 2>/dev/null || echo 0)"
@@ -263,6 +787,12 @@ learn_baseline(){
 # GROK_REQUIRE_MODEL pins a specific one instead, for when you know exactly what you want.
 rung_unlocks(){
   local rung="$1" proxy="$2" got extra
+  discard_invalid_model_state_file "$BASELINE"
+  discard_invalid_model_state_file "$UNLOCKED"
+  if [[ -n "$REQUIRE_MODEL" ]] && ! model_id_valid "$REQUIRE_MODEL"; then
+    eg_warn "configured model id is invalid"
+    return 1
+  fi
   got="$(models_via "$proxy" "$rung")"
   if [[ -z "$got" ]]; then eg_warn "  $rung: the API is not reachable through it"; return 1; fi
   eg_log "  $rung offers: $(paste -sd, <<<"$got")"
@@ -303,45 +833,91 @@ rung_probe(){
 
 # ---------------------------------------------------------------- rung: local PC
 
-local_hosts(){ awk '!/^#/ && NF>=3 && $3 !~ /^CHANGE_ME/ {print $1"\t"$2"\t"$3"\t"(NF>=4?$4:22)}' "$CONF"; }
+local_hosts(){
+  local label host user sport
+  while IFS=$'\t' read -r label host user sport; do
+    home_label_valid "$label" || continue
+    route_token_valid "$host" && [[ "$host" != -* ]] || continue
+    route_token_valid "$user" && [[ "$user" != -* ]] || continue
+    [[ "$sport" =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#$sport <= 65535 )) || continue
+    printf '%s\t%s\t%s\t%s\n' "$label" "$host" "$user" "$sport"
+  done < <(
+    awk '!/^#/ && NF>=3 && $3 !~ /^CHANGE_ME/ {print $1"\t"$2"\t"$3"\t"(NF>=4?$4:22)}' "$CONF"
+  )
+}
 
-local_up(){
-  local want="$1" label ip user sport
+local_up_one(){
+  local label="$1" ip="$2" user="$3" sport="$4"
+  home_label_valid "$label" || return 1
+  route_token_valid "$ip" && [[ "$ip" != -* ]] || return 1
+  route_token_valid "$user" && [[ "$user" != -* ]] || return 1
+  [[ "$sport" =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#$sport <= 65535 )) || return 1
   # L3: pin the home PC's host key. If a repo-local known_hosts exists (populated once from the
   # key the setup script prints), enforce it strictly; otherwise pin-on-first-use into that same
   # repo-local file — never the user's global known_hosts — so a fresh install still connects.
-  local khost="$EG_DIR/known_hosts" skc="accept-new"
+  local khost="$PRIVATE_DIR/known_hosts" skc="accept-new"
   [[ -s "$khost" ]] && skc="yes"
+  [[ "$ip" != -* && "$user" != -* ]] || return 1
+  if ! tcp_ok "$ip" "$sport"; then eg_warn "  $label ($ip:$sport) not reachable over Tailscale"; return 1; fi
+  rm -f "$CTL"
+  # ControlPersist=yes, not a timeout: with a timeout the master self-terminates once no
+  # SOCKS connection has been open for that long, which kills a perfectly healthy tunnel
+  # while you sit reading grok's last answer. ServerAlive 5x3 notices a dead link in ~15s.
+  ssh -M -S "$CTL" -fnN \
+      -o ControlPersist=yes \
+      -o ExitOnForwardFailure=yes \
+      -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+      -o StrictHostKeyChecking="$skc" \
+      -o UserKnownHostsFile="$khost" \
+      -o ConnectTimeout=8 -o BatchMode=yes \
+      -i "$KEY" -p "$sport" -D "127.0.0.1:$PORT" -- "$user@$ip" 9>&- || return 1
+  set_active "local:$label" "$user@$ip" "$sport"
+}
+
+local_up(){
+  local want="$1" label ip user sport
+  if (( PROVIDER_MODE == 1 )); then
+    [[ "$want" == "$GROK_PROVIDER_HOME_LABEL" ]] || return 1
+    local_up_one "$GROK_PROVIDER_HOME_LABEL" "$GROK_PROVIDER_HOME_HOST" \
+      "$GROK_PROVIDER_HOME_USER" "$GROK_PROVIDER_HOME_PORT"
+    return
+  fi
   while IFS=$'\t' read -r label ip user sport; do
     [[ "$label" == "$want" ]] || continue
-    if ! tcp_ok "$ip" "$sport"; then eg_warn "  $label ($ip:$sport) not reachable over Tailscale"; return 1; fi
-    rm -f "$CTL"
-    # ControlPersist=yes, not a timeout: with a timeout the master self-terminates once no
-    # SOCKS connection has been open for that long, which kills a perfectly healthy tunnel
-    # while you sit reading grok's last answer. ServerAlive 5x3 notices a dead link in ~15s.
-    ssh -M -S "$CTL" -fnN \
-        -o ControlPersist=yes \
-        -o ExitOnForwardFailure=yes \
-        -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
-        -o StrictHostKeyChecking="$skc" \
-        -o UserKnownHostsFile="$khost" \
-        -o ConnectTimeout=8 -o BatchMode=yes \
-        -i "$KEY" -p "$sport" -D "127.0.0.1:$PORT" "$user@$ip" 9>&- || return 1
-    set_active "local:$label" "$user@$ip" "$sport"
-    return 0
+    local_up_one "$label" "$ip" "$user" "$sport"
+    return
   done < <(local_hosts)
   return 1
 }
 
 local_alive(){
-  local dest; dest="$(active_dest)"
-  [[ -S "$CTL" && -n "$dest" ]] && ssh -S "$CTL" -O check -o BatchMode=yes "$dest" >/dev/null 2>&1
+  local dest; dest="$(active_dest 2>/dev/null || true)"
+  if (( PROVIDER_MODE == 1 )) && [[ -z "$dest" ]]; then
+    dest="$GROK_PROVIDER_HOME_USER@$GROK_PROVIDER_HOME_HOST"
+  fi
+  [[ -S "$CTL" && -n "$dest" ]] \
+    && ssh -S "$CTL" -O check -o BatchMode=yes -- "$dest" >/dev/null 2>&1
 }
 
 local_down(){
-  local dest; dest="$(active_dest)"
-  [[ -S "$CTL" && -n "$dest" ]] && ssh -S "$CTL" -O exit -o BatchMode=yes "$dest" >/dev/null 2>&1
-  rm -f "$CTL"
+  local dest rc=0; dest="$(active_dest 2>/dev/null || true)"
+  if (( PROVIDER_MODE == 1 )) && [[ -z "$dest" ]]; then
+    dest="$GROK_PROVIDER_HOME_USER@$GROK_PROVIDER_HOME_HOST"
+  fi
+  if [[ -S "$CTL" && -n "$dest" ]]; then
+    if ! ssh -S "$CTL" -O exit -o BatchMode=yes -- "$dest" >/dev/null 2>&1; then
+      # Preserve the only exact control handle while the master/listener may
+      # still exist.  A stale socket is removable only after both checks prove
+      # that it no longer controls a process or the scoped SOCKS listener.
+      if local_alive || [[ -n "$(port_owner_pid)" ]]; then
+        return 1
+      fi
+    fi
+  elif [[ -e "$CTL" || -L "$CTL" ]]; then
+    return 1
+  fi
+  rm -f -- "$CTL" || rc=1
+  return "$rc"
 }
 
 # ---------------------------------------------------------------- rung: iPhone Tailscale exit node
@@ -352,28 +928,337 @@ iphone_prepare_state(){
 }
 
 iphone_node(){
-  if [[ -s "$IPHONE_NODE_FILE" ]]; then
-    head -1 "$IPHONE_NODE_FILE"
+  local value=""
+  if (( PROVIDER_MODE == 1 )); then
+    value="$GROK_PROVIDER_IPHONE_NODE_ID"
+  elif [[ -s "$IPHONE_NODE_FILE" ]]; then
+    value="$(head -1 "$IPHONE_NODE_FILE")"
   elif [[ -n "${GROK_IPHONE_EXIT_NODE:-}" ]]; then
-    printf '%s' "$GROK_IPHONE_EXIT_NODE"
+    value="$GROK_IPHONE_EXIT_NODE"
   fi
+  [[ -z "$value" ]] || route_token_valid "$value" || return 1
+  printf '%s' "$value"
 }
 
 iphone_configured(){
+  if (( PROVIDER_MODE == 1 )); then
+    python3 - "$GROK_PROVIDER_IPHONE_NODE_ID" "$IPHONE_NODE_FILE" "$IPHONE_READY_FILE" <<'PY'
+import os, pathlib, stat, sys
+
+expected = sys.argv[1].encode("ascii")
+for raw in sys.argv[2:]:
+    path = pathlib.Path(raw)
+    try:
+        info = path.lstat()
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+            or not 1 <= info.st_size <= 512
+        ):
+            raise ValueError("unsafe state")
+        data = path.read_bytes()
+    except (OSError, ValueError):
+        raise SystemExit(1)
+    if data not in {expected, expected + b"\n"}:
+        raise SystemExit(1)
+PY
+    return
+  fi
   [[ -s "$IPHONE_NODE_FILE" && -s "$IPHONE_READY_FILE" ]] || return 1
   [[ "$(head -1 "$IPHONE_NODE_FILE")" == "$(head -1 "$IPHONE_READY_FILE")" ]]
 }
 iphone_cli(){ "$TAILSCALE_BIN" --socket="$IPHONE_SOCKET" "$@"; }
 
+iphone_process_identity(){
+  local action="$1" pid="${2:-0}"
+  python3 - "$action" "$pid" "$IPHONE_PID_IDENTITY" \
+    "$IPHONE_LOG" \
+    "$TAILSCALED_BIN" \
+    "--tun=userspace-networking" \
+    "--socket=$IPHONE_SOCKET" \
+    "--state=$IPHONE_STATE" \
+    "--socks5-server=127.0.0.1:$PORT" <<'PY'
+import errno
+import json
+import os
+import pathlib
+import secrets
+import select
+import signal
+import stat
+import sys
+
+action = sys.argv[1]
+try:
+    requested_pid = int(sys.argv[2])
+except ValueError:
+    raise SystemExit(2)
+record_path = pathlib.Path(sys.argv[3])
+log_path = pathlib.Path(sys.argv[4])
+required_args = tuple(sys.argv[5:])
+
+
+def process_snapshot(pid):
+    boot = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(
+        encoding="ascii"
+    ).strip()
+    raw = pathlib.Path(f"/proc/{pid}/stat").read_bytes()
+    if len(raw) > 4096:
+        raise ValueError("oversized process stat")
+    close = raw.rfind(b")")
+    if close < 0:
+        raise ValueError("malformed process stat")
+    fields = raw[close + 2 :].split()
+    if len(fields) < 20:
+        raise ValueError("short process stat")
+    start_ticks = int(fields[19])
+    command = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+    if len(command) > 131072:
+        raise ValueError("oversized process command line")
+    argv = tuple(part.decode("utf-8", "surrogateescape") for part in command.split(b"\0") if part)
+    return boot, start_ticks, argv
+
+
+def secure_directory_fd():
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(record_path.parent, flags)
+    info = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        os.close(descriptor)
+        raise ValueError("unsafe iPhone runtime directory")
+    return descriptor
+
+
+def load_record():
+    directory = secure_directory_fd()
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(record_path.name, flags, dir_fd=directory)
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or not 1 <= info.st_size <= 1024
+        ):
+            raise ValueError("unsafe iPhone process identity")
+        data = os.read(descriptor, 1025)
+        if len(data) > 1024:
+            raise ValueError("oversized iPhone process identity")
+        value = json.loads(data.decode("ascii"))
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
+    if type(value) is not dict or set(value) != {
+        "boot_id", "pid", "schema_version", "start_ticks"
+    }:
+        raise ValueError("invalid iPhone process identity fields")
+    if (
+        value["schema_version"] != 1
+        or type(value["pid"]) is not int
+        or value["pid"] < 1
+        or type(value["start_ticks"]) is not int
+        or value["start_ticks"] < 1
+        or type(value["boot_id"]) is not str
+        or len(value["boot_id"]) != 36
+    ):
+        raise ValueError("invalid iPhone process identity")
+    return value
+
+
+def write_record(pid, boot, start_ticks):
+    directory = secure_directory_fd()
+    temporary = f".{record_path.name}.{secrets.token_hex(12)}.tmp"
+    descriptor = -1
+    try:
+        try:
+            existing = os.stat(record_path.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            not stat.S_ISREG(existing.st_mode)
+            or existing.st_uid != os.getuid()
+            or stat.S_IMODE(existing.st_mode) != 0o600
+        ):
+            raise ValueError("unsafe existing iPhone process identity")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
+        payload = json.dumps(
+            {
+                "boot_id": boot,
+                "pid": pid,
+                "schema_version": 1,
+                "start_ticks": start_ticks,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii") + b"\n"
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short iPhone process identity write")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.rename(
+            temporary,
+            record_path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+        )
+        os.fsync(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        os.close(directory)
+
+
+def prepare_log():
+    if log_path.parent != record_path.parent:
+        raise ValueError("iPhone log and identity directories differ")
+    directory = secure_directory_fd()
+    descriptor = -1
+    try:
+        flags = (
+            os.O_WRONLY
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(log_path.name, flags, dir_fd=directory)
+        except FileNotFoundError:
+            descriptor = os.open(
+                log_path.name,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory,
+            )
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            raise ValueError("unsafe iPhone sidecar log")
+        os.ftruncate(descriptor, 0)
+        os.fsync(descriptor)
+        os.fsync(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
+
+
+def exact_snapshot(record, *, require_command):
+    try:
+        boot, start_ticks, argv = process_snapshot(record["pid"])
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    if (boot, start_ticks) != (record["boot_id"], record["start_ticks"]):
+        return None
+    if require_command and not all(argument in argv for argument in required_args):
+        return None
+    return boot, start_ticks, argv
+
+
+try:
+    if action == "prepare-log":
+        prepare_log()
+    elif action == "write":
+        if requested_pid != os.getppid():
+            raise ValueError("identity writer does not own the launch parent")
+        before = process_snapshot(requested_pid)
+        pidfd = os.pidfd_open(requested_pid, 0)
+        try:
+            after = process_snapshot(requested_pid)
+            if before[:2] != after[:2]:
+                raise ValueError("launch process identity changed")
+            write_record(requested_pid, after[0], after[1])
+        finally:
+            os.close(pidfd)
+    elif action == "adopt":
+        try:
+            before = process_snapshot(requested_pid)
+        except (FileNotFoundError, ProcessLookupError):
+            raise SystemExit(0)
+        if not all(argument in before[2] for argument in required_args):
+            raise ValueError("legacy iPhone process command does not match")
+        try:
+            pidfd = os.pidfd_open(requested_pid, 0)
+        except ProcessLookupError:
+            raise SystemExit(0)
+        try:
+            after = process_snapshot(requested_pid)
+            if before[:2] != after[:2] or not all(
+                argument in after[2] for argument in required_args
+            ):
+                raise ValueError("legacy iPhone process identity changed")
+            readable, _, _ = select.select([pidfd], [], [], 0)
+            if not readable:
+                write_record(requested_pid, after[0], after[1])
+        finally:
+            os.close(pidfd)
+    elif action == "recorded":
+        record = load_record()
+        if record["pid"] != requested_pid:
+            raise SystemExit(1)
+    elif action == "pid":
+        print(load_record()["pid"], end="")
+    elif action in {"alive", "stop"}:
+        record = load_record()
+        if record["pid"] != requested_pid:
+            raise ValueError("iPhone PID and exact identity disagree")
+        before = exact_snapshot(record, require_command=(action == "alive"))
+        if before is None:
+            raise SystemExit(1 if action == "alive" else 0)
+        try:
+            pidfd = os.pidfd_open(record["pid"], 0)
+        except ProcessLookupError:
+            raise SystemExit(1 if action == "alive" else 0)
+        try:
+            after = exact_snapshot(record, require_command=(action == "alive"))
+            if after is None or after[:2] != before[:2]:
+                raise SystemExit(1 if action == "alive" else 0)
+            readable, _, _ = select.select([pidfd], [], [], 0)
+            if action == "alive":
+                raise SystemExit(1 if readable else 0)
+            if not readable:
+                signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                readable, _, _ = select.select([pidfd], [], [], 2.0)
+            if not readable:
+                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                readable, _, _ = select.select([pidfd], [], [], 1.0)
+            if not readable:
+                raise SystemExit(1)
+        finally:
+            os.close(pidfd)
+    else:
+        raise ValueError("unsupported iPhone process identity action")
+except (OSError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+PY
+}
+
 iphone_process_alive(){
   local pid="${1:-}"
   [[ -n "$pid" ]] || pid="$(pid_from_file "$IPHONE_PID")" || return 1
-  kill -0 "$pid" 2>/dev/null \
-    && pid_has_arg "$pid" "$TAILSCALED_BIN" \
-    && pid_has_arg "$pid" "--tun=userspace-networking" \
-    && pid_has_arg "$pid" "--socket=$IPHONE_SOCKET" \
-    && pid_has_arg "$pid" "--state=$IPHONE_STATE" \
-    && pid_has_arg "$pid" "--socks5-server=127.0.0.1:$PORT"
+  iphone_process_identity alive "$pid"
 }
 
 iphone_listener_alive(){
@@ -404,8 +1289,9 @@ iphone_wait_backend(){
 # phone's StableNodeID (stable across hostname changes), but --exit-node takes only an IP or hostname --
 # so map the pin (StableNodeID, hostname, DNSName, or IP) to the peer's current Tailscale IP via status.
 iphone_exit_ip_for(){
-  local pin="$1"
-  iphone_status_json | jq -r --arg p "$pin" '
+  local pin="$1" raw=""
+  route_token_valid "$pin" || return 1
+  raw="$(iphone_status_json | jq -r --arg p "$pin" '
     def norm: ascii_downcase | rtrimstr(".");
     def ip_of: .TailscaleIPs[]? | split("/")[0];
     ( [ (.Peer // {}) | .[]
@@ -420,7 +1306,9 @@ iphone_exit_ip_for(){
       + [ (.ExitNodeStatus // empty)
           | select( .ID == $p or any(.TailscaleIPs[]?; split("/")[0] == $p) )
           | ip_of ]
-    ) | .[0] // empty' 2>/dev/null
+    ) | .[0] // empty' 2>/dev/null)" || return 1
+  [[ -n "$raw" ]] || return 0
+  normalize_ip "$raw"
 }
 iphone_exit_online(){
   local node; node="$(iphone_node)"
@@ -446,15 +1334,38 @@ iphone_exit_online(){
 }
 
 iphone_down(){
-  local pid=""
-  pid="$(pid_from_file "$IPHONE_PID")" || true
-  if [[ -n "$pid" ]] && iphone_process_alive "$pid"; then
-    kill "$pid" 2>/dev/null || true
-    local i
-    for i in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+  local pid="" rc=0
+  if [[ -L "$IPHONE_PID" ]]; then
+    rc=1
+  elif [[ -e "$IPHONE_PID" ]]; then
+    pid="$(pid_from_file "$IPHONE_PID")" || rc=1
   fi
-  rm -f "$IPHONE_PID" "$IPHONE_SOCKET"
+  [[ ! -L "$IPHONE_PID_IDENTITY" ]] || rc=1
+  if [[ -z "$pid" && -e "$IPHONE_PID_IDENTITY" ]]; then
+    pid="$(iphone_process_identity pid)" || rc=1
+  fi
+  if [[ -n "$pid" && ! -e "$IPHONE_PID_IDENTITY" && ! -L "$IPHONE_PID_IDENTITY" ]]; then
+    # One-time upgrade path for a sidecar started by the previous release.
+    # Adoption opens a pidfd and revalidates the complete expected argv before
+    # publishing the durable start/boot identity; an unrelated PID is retained
+    # fail-closed and never signalled.
+    iphone_process_identity adopt "$pid" || rc=1
+  fi
+  if [[ -n "$pid" ]]; then
+    if [[ -e "$IPHONE_PID_IDENTITY" ]]; then
+      iphone_process_identity stop "$pid" || rc=1
+    elif (( rc != 0 )); then
+      : # Unsafe legacy identity: preserve all evidence and fail closed.
+    fi
+    wait "$pid" 2>/dev/null || true
+  fi
+  port_listening && rc=1
+  if (( rc == 0 )); then
+    rm -f "$IPHONE_PID" "$IPHONE_PID_IDENTITY" "$IPHONE_SOCKET" || rc=1
+  else
+    eg_err "  iPhone sidecar teardown did not prove process exit"
+  fi
+  return "$rc"
 }
 
 iphone_start(){
@@ -465,11 +1376,12 @@ iphone_start(){
   command -v jq >/dev/null 2>&1 || { eg_warn "  jq is required for the iPhone rung"; return 1; }
   iphone_prepare_state || return 1
   if iphone_listener_alive && [[ -S "$IPHONE_SOCKET" ]]; then return 0; fi
-  iphone_down
-  ( umask 077; : > "$IPHONE_LOG" ) || return 1
+  iphone_down || return 1
+  iphone_process_identity prepare-log || return 1
   (
     umask 077
     exec 9>&-
+    iphone_process_identity write "$BASHPID" || exit 125
     exec "$TAILSCALED_BIN" \
       --tun=userspace-networking \
       --port=0 \
@@ -479,16 +1391,27 @@ iphone_start(){
       --socks5-server="127.0.0.1:$PORT"
   ) >>"$IPHONE_LOG" 2>&1 &
   local pid=$!
+  local recorded=0
+  local i
+  for i in $(seq 1 40); do
+    if iphone_process_identity recorded "$pid"; then recorded=1; break; fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.025
+  done
+  if (( recorded == 0 )); then
+    eg_warn "  iPhone Tailscale sidecar did not publish an exact process identity"
+    iphone_down
+    return 1
+  fi
   ( umask 077; printf '%s\n' "$pid" > "$IPHONE_PID" )
   chmod 600 "$IPHONE_PID" "$IPHONE_LOG" 2>/dev/null || true
-  local i
   for i in $(seq 1 40); do
     if [[ -S "$IPHONE_SOCKET" ]] && iphone_listener_alive; then return 0; fi
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.25
   done
   eg_warn "  iPhone Tailscale sidecar did not acquire 127.0.0.1:$PORT"
-  tail -n 4 "$IPHONE_LOG" 2>/dev/null | sed 's/^/[tailscaled] /' >&2
+  eg_warn "  tailscaled $(iphone_log_fingerprint)"
   iphone_down
   return 1
 }
@@ -532,11 +1455,12 @@ iphone_detect_node(){
     eg_err "expected exactly one iOS peer in the primary tailnet; found ${#nodes[@]} — pass its IP or name explicitly"
     return 1
   fi
-  printf '%s' "${nodes[0]}"
+  normalize_ip "${nodes[0]}"
 }
 
 iphone_save_node(){
   local node="$1" tmp old=""
+  route_token_valid "$node" || return 1
   iphone_prepare_state || return 1
   old="$(head -1 "$IPHONE_NODE_FILE" 2>/dev/null || true)"
   tmp="$(mktemp "$IPHONE_NODE_FILE.XXXXXX")" || return 1
@@ -553,7 +1477,8 @@ iphone_setup(){
   local node="${1:-}" rc=0
   [[ -n "$node" ]] || node="$(iphone_node)"
   [[ -n "$node" ]] || node="$(iphone_detect_node)" || return 1
-  [[ "$node" != *[$' \t\r\n']* ]] || { eg_err "iPhone exit-node IP/name cannot contain whitespace"; return 1; }
+  route_token_valid "$node" \
+    || { eg_err "iPhone exit-node IP/name has unsupported characters"; return 1; }
   port_listening && { eg_err "port $PORT is in use — run 'grok-remote stop' before iphone-setup"; return 1; }
   iphone_save_node "$node" || return 1
   iphone_start || return 1
@@ -604,72 +1529,178 @@ iphone_setup(){
 
 # ---------------------------------------------------------------- rung: VPN
 
+prepare_socks_runtime(){
+  (( PROVIDER_MODE == 1 )) && return 0
+  ( umask 077; mkdir -p -- "$SOCKS_RUNTIME_DIR" ) || return 1
+  [[ -d "$SOCKS_RUNTIME_DIR" && ! -L "$SOCKS_RUNTIME_DIR" \
+     && "$(stat -c '%u:%a' "$SOCKS_RUNTIME_DIR" 2>/dev/null)" == "$(id -u):700" ]] \
+    || { eg_err "unsafe compatibility VPN runtime directory"; return 1; }
+}
+
 socks_down(){
-  local pid=""
-  pid="$(pid_from_file "$SOCKS_PID")" || true
-  if [[ -n "$pid" ]] && socks_process_alive "$pid"; then kill "$pid" 2>/dev/null || true; fi
-  rm -f "$SOCKS_PID"
-  # Reap an orphan the pidfile no longer tracks: a prior run that gave up (or whose pidfile was cleared)
-  # can leave our proxy still holding 127.0.0.1:$PORT, which would block the next bind. Kill it by port
-  # ownership -- but only ever a process that is our own socks-netns.py, never an unrelated listener.
-  local owner; owner="$(port_owner_pid)"
-  if [[ -n "$owner" && "$owner" != "$pid" ]] && pid_has_arg "$owner" "$SOCKS_NETNS"; then
-    kill "$owner" 2>/dev/null || true
-  fi
+  # The relay is a broker-owned root transaction.  User code never signals or
+  # unlinks it; this function is only the independent post-teardown proof.
+  local status
+  status="$(vpn_broker_call status 2>/dev/null)" || return 1
+  python3 -c 'import json,sys; v=json.load(sys.stdin); raise SystemExit(1 if v.get("relay_alive") or v.get("relay_pid") is not None else 0)' \
+    <<<"$status"
 }
 
 socks_process_alive(){
-  local pid="${1:-}"
-  [[ -n "$pid" ]] || pid="$(pid_from_file "$SOCKS_PID")" || return 1
-  # The pidfile holds the STAGE 2 pid: socks-netns.py binds the port as root in the host netns, then
-  # re-execs into the VPN netns as `--serve-fd N --user U --pidfile P`, dropping the --listen/--netns
-  # tokens before it writes the pidfile. So identify our proxy by the two argv tokens that survive the
-  # re-exec -- the script path and our pidfile path. Callers that need proof the port is actually being
-  # served add pid_owns_proxy_port; asserting --listen/--netns here can never match and wrongly fails.
-  kill -0 "$pid" 2>/dev/null \
-    && pid_has_arg "$pid" "$SOCKS_NETNS" \
-    && pid_has_arg "$pid" "$SOCKS_PID"
-}
-
-# The listener is bound in THIS namespace and only then handed to a process inside the VPN
-# namespace, so grok can reach 127.0.0.1:$PORT while every packet leaves through the tun.
-socks_up(){
-  socks_down
-  sudo -n python3 "$SOCKS_NETNS" --listen "127.0.0.1:$PORT" --netns "$NS" \
-       --user "$(id -un)" --pidfile "$SOCKS_PID" 9>&- >/dev/null 2>&1 &
-  local i pid=""
-  for i in $(seq 1 24); do
-    sleep 0.25
-    pid="$(pid_from_file "$SOCKS_PID")" || continue
-    if socks_process_alive "$pid" && pid_owns_proxy_port "$pid"; then return 0; fi
-  done
-  eg_err "  socks-netns.py did not come up on 127.0.0.1:$PORT"
-  socks_down
-  return 1
+  local pid="${1:-}" status
+  [[ "$pid" =~ ^[0-9]+$ ]] || pid="$(pid_from_file "$SOCKS_PID")" || return 1
+  status="$(vpn_broker_call status 2>/dev/null)" || return 1
+  python3 -c 'import json,sys; v=json.load(sys.stdin); p=int(sys.argv[1]); raise SystemExit(0 if v.get("relay_alive") is True and v.get("relay_pid") == p else 1)' \
+    "$pid" <<<"$status"
 }
 
 socks_alive(){
-  local pid; pid="$(pid_from_file "$SOCKS_PID")" || return 1
-  socks_process_alive "$pid" && pid_owns_proxy_port "$pid"
+  local status
+  status="$(vpn_broker_call status 2>/dev/null)" || return 1
+  python3 -c 'import json,sys; v=json.load(sys.stdin); raise SystemExit(0 if v.get("relay_alive") is True and isinstance(v.get("relay_pid"), int) else 1)' \
+    <<<"$status"
 }
 vpn_tun_alive(){
-  # Empty namespace only short-circuits when host-namespace egress was explicitly allowed (startup
-  # otherwise refuses to run); without the flag an empty NS falls through and fails closed.
-  [[ -z "$NS" && "${GROK_ALLOW_HOSTNS_EGRESS:-0}" == 1 ]] && return 0
-  sudo -n ip netns exec "$NS" ip link show tun-grok >/dev/null 2>&1
+  local status
+  status="$(vpn_broker_call status 2>/dev/null)" || return 1
+  python3 -c 'import json,sys; v=json.load(sys.stdin); raise SystemExit(0 if v.get("active") is True and v.get("namespace_alive") is True and v.get("tun_alive") is True and v.get("vpn_alive") is True else 1)' \
+    <<<"$status"
+}
+
+vpn_broker_call(){
+  local operation="$1" request_mode owner generation release contract_digest max_tries
+  local ranking countries blocked prefer countries_csv blocked_csv prefer_csv
+  local caller_identity caller_pid caller_start caller_boot deadline_ns
+  if (( PROVIDER_MODE == 1 )); then
+    request_mode=supervisor
+    owner="$GROK_PROVIDER_OWNER_EPOCH"
+    generation="$GROK_PROVIDER_GENERATION"
+    release="${GROK_ACTIVE_RELEASE_ID:-}"
+  elif (( HANDOFF_MODE == 1 )); then
+    if [[ "$operation" == migrate-legacy ]]; then
+      request_mode=compatibility-handoff
+    else
+      request_mode=supervisor
+    fi
+    owner="$GROK_HANDOFF_OWNER_EPOCH"
+    generation=1
+    release="$GROK_HANDOFF_RELEASE_ID"
+    contract_digest="$(printf '0%.0s' {1..64})"
+    max_tries="$VPN_MAX_TRIES"
+    ranking="vpngate-score-uptime-v1"
+    countries="$VPN_EXPLICIT_COUNTRIES"
+    blocked="$GROK_BLOCKED_CC"
+    prefer="$VPN_PREFER_COUNTRIES"
+  else
+    request_mode=compatibility
+    owner="compat-$(id -u)"
+    generation=0
+    release="$(release_identity)" || {
+      eg_err "VPN broker requires an atomically installed release"
+      return 1
+    }
+    contract_digest="$(printf '0%.0s' {1..64})"
+    max_tries="$VPN_MAX_TRIES"
+    ranking="vpngate-score-uptime-v1"
+    countries="$VPN_EXPLICIT_COUNTRIES"
+    blocked="$GROK_BLOCKED_CC"
+    prefer="$VPN_PREFER_COUNTRIES"
+  fi
+  local -a argv=(
+    --operation "$operation"
+    --mode "$request_mode"
+    --release-id "$release"
+    --owner-epoch "$owner"
+    --generation "$generation"
+    --listen-port "$PORT"
+  )
+  if (( PROVIDER_MODE == 1 )); then
+    contract_digest="$GROK_PROVIDER_CONTRACT_DIGEST"
+    max_tries="$GROK_PROVIDER_VPN_MAX_TRIES"
+    ranking="$GROK_PROVIDER_VPN_RANKING_VERSION"
+    countries="$GROK_PROVIDER_VPN_COUNTRIES"
+    blocked="$GROK_PROVIDER_VPN_BLOCKED_COUNTRIES"
+    prefer="$GROK_PROVIDER_VPN_COUNTRIES"
+  fi
+  countries_csv="${countries// /,}"
+  blocked_csv="${blocked// /,}"
+  prefer_csv="${prefer// /,}"
+  caller_pid="$$"
+  caller_identity="$(python3 - "$caller_pid" <<'PY'
+import pathlib, re, sys
+pid = int(sys.argv[1])
+raw = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+fields = raw[raw.rfind(")") + 2:].split()
+boot = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+if len(fields) <= 19 or not fields[19].isdigit() or re.fullmatch(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", boot
+) is None:
+    raise SystemExit(1)
+print(fields[19], boot)
+PY
+)" || { eg_err "cannot capture exact broker caller identity"; return 1; }
+  read -r caller_start caller_boot <<<"$caller_identity"
+  if (( PROVIDER_MODE == 1 )); then
+    deadline_ns="$GROK_PROVIDER_DEADLINE_NS"
+  else
+    deadline_ns="$(python3 -c 'import time; print(time.monotonic_ns() + 600_000_000_000)')" \
+      || { eg_err "cannot establish broker operation deadline"; return 1; }
+  fi
+  argv+=(
+    --contract-digest "$contract_digest"
+    --vpn-max-tries "$max_tries"
+    --vpn-ranking-version "$ranking"
+    --vpn-countries "$countries_csv"
+    --vpn-blocked-countries "$blocked_csv"
+    --vpn-prefer-countries "$prefer_csv"
+    --caller-pid "$caller_pid"
+    --caller-start-ticks "$caller_start"
+    --caller-boot-id "$caller_boot"
+    --deadline-monotonic-ns "$deadline_ns"
+  )
+  if [[ "$VPN_BROKER_MODE" == test ]]; then
+    "$VPN_BROKER" "${argv[@]}" 9>&-
+  else
+    sudo -n "$VPN_BROKER" "${argv[@]}" 9>&-
+  fi
 }
 
 # verb: "up" for the first server, "next" to blacklist the current one and take the next.
 vpn_up(){
   local verb="${1:-up}"
-  sudo -n "$VPNGATE" "$verb" 9>&- >&2 || return 1
-  socks_up || return 1
-  set_active "vpn"
+  case "$verb" in up|next|reset) ;; *) return 1 ;; esac
+  prepare_socks_runtime || return 1
+  if ! vpn_broker_call "$verb" >&2; then
+    (( PROVIDER_MODE == 1 )) && return 31
+    return 1
+  fi
+  if ! vpn_tun_alive; then
+    eg_err "  broker did not prove the VPN relay generation active"
+    vpn_broker_call down >/dev/null 2>&1 || true
+    (( PROVIDER_MODE == 1 )) && return 32
+    return 1
+  fi
+  if ! socks_alive; then
+    eg_err "  broker did not prove the VPN relay generation active"
+    vpn_broker_call down >/dev/null 2>&1 || true
+    (( PROVIDER_MODE == 1 )) && return 33
+    return 1
+  fi
+  if ! set_active "vpn"; then
+    vpn_broker_call down >/dev/null 2>&1 || true
+    (( PROVIDER_MODE == 1 )) && return 34
+    return 1
+  fi
   return 0
 }
 
 vpn_alive(){ vpn_tun_alive && socks_alive; }
-vpn_down(){ socks_down; sudo -n "$VPNGATE" down 9>&- >/dev/null 2>&1; }
+vpn_down(){
+  local rc=0
+  vpn_broker_call down >/dev/null 2>&1 || rc=1
+  (( rc != 0 )) || socks_down || rc=1
+  return "$rc"
+}
 
 # ---------------------------------------------------------------- rung dispatch
 
@@ -710,7 +1741,14 @@ rung_confirm(){
   if [[ -n "$REQUIRE_MODEL" || "$1" == vpn || "$1" == iphone ]]; then rung_probe "$1"; else rung_alive "$1"; fi
 }
 
-teardown_all(){ local_down; iphone_down; vpn_down; clear_active; }
+teardown_all(){
+  local rc=0
+  local_down || rc=1
+  iphone_down || rc=1
+  vpn_down || rc=1
+  clear_active || rc=1
+  return "$rc"
+}
 
 # ---------------------------------------------------------------- the ladder
 
@@ -732,17 +1770,23 @@ build_ladder(){
 # session to a server, confirm its egress holds across a few quick checks so a server that is already
 # degrading is skipped in favour of the next candidate. GROK_VPN_STABILITY_CHECKS=0 disables the gate.
 vpn_stable(){
-  local checks="${GROK_VPN_STABILITY_CHECKS:-3}" i ip
+  local checks="$VPN_STABILITY_CHECKS" i ip expected=""
   (( checks > 0 )) || return 0
   for (( i = 1; i <= checks; i++ )); do
     sleep 1
-    ip="$(eg_curl "$PROXY" https://1.1.1.1/cdn-cgi/trace 8 | sed -n 's/^ip=//p' | head -1)"
+    ip="$(egress_ip "$PROXY")"
     if [[ -z "$ip" ]]; then
       eg_warn "  vpn: egress dropped mid-check ($i/$checks) — server is unstable, skipping it"
       return 1
     fi
+    if [[ -z "$expected" ]]; then
+      expected="$ip"
+    elif [[ "$ip" != "$expected" ]]; then
+      eg_warn "  vpn: exit identity changed during qualification — server is unstable, skipping it"
+      return 1
+    fi
   done
-  eg_ok "  vpn: egress steady across $checks checks — committing"
+  eg_ok "  vpn: one exit identity held across $checks checks — committing"
   return 0
 }
 
@@ -895,16 +1939,550 @@ watch_egress(){
   done
 }
 
+# ---------------------------------------------------------------- generation-aware provider protocol
+
+provider_validate_rung(){
+  case "$1" in
+    direct|iphone|vpn) return 0 ;;
+    home:[A-Za-z0-9._:+@-]*)
+      [[ "${1#home:}" =~ ^[A-Za-z0-9._:+@-]{1,120}$ ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+provider_internal_rung(){
+  case "$1" in
+    home:*) printf 'local:%s' "${1#home:}" ;;
+    iphone|vpn|direct) printf '%s' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+provider_write_inventory(){
+  local public_rung="$1" pid path kind
+  pid="$(port_owner_pid)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$(stat -c %u "/proc/$pid" 2>/dev/null)" == "$(id -u)" ]] \
+    || { eg_err "provider listener has no exact current-user owner"; return 1; }
+  local -a specs=()
+  for path in "$STATE:state" "$CTL:socket" "$SOCKS_PID:pid" \
+              "$IPHONE_PID:pid" "$IPHONE_SOCKET:socket" "$IPHONE_LOG:log"; do
+    kind="${path##*:}"; path="${path%:*}"
+    [[ -e "$path" || -L "$path" ]] && specs+=("$kind=$path")
+  done
+  python3 - "$GROK_PROVIDER_INVENTORY" "$EG_RUNTIME_DIR" \
+    "$GROK_PROVIDER_OWNER_EPOCH" "$GROK_PROVIDER_TRANSITION_ID" \
+    "$GROK_PROVIDER_GENERATION" "$public_rung" "$pid" "${specs[@]}" <<'PY'
+import json, os, pathlib, stat, sys, tempfile
+
+inventory = pathlib.Path(sys.argv[1])
+runtime = pathlib.Path(sys.argv[2])
+owner, transition, generation, rung, pid = sys.argv[3:8]
+allowed = {"control", "inventory", "log", "pid", "socket", "state"}
+paths = []
+for spec in sys.argv[8:]:
+    kind, separator, raw = spec.partition("=")
+    if not separator or kind not in allowed:
+        raise SystemExit(1)
+    path = pathlib.Path(raw)
+    try:
+        path.relative_to(runtime)
+    except ValueError:
+        raise SystemExit(1)
+    info = path.lstat()
+    if path.is_symlink() or info.st_uid != os.getuid():
+        raise SystemExit(1)
+    paths.append({"kind": kind, "path": str(path)})
+privileged = []
+if rung == "vpn":
+    privileged = [
+        {"kind": "namespace", "name": "grokvpn", "broker_instance": transition},
+        {"kind": "tun", "name": "tun-grok", "broker_instance": transition},
+        {"kind": "vpn_daemon", "name": "openvpn", "broker_instance": transition},
+    ]
+record = {
+    "generation": int(generation),
+    "owner_epoch": owner,
+    "paths": paths,
+    "pids": [int(pid)],
+    "privileged": privileged,
+    "rung": rung,
+    "schema_version": 1,
+    "transition_id": transition,
+}
+data = json.dumps(record, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii") + b"\n"
+if len(data) > 65536:
+    raise SystemExit(1)
+fd, name = tempfile.mkstemp(prefix=".inventory.", dir=runtime)
+try:
+    os.fchmod(fd, 0o600)
+    view = memoryview(data)
+    while view:
+        count = os.write(fd, view)
+        if count <= 0:
+            raise OSError("short inventory write")
+        view = view[count:]
+    os.fsync(fd)
+    os.close(fd); fd = -1
+    os.replace(name, inventory)
+    directory = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if fd >= 0:
+        os.close(fd)
+    try:
+        os.unlink(name)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+provider_remove_inventory(){
+  if [[ -e "$GROK_PROVIDER_INVENTORY" || -L "$GROK_PROVIDER_INVENTORY" ]]; then
+    [[ -f "$GROK_PROVIDER_INVENTORY" && ! -L "$GROK_PROVIDER_INVENTORY" \
+       && "$(stat -c %u "$GROK_PROVIDER_INVENTORY" 2>/dev/null)" == "$(id -u)" ]] \
+      && rm -f -- "$GROK_PROVIDER_INVENTORY" || return 1
+  fi
+}
+
+provider_remove_runtime_regular(){
+  local path="$1" root resolved
+  [[ -e "$path" || -L "$path" ]] || return 0
+  root="$(readlink -m -- "$EG_RUNTIME_DIR")" || return 1
+  resolved="$(readlink -m -- "$path")" || return 1
+  [[ "$resolved" == "$root/"* && -f "$path" && ! -L "$path" \
+     && "$(stat -c %u "$path" 2>/dev/null)" == "$(id -u)" ]] || return 1
+  rm -f -- "$path"
+}
+
+provider_up_command(){
+  local public_rung="$1" internal up_rc=0
+  provider_validate_context || return 20
+  provider_validate_rung "$public_rung" \
+    || { eg_err "invalid provider rung"; return 21; }
+  provider_validate_frozen_rung "$public_rung" 1 || return 22
+  [[ "$public_rung" != direct ]] \
+    || { eg_err "direct is owned by the unprivileged Python provider"; return 23; }
+  internal="$(provider_internal_rung "$public_rung")" || return 21
+  [[ -z "$(port_owner_pid)" ]] \
+    || { eg_err "private provider port is already owned"; return 24; }
+  clear_active || return 25
+  rung_up "$internal" || up_rc=$?
+  if (( up_rc != 0 )); then
+    rung_down "$internal" >/dev/null 2>&1 || true
+    clear_active >/dev/null 2>&1 || true
+    case "$public_rung:$up_rc" in
+      vpn:31|vpn:32|vpn:33|vpn:34) return "$up_rc" ;;
+    esac
+    return 26
+  fi
+  if ! rung_alive "$internal"; then
+    rung_down "$internal" >/dev/null 2>&1 || true
+    clear_active >/dev/null 2>&1 || true
+    return 27
+  fi
+  if ! provider_write_inventory "$public_rung"; then
+    rung_down "$internal" >/dev/null 2>&1 || true
+    clear_active >/dev/null 2>&1 || true
+    return 28
+  fi
+}
+
+provider_next_command(){
+  local public_rung="$1" before after rc=0
+  provider_validate_context || return 1
+  [[ "$public_rung" == vpn ]] \
+    || { eg_err "provider-next is supported only for vpn"; return 1; }
+  provider_validate_frozen_rung "$public_rung" 1 || return 1
+  [[ -f "$GROK_PROVIDER_INVENTORY" && ! -L "$GROK_PROVIDER_INVENTORY" ]] \
+    || { eg_err "provider-next requires an owned inventory"; return 1; }
+  before="$(vpn_broker_call status)" \
+    || { eg_err "cannot read the current broker generation"; return 1; }
+  if ! vpn_up next; then
+    vpn_down >/dev/null 2>&1 || true
+    clear_active >/dev/null 2>&1 || true
+    provider_remove_inventory >/dev/null 2>&1 || true
+    return 1
+  fi
+  after="$(vpn_broker_call status)" || rc=1
+  if (( rc == 0 )); then
+    printf '%s\n%s\n' "$before" "$after" | python3 -c '
+import json, sys
+release, owner, generation, port, digest, max_tries, ranking, countries, blocked = sys.argv[1:]
+records = [json.loads(line) for line in sys.stdin if line.strip()]
+if len(records) != 2:
+    raise SystemExit(1)
+before, after = records
+expected_owner = {
+    "release_id": release,
+    "owner_epoch": owner,
+    "generation": int(generation),
+    "listen_port": int(port),
+    "contract_digest": digest,
+}
+expected_policy = {
+    "max_tries": int(max_tries),
+    "ranking_version": ranking,
+    "countries": countries.split() if countries else [],
+    "blocked_countries": blocked.split() if blocked else [],
+    "prefer_countries": countries.split() if countries else [],
+}
+for status in records:
+    if not all(status.get(name) is True for name in (
+        "active", "namespace_alive", "tun_alive", "vpn_alive", "relay_alive"
+    )):
+        raise SystemExit(1)
+    ledger = status.get("ledger")
+    if type(ledger) is not dict or ledger.get("phase") != "ACTIVE":
+        raise SystemExit(1)
+    if any(ledger.get(name) != value for name, value in expected_owner.items()):
+        raise SystemExit(1)
+    if ledger.get("vpn_policy") != expected_policy:
+        raise SystemExit(1)
+if before["ledger"].get("relay") != after["ledger"].get("relay"):
+    raise SystemExit(1)
+if before.get("relay_pid") != after.get("relay_pid"):
+    raise SystemExit(1)
+if before["ledger"].get("vpn") == after["ledger"].get("vpn"):
+    raise SystemExit(1)
+' "$GROK_ACTIVE_RELEASE_ID" "$GROK_PROVIDER_OWNER_EPOCH" \
+      "$GROK_PROVIDER_GENERATION" "$PORT" "$GROK_PROVIDER_CONTRACT_DIGEST" \
+      "$GROK_PROVIDER_VPN_MAX_TRIES" "$GROK_PROVIDER_VPN_RANKING_VERSION" \
+      "$GROK_PROVIDER_VPN_COUNTRIES" "${GROK_PROVIDER_VPN_BLOCKED_COUNTRIES:-}" || rc=1
+  fi
+  (( rc == 0 )) && provider_write_inventory "$public_rung" || rc=1
+  if (( rc != 0 )); then
+    vpn_down >/dev/null 2>&1 || true
+    clear_active >/dev/null 2>&1 || true
+    provider_remove_inventory >/dev/null 2>&1 || true
+  fi
+  return "$rc"
+}
+
+provider_stop_command(){
+  local public_rung="$1" internal rc=0
+  provider_validate_context || return 1
+  provider_validate_rung "$public_rung" || return 1
+  provider_validate_frozen_rung "$public_rung" 0 || return 1
+  [[ "$public_rung" != direct ]] || return 1
+  internal="$(provider_internal_rung "$public_rung")" || return 1
+  rung_down "$internal" || rc=1
+  clear_active || rc=1
+  if [[ "$public_rung" == iphone ]]; then
+    provider_remove_runtime_regular "$IPHONE_LOG" || rc=1
+  fi
+  provider_remove_inventory || rc=1
+  if [[ -e "$EG_RUNTIME_DIR" || -L "$EG_RUNTIME_DIR" ]]; then
+    [[ -d "$EG_RUNTIME_DIR" && ! -L "$EG_RUNTIME_DIR" ]] \
+      && rmdir -- "$EG_RUNTIME_DIR" 2>/dev/null || true
+  fi
+  return "$rc"
+}
+
+provider_recover_command(){
+  local public_rung="$1" internal pid="" rc=0
+  provider_validate_context 1 || return 1
+  provider_validate_rung "$public_rung" || return 1
+  provider_validate_frozen_rung "$public_rung" 0 || return 1
+  internal="$(provider_internal_rung "$public_rung")" || return 1
+  case "$public_rung" in
+    home:*)
+      local_down || rc=1
+      ;;
+    iphone)
+      pid="$(pid_from_file "$IPHONE_PID")" || true
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
+         && ! iphone_process_alive "$pid"; then
+        eg_err "refusing to recover iPhone PID with mismatched argv/runtime"
+        return 1
+      fi
+      iphone_down || rc=1
+      provider_remove_runtime_regular "$IPHONE_LOG" || rc=1
+      ;;
+    vpn)
+      # `recover` reconstructs and releases exact root ledger identities.  It
+      # deliberately does not use `down`, which rejects partial ledgers.
+      vpn_broker_call recover >/dev/null || rc=1
+      ;;
+    *) return 1 ;;
+  esac
+  (( rc == 0 )) || return "$rc"
+  clear_active || rc=1
+  provider_remove_inventory || rc=1
+  if [[ -e "$EG_RUNTIME_DIR" || -L "$EG_RUNTIME_DIR" ]]; then
+    [[ -d "$EG_RUNTIME_DIR" && ! -L "$EG_RUNTIME_DIR" ]] \
+      && rmdir -- "$EG_RUNTIME_DIR" 2>/dev/null || rc=1
+  fi
+  return "$rc"
+}
+
+provider_prove_empty_command(){
+  local public_rung="$1" status
+  provider_validate_context 1 || return 1
+  provider_validate_rung "$public_rung" || return 1
+  provider_validate_frozen_rung "$public_rung" 0 || return 1
+  [[ -z "$(port_owner_pid)" ]] || return 1
+  [[ ! -e "$CTL" && ! -L "$CTL" && ! -e "$SOCKS_PID" && ! -L "$SOCKS_PID" \
+     && ! -e "$IPHONE_PID" && ! -L "$IPHONE_PID" \
+     && ! -e "$IPHONE_SOCKET" && ! -L "$IPHONE_SOCKET" ]] || return 1
+  if [[ "$public_rung" == vpn ]]; then
+    status="$(vpn_broker_call status 2>/dev/null)" || return 1
+    python3 -c 'import json,sys; v=json.load(sys.stdin); flags=("active","namespace_alive","tun_alive","host_tun_alive","vpn_alive","relay_alive","root_artifact_residue"); fields={"ok",*flags,"relay_pid","ledger"}; valid=type(v) is dict and set(v)==fields and v.get("ok") is True and all(type(v.get(name)) is bool for name in flags); residue=(not valid) or any(v.get(name) is True for name in flags) or v.get("ledger") is not None or v.get("relay_pid") is not None; raise SystemExit(1 if residue else 0)' \
+      <<<"$status" || return 1
+  fi
+  [[ ! -e "$EG_RUNTIME_DIR" && ! -L "$EG_RUNTIME_DIR" ]]
+}
+
+compatibility_handoff_validate(){
+  (( HANDOFF_MODE == 1 && PROVIDER_MODE == 0 )) || return 1
+  [[ "${GROK_HANDOFF_OWNER_EPOCH:-}" =~ ^[A-Za-z0-9._:+@-]{1,128}$ ]] \
+    || { eg_err "invalid compatibility-handoff owner"; return 1; }
+  [[ "${GROK_HANDOFF_RELEASE_ID:-}" =~ ^[0-9a-f]{64}$ ]] \
+    || { eg_err "invalid compatibility-handoff release"; return 1; }
+  [[ "$(fence_owner_epoch 2>/dev/null)" == "$GROK_HANDOFF_OWNER_EPOCH" ]] \
+    || { eg_err "compatibility-handoff does not own the recovery fence"; return 1; }
+  [[ "$(release_identity 2>/dev/null)" == "$GROK_HANDOFF_RELEASE_ID" ]] \
+    || { eg_err "compatibility-handoff release mismatch"; return 1; }
+  [[ "$PORT" == 1080 ]] \
+    || { eg_err "compatibility-handoff supports only the stable public port 1080"; return 1; }
+}
+
+LEGACY_LOCK_PID=""
+LEGACY_LOCK_READ=""
+LEGACY_LOCK_WRITE=""
+
+release_legacy_session_lock(){
+  if [[ -n "${LEGACY_LOCK_WRITE:-}" ]]; then
+    printf 'STOP\n' >&"$LEGACY_LOCK_WRITE" 2>/dev/null || true
+    exec {LEGACY_LOCK_WRITE}>&-
+  fi
+  if [[ -n "${LEGACY_LOCK_READ:-}" ]]; then
+    exec {LEGACY_LOCK_READ}<&-
+  fi
+  if [[ -n "${LEGACY_LOCK_PID:-}" ]]; then
+    wait "$LEGACY_LOCK_PID" 2>/dev/null || true
+  fi
+  LEGACY_LOCK_PID=""
+  LEGACY_LOCK_READ=""
+  LEGACY_LOCK_WRITE=""
+}
+
+acquire_legacy_session_lock(){
+  local ready=""
+  [[ -z "${LEGACY_LOCK_PID:-}" ]] || return 1
+  coproc GROK_LEGACY_LOCK {
+    exec python3 /dev/fd/3 "$PRIVATE_DIR" 3<<'PY'
+import ctypes
+import fcntl
+import os
+from pathlib import Path
+import signal
+import stat
+import sys
+
+parent_pid = os.getppid()
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+    raise OSError(ctypes.get_errno(), "cannot set parent-death signal")
+if os.getppid() != parent_pid:
+    raise RuntimeError("handoff parent exited during lock setup")
+
+parent_path = Path(sys.argv[1])
+directory_flags = (
+    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+file_flags = os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+allowed_modes = {0o600, 0o640, 0o644, 0o660, 0o664}
+parent_fd = os.open(parent_path, directory_flags)
+lock_fd = -1
+try:
+    parent_info = os.fstat(parent_fd)
+    if (
+        not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != os.getuid()
+        or stat.S_IMODE(parent_info.st_mode) & 0o002
+    ):
+        raise RuntimeError("unsafe legacy lock parent")
+    created = False
+    try:
+        lock_fd = os.open(".grok-remote.lock", file_flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        try:
+            lock_fd = os.open(
+                ".grok-remote.lock",
+                file_flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            created = True
+        except FileExistsError:
+            lock_fd = os.open(".grok-remote.lock", file_flags, dir_fd=parent_fd)
+    info = os.fstat(lock_fd)
+    mode = stat.S_IMODE(info.st_mode)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or mode not in allowed_modes
+        or mode & 0o113
+        or info.st_size != 0
+        or info.st_nlink != 1
+        or info.st_dev != parent_info.st_dev
+    ):
+        raise RuntimeError("unsafe legacy singleton lock")
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    named = os.stat(
+        ".grok-remote.lock", dir_fd=parent_fd, follow_symlinks=False
+    )
+    if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+        raise RuntimeError("legacy singleton lock identity changed")
+    os.fchmod(lock_fd, 0o600)
+    os.fsync(lock_fd)
+    if created:
+        os.fsync(parent_fd)
+    print("READY", flush=True)
+    for command in sys.stdin:
+        command = command.rstrip("\n")
+        if command == "STOP":
+            break
+        if command != "CHECK":
+            raise RuntimeError("invalid legacy lock-holder command")
+        current = os.fstat(lock_fd)
+        named = os.stat(
+            ".grok-remote.lock", dir_fd=parent_fd, follow_symlinks=False
+        )
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.getuid()
+            or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_size != 0
+            or (named.st_dev, named.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise RuntimeError("legacy singleton lock changed while held")
+        print("HELD", flush=True)
+finally:
+    if lock_fd >= 0:
+        os.close(lock_fd)
+    os.close(parent_fd)
+PY
+  }
+  LEGACY_LOCK_PID="$GROK_LEGACY_LOCK_PID"
+  LEGACY_LOCK_READ="${GROK_LEGACY_LOCK[0]}"
+  LEGACY_LOCK_WRITE="${GROK_LEGACY_LOCK[1]}"
+  if ! IFS= read -r -t 5 -u "$LEGACY_LOCK_READ" ready || [[ "$ready" != READY ]]; then
+    eg_err "cannot safely acquire the legacy grok-remote singleton lock"
+    release_legacy_session_lock
+    return 1
+  fi
+  legacy_session_lock_check
+}
+
+legacy_session_lock_check(){
+  local reply=""
+  [[ -n "${LEGACY_LOCK_PID:-}" && -n "${LEGACY_LOCK_READ:-}" \
+     && -n "${LEGACY_LOCK_WRITE:-}" ]] || return 1
+  kill -0 "$LEGACY_LOCK_PID" 2>/dev/null || return 1
+  printf 'CHECK\n' >&"$LEGACY_LOCK_WRITE" 2>/dev/null || return 1
+  IFS= read -r -t 5 -u "$LEGACY_LOCK_READ" reply || return 1
+  [[ "$reply" == HELD ]]
+}
+
+compatibility_handoff_locked(){
+  local rung="" pid="" status
+  legacy_session_lock_check || return 1
+  # This root-authenticated proof runs before any provider teardown.  A live
+  # legacy VPN is deliberately refused; it is never adopted into a new ledger.
+  vpn_broker_call migrate-legacy >/dev/null || return 1
+  legacy_session_lock_check || return 1
+  if [[ -e "$STATE" || -L "$STATE" ]]; then
+    [[ -f "$STATE" && ! -L "$STATE" \
+       && "$(stat -c %u "$STATE" 2>/dev/null)" == "$(id -u)" ]] \
+      || { eg_err "unsafe legacy egress state"; return 1; }
+    rung="$(active_rung)" \
+      || { eg_err "malformed legacy egress state"; return 1; }
+  fi
+  case "$rung" in
+    local:*) legacy_session_lock_check && local_down \
+               && legacy_session_lock_check || return 1 ;;
+    iphone|vpn|direct|"") ;;
+    *) return 1 ;;
+  esac
+  if [[ "$rung" != local:* && ( -e "$CTL" || -L "$CTL" ) ]]; then
+    eg_err "legacy SSH control socket is not owned by the recorded rung"
+    return 1
+  fi
+  if [[ -L "$IPHONE_PID" || -L "$IPHONE_PID_IDENTITY" || -L "$IPHONE_SOCKET" ]]; then
+    eg_err "unsafe legacy iPhone runtime link"
+    return 1
+  fi
+  pid="$(pid_from_file "$IPHONE_PID")" || true
+  if [[ -n "$pid" && ! -e "$IPHONE_PID_IDENTITY" ]]; then
+    iphone_process_identity adopt "$pid" \
+      || { eg_err "legacy iPhone PID cannot be adopted exactly"; return 1; }
+  fi
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
+     && ! iphone_process_alive "$pid"; then
+    eg_err "legacy iPhone PID does not match its exact argv/runtime"
+    return 1
+  elif [[ -n "$pid" || -e "$IPHONE_PID_IDENTITY" || -e "$IPHONE_SOCKET" ]]; then
+    legacy_session_lock_check && iphone_down \
+      && legacy_session_lock_check || return 1
+  fi
+  # Repeat the authenticated migration after user-side teardown.  This closes
+  # a legacy-launch/recreation window before recovery and final status.
+  legacy_session_lock_check || return 1
+  vpn_broker_call migrate-legacy >/dev/null || return 1
+  legacy_session_lock_check || return 1
+  vpn_broker_call recover >/dev/null || return 1
+  legacy_session_lock_check || return 1
+  status="$(vpn_broker_call status 2>/dev/null)" || return 1
+  legacy_session_lock_check || return 1
+  python3 -c 'import json,sys; v=json.load(sys.stdin); flags=("active","namespace_alive","tun_alive","host_tun_alive","vpn_alive","relay_alive","root_artifact_residue"); fields={"ok",*flags,"relay_pid","ledger"}; valid=type(v) is dict and set(v)==fields and v.get("ok") is True and all(type(v.get(name)) is bool for name in flags); residue=(not valid) or any(v.get(name) is True for name in flags) or v.get("ledger") is not None or v.get("relay_pid") is not None; raise SystemExit(1 if residue else 0)' \
+    <<<"$status" || return 1
+  clear_active || return 1
+  legacy_session_lock_check || return 1
+  [[ ! -e "$CTL" && ! -L "$CTL" \
+     && ! -e "$IPHONE_PID" && ! -L "$IPHONE_PID" \
+     && ! -e "$IPHONE_PID_IDENTITY" && ! -L "$IPHONE_PID_IDENTITY" \
+     && ! -e "$IPHONE_SOCKET" && ! -L "$IPHONE_SOCKET" \
+     && ! -e "$SOCKS_PID" && ! -L "$SOCKS_PID" ]] || return 1
+  [[ -z "$(port_owner_pid)" ]] || return 1
+  ! port_listening
+}
+
+compatibility_handoff_command(){
+  local rc
+  compatibility_handoff_validate || return 1
+  acquire_legacy_session_lock || return 1
+  compatibility_handoff_locked
+  rc=$?
+  release_legacy_session_lock
+  return "$rc"
+}
+
 # ---------------------------------------------------------------- standalone CLI
 
 standalone_mutation_lock(){
-  command -v flock >/dev/null 2>&1 || { eg_err "flock is required to protect the shared egress"; return 1; }
-  exec 9>"$SESSION_LOCK"
-  flock -n 9 || { eg_err "another grok-remote session owns the shared egress ($SESSION_LOCK)"; return 1; }
+  acquire_stable_mutation_lock
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   case "${1:-status}" in
+    provider-up) [[ $# == 2 ]] || exit 2
+            provider_up_command "$2" ;;
+    provider-next) [[ $# == 2 ]] || exit 2
+            provider_next_command "$2" ;;
+    provider-recover) [[ $# == 2 ]] || exit 2
+            provider_recover_command "$2" ;;
+    provider-stop) [[ $# == 2 ]] || exit 2
+            provider_stop_command "$2" ;;
+    provider-prove-empty) [[ $# == 2 ]] || exit 2
+            provider_prove_empty_command "$2" ;;
+    compatibility-handoff) [[ $# == 1 ]] || exit 2
+            compatibility_handoff_command ;;
     select) standalone_mutation_lock || exit 1
             select_egress && { eg_ok "active: $(active_rung)  egress IP: $(egress_ip "$( [[ $(active_rung) == direct ]] && echo '' || echo "$PROXY" )")"; exit 0; }
             eg_err "no usable egress"; exit 1 ;;
@@ -913,6 +2491,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             rung_alive "$r" && eg_ok "active: $r (alive)" || eg_warn "active: $r (DOWN)" ;;
     ip)     egress_ip; echo ;;
     stop)   standalone_mutation_lock || exit 1; teardown_all; eg_ok "egress torn down" ;;
-    *)      echo "usage: $0 {select|watch|status|ip|stop}" >&2; exit 1 ;;
+    *)      echo "usage: $0 {select|watch|status|ip|stop|compatibility-handoff|provider-up RUNG|provider-next vpn|provider-recover RUNG|provider-stop RUNG|provider-prove-empty RUNG}" >&2; exit 1 ;;
   esac
 fi

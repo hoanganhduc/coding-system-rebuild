@@ -62,6 +62,11 @@ make push      # leak-scans again, then publishes (always manual)
 # owner-data snapshot (research data/sessions/memory) via openclaw-bot/backup.sh
 ```
 
+For Grok, edit public implementation files in `~/grok-proxy`. Backup capture
+mirrors only the manifest-allowlisted public source into `system/grok-proxy`;
+private credentials and generated state stay outside that snapshot. Production
+`grok-remote` still runs only from a qualified root-owned immutable release.
+
 ## Target matrix
 
 | | amd64 | arm64 (origin) |

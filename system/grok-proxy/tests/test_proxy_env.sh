@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+export HOME="$tmp/home"
+mkdir -p "$HOME/grok-proxy"
 mkdir -p "$tmp/target" "$tmp/bin"
 cp "$ROOT/egress.sh" "$tmp/target/egress.sh"
 cp "$ROOT/grok-remote" "$tmp/target/grok-remote"

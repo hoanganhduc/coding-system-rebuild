@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 listener=""
+export HOME="$tmp/home"
+mkdir -p "$HOME/grok-proxy"
 cleanup(){
   [[ -n "$listener" ]] && kill "$listener" 2>/dev/null || true
   if [[ -s "$tmp/target/state/tailscaled.pid" ]]; then kill "$(cat "$tmp/target/state/tailscaled.pid")" 2>/dev/null || true; fi
@@ -27,6 +29,35 @@ install -m 700 "$ROOT/tests/fixtures/fake-tailscaled.py" "$tmp/fake-tailscaled"
 mkdir -p "$tmp/target/state"
 printf '%s\n' n-test-phone > "$tmp/target/state/exit-node"
 printf '%s\n' n-test-phone > "$tmp/target/state/ready"
+
+# A pre-existing runtime log link must never be followed or truncated.
+printf '%s\n' sentinel-log-content > "$tmp/log-sentinel"
+ln -s "$tmp/log-sentinel" "$tmp/target/state/tailscaled.log"
+(
+  export GROK_PROXY_PORT="$port"
+  export GROK_TAILSCALE_BIN="$tmp/fake-tailscale"
+  export GROK_TAILSCALED_BIN="$tmp/fake-tailscaled"
+  export GROK_IPHONE_STATE_DIR="$tmp/target/state"
+  . "$tmp/target/egress.sh"
+  ! iphone_start
+)
+[[ "$(cat "$tmp/log-sentinel")" == sentinel-log-content ]]
+[[ -L "$tmp/target/state/tailscaled.log" ]]
+rm "$tmp/target/state/tailscaled.log"
+mkfifo "$tmp/target/state/tailscaled.log"
+fifo_rc=0
+timeout 2 bash -c '
+  export GROK_PROXY_PORT="$1"
+  export GROK_TAILSCALE_BIN="$2"
+  export GROK_TAILSCALED_BIN="$3"
+  export GROK_IPHONE_STATE_DIR="$4"
+  . "$5"
+  iphone_start
+' bash "$port" "$tmp/fake-tailscale" "$tmp/fake-tailscaled" \
+  "$tmp/target/state" "$tmp/target/egress.sh" || fifo_rc=$?
+[[ "$fifo_rc" -ne 124 ]]
+[[ -p "$tmp/target/state/tailscaled.log" ]]
+rm "$tmp/target/state/tailscaled.log"
 
 (
   export GROK_PROXY_PORT="$port"
@@ -52,13 +83,29 @@ printf '%s\n' n-test-phone > "$tmp/target/state/ready"
   printf '%s\n' n-wrong-phone > "$IPHONE_NODE_FILE"
   ! iphone_exit_online
   printf '%s\n' n-test-phone > "$IPHONE_NODE_FILE"
+  rm -f "$IPHONE_PID_IDENTITY"
+  printf '%s\n' malformed-pid > "$IPHONE_PID"
+  ! iphone_down
+  kill -0 "$pid"
+  port_listening
+  [[ "$(cat "$IPHONE_PID")" == malformed-pid ]]
+  printf '%s\n' "$pid" > "$IPHONE_PID"
+  # Teardown must signal the validated process through a retained pidfd, not
+  # issue a later numeric-PID signal after a PID-reuse window.
+  kill(){
+    [[ "${1:-}" == "-0" ]] && builtin kill "$@"
+  }
   iphone_down
+  unset -f kill
   ! port_listening
 
   export FAKE_TAILSCALE_STATUS_JSON='{"BackendState":"Running","ExitNodeStatus":{"ID":"n-phone","Online":true,"TailscaleIPs":["100.64.0.99/32"]},"Peer":{"100.64.0.99":{"ID":"n-phone","HostName":"localhost","DNSName":"iphone-xr.example.ts.net.","TailscaleIPs":["100.64.0.99"]}}}'
   printf '%s\n' iphone-xr > "$IPHONE_NODE_FILE"
   iphone_start
   iphone_exit_online
+  # A process started by the prior release has only the numeric compatibility
+  # PID. The new teardown must adopt it through argv + pidfd revalidation.
+  rm -f "$IPHONE_PID_IDENTITY"
   iphone_down
   unset FAKE_TAILSCALE_STATUS_JSON
 

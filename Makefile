@@ -45,16 +45,11 @@ endef
 
 backup-public: ## refresh state + sync --apply + leak-scan + local commit (no zip)
 	$(BACKUP_GATES)
-	@bash bin/refresh-state.sh
-	@bash bin/sync.sh --apply
-	@bash bin/leak-scan.sh
-	@git add -A && { git diff --cached --quiet && echo "backup: no changes to commit" || \
-	  { git commit -q -m "backup: $$(date -u +%F) — $$(git diff --cached --numstat | wc -l) files" && \
-	    echo "committed:" && git show --stat --oneline -s HEAD; }; }
+	@bash bin/backup-transaction.sh public
 
-backup: backup-public ## backup-public + regenerate the secrets zip
-	@bash bin/secrets-pack.sh
-	@echo "backup complete — review with 'git show', publish with 'make push'"
+backup: ## serialized backup-public + regenerate the secrets zip
+	$(BACKUP_GATES)
+	@bash bin/backup-transaction.sh full
 
 secrets-pack: ## regenerate the AES-256 secrets zip (and upload offsite; CSR_NO_OFFSITE=1 to skip)
 	@bash bin/secrets-pack.sh
@@ -86,6 +81,7 @@ test: ## self-tests: canary scan + field-set guard + rotation units + grok-proxy
 	@bash tests/leak_scan_selftest.sh
 	@bash tests/field_set_sync.sh
 	@bash tests/rotation_unit.sh
+	@python3 tests/test_stage_backup.py
 	@bash system/grok-proxy/tests/run.sh
 	@bash bin/test-roundtrip.sh
 

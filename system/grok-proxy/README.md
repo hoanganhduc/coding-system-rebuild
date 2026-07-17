@@ -14,12 +14,17 @@ when one dies.
 
 Two ideas hold this together.
 
-**One endpoint, swappable underneath.** Every rung presents grok with the *same* SOCKS5 endpoint,
+**Compatibility lane: one endpoint, swappable underneath.** Every rung presents grok with the *same* SOCKS5 endpoint,
 `127.0.0.1:1080`. That is what lets a rung be replaced without restarting grok. When a rung dies
 the port vanishes for a few seconds; grok fails closed, retries silently for about 5.5 minutes,
 then resumes the in-flight turn. Any swap that lands inside that window never reaches the
 session — measured: a home PC killed mid-generation was replaced in ~5s, grok froze for ~25s and
 then finished the same turn, exit 0, with no error shown to the user.
+
+The opt-in multi-session lane keeps a committed public listener bound and swaps
+only its private backend generation; it revokes old streams during cutover so
+clients retry through the newly qualified generation rather than seeing
+probationary traffic.
 
 **"Works" means it unlocks a model you cannot otherwise get — no model name is hardcoded.**
 The direct connection reaches grok.com perfectly well; it is just handed a smaller menu. So
@@ -89,6 +94,37 @@ break a plain `grok` run outside the tunnel, where the unlocked model does not e
 | `dist/setup-grok-proxy-windows.bat` | Windows PC | enable OpenSSH server + authorize this VM's key |
 | `dist/setup-grok-proxy-arch.sh` | Arch PC | enable sshd + authorize this VM's key |
 
+## Source, backup, and runtime ownership
+
+The Grok implementation has three deliberately separate roles:
+
+1. `~/grok-proxy` is the canonical editable authoring and backup-capture source.
+   It also contains private configuration and generated runtime state that are
+   classified separately by `MANIFEST.yaml`.
+2. `coding-system-rebuild/system/grok-proxy` is the sanitized public backup
+   snapshot. Capture replaces this snapshot from the complete allowlisted public
+   source and prunes stale public paths, while preserving repository-local
+   `.planning` and `.learnings` directories.
+3. The root-owned immutable release directories are the only production runtime
+   source. `~/.local/bin/grok-remote` is a root-owned convenience selector; the
+   selected immutable payload independently self-admits against the coherent
+   user/root selection. Exactly that user release is readable (`0555`); retained
+   inactive user releases are archived root-only (`0500`).
+
+Run `grok-remote` through the installed command. Direct execution of
+`~/grok-proxy/grok-remote`, a repository checkout, or a standalone editable
+`egress.sh` is refused for normal production use. A fresh restore populates only
+missing allowlisted public source paths. If any existing managed path differs,
+restore stops without overwriting it; merge authoring changes explicitly first.
+The install workflow stages runtime bytes from the reconciled canonical
+`~/grok-proxy` tree. The repository copy is the sanitized restore/backup source,
+not a second live implementation.
+
+Private files such as `hosts.conf`, `known_hosts`, and `id_grokproxy`, plus
+model choices, sidecar state, locks, sockets, and tunnel state, never enter the
+public snapshot. They remain encrypted-private or regenerated according to the
+manifest.
+
 ## One-time setup: home PCs
 
 **1. On each home PC**, run its setup script:
@@ -100,7 +136,13 @@ break a plain `grok` run outside the tunnel, where the unlocked model does not e
 
 Each script prints a ready-made `hosts.conf` line, e.g. `windows  100.x.y.z  YourUser  22`.
 
-**2. On this VM**, put the printed username(s) into `~/grok-proxy/hosts.conf`.
+**2. On this VM**, put the printed `hosts.conf` line(s) into
+`~/grok-proxy/hosts.conf` and the separately printed SSH host-key line(s) into
+`~/grok-proxy/known_hosts` (`chmod 600` both files). Verify the key text over a
+channel independent of the first SSH connection. If `known_hosts` is absent,
+both compatibility and opt-in home routing fall back to `accept-new`
+trust-on-first-use; that is a convenience fallback, not protection from
+interception of the first connection.
 
 ## One-time setup: iPhone exit node
 
@@ -135,7 +177,7 @@ finish steps 1–2 and rerun `grok-remote iphone-setup`.
 ## Daily use
 
 ```bash
-grok-remote                  # walk the ladder, launch grok on your model, hold the egress up
+grok-remote                  # compatibility mode: one session owns the egress
 grok-remote status           # active rung, the IP grok.com sees, and the remembered model
 grok-remote ip               # just that IP
 grok-remote --host arch      # force one home PC
@@ -147,10 +189,52 @@ grok-remote -m grok-5        # use this model, and remember it from now on
 grok-remote stop             # tear the egress down
 ```
 
-Only one mutating `grok-remote` session may own the shared proxy/state at a time. A second launch,
-`ip`, setup, or `stop` command fails fast while a session owns the lock; `status` remains available
-as a read-only check. End the active Grok process first, then run `grok-remote stop` if you do not
-want its egress left warm for reuse.
+The default compatibility mode remains a verified singleton: one mutating
+`grok-remote` command owns the legacy proxy/state at a time. A second launch,
+`ip`, setup, or `stop` command fails fast while that lock is held; `status`
+remains read-only.
+
+Set the opt-in flag on every participating launch to share one qualified
+route between simultaneous Grok processes:
+
+```bash
+GROK_MULTI_SESSION=1 grok-remote -m grok-build --single "first task"
+GROK_MULTI_SESSION=1 grok-remote -m grok-build --single "second task"
+GROK_MULTI_SESSION=1 grok-remote status
+```
+
+The opt-in supervisor accepts concurrent leases only when their concrete model
+and full typed routing contract match. They share one committed loopback SOCKS
+frontend and one provider generation, while each Grok child receives a distinct
+leader socket and session identity. A different model, route mode, home-host
+snapshot, phone identity, helper release, timeout, port, or resource limit is
+rejected before it can mutate the active route. Once the last lease exits, the
+supervisor proves exact cleanup and releases the compatibility fence. Setup,
+stop, install, rollback, and other mutating maintenance remain interlocked with
+the active generation. An explicit `-m`/`--model` is atomically remembered in
+the compatibility choice file (release qualification never changes it); with no
+saved choice, the opt-in lane reads Grok's `[models].default` setting.
+
+Release recovery is ledger-driven. Once an immutable target user/root release
+pair has been published, `install-release.py resume --apply` can finish without
+the original source checkout. If interruption occurs before publication, retry
+the install from the exact frozen source tree or abort to the recorded prior
+release; `resume` cannot recreate unpublished bytes. An upgrade may migrate the
+old inactive `/var/lib/grok-vpngate` artifacts only during an authenticated
+install CANARY with current-host passing evidence for the prior release. Any
+active or ambiguous OpenVPN, namespace, tun, listener, cgroup, FIFO, link, or
+mount state fails closed. Keep an independent root-only archive until the new
+release, rollback, and reinstall have all been verified.
+The later public warm-handoff step never deletes root artifacts; it only proves
+the installer left them absent before clearing user-side legacy state.
+Fixed qualification records bind the exact generated user and broker gate
+digests. A changed gate generator therefore cannot reuse stale load/fault
+results even if runtime files produce the same release ID. Version 1 has no
+supported reset for a completed qualification directory, so that same-ID state
+fails closed rather than becoming freshly qualifiable. Keep the exact installer
+bytes frozen for a reproducible live install, qualification, rollback, and
+reinstall exercise; a future reset/migration workflow is required before
+supporting changed-generator same-ID requalification.
 
 ## How failure is handled
 
@@ -164,10 +248,12 @@ iPhone dies   ->  restart (x2)  ->  still dead?  ->  VPN Gate server #1
 VPN #1 dies   ->  one grace cycle  ->  VPN Gate server #2  ->  #3 ...
 ```
 
-The iPhone rung is model-reprobed during repair and periodic deep checks. That matters because the
-phone can remain connected to Tailscale while moving between Wi-Fi, cellular, and roaming exits.
-A live phone whose new public egress no longer offers the pinned model is rejected and demoted;
-the running Grok process is never silently redirected to the VM's direct route.
+The compatibility watchdog model-reprobes the iPhone rung during repair and
+periodic deep checks. The opt-in v1 supervisor model-qualifies every candidate
+at admission and repair, while its periodic watchdog checks exact process and
+exit identity. Thus an opt-in phone whose egress changes is repaired and
+requalified, but a model-catalog change behind an unchanged exit IP is not
+proactively detected until traffic fails and triggers repair.
 
 Failed VPN servers are blacklisted for the session and never handed out again; the candidate list
 is refetched once every server on it has been burned. Once demoted, the ladder **stays** demoted
@@ -190,8 +276,9 @@ deleted, requests through the proxy fail rather than leaking out of the host.
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
+| `GROK_MULTI_SESSION` | *(unset)* | exact value `1` enables the same-contract multi-session supervisor; every other value uses compatibility mode |
 | `GROK_REQUIRE_MODEL` | *(unset)* | pin one model instead of the baseline rule, e.g. `grok-5`. Unset = accept any rung that unlocks something |
-| `GROK_PROXY_PORT` | `1080` | the single local SOCKS port every rung binds |
+| `GROK_PROXY_PORT` | `1080` | the shared loopback SOCKS frontend used by the active generation |
 | `GROK_RUNG_RETRIES` | `2` | repairs of the same rung before demoting |
 | `GROK_WATCH_INTERVAL` | `10` | seconds between liveness checks |
 | `GROK_DEEP_EVERY` | `6` | prove real egress every Nth check |
@@ -217,6 +304,10 @@ is deliberately outside the project tree at `~/.local/state/grok-proxy/iphone`; 
   or switching between Wi-Fi and cellular can interrupt or change its public egress. The watchdog
   repairs or demotes; it never treats peer-online status alone as proof that the model still works.
 - Traffic is `socks5h`, so DNS resolves at the egress. There is no DNS leak on any rung.
+- The shared TCP SOCKS endpoint is loopback-only but has no cross-UID peer
+  authentication. Multi-session v1 therefore supports only a single-tenant
+  host where every local account able to connect to loopback is trusted; another
+  local UID could otherwise consume the route or its bounded stream capacity.
 - VPN Gate servers are shared/datacenter IPs, and grok.com may bot-flag them even when the region
   is right — prefer the home-PC path. Their country labels are also approximate (a "VN" entry may
   exit in JP). Any non-EU exit unlocks grok-4.5, so do not rely on a *specific* country.
@@ -255,8 +346,8 @@ VPN exit that serves the model appears.
 The iPhone addition is verified with a mocked userspace `tailscaled` and LocalAPI: separate state
 and socket arguments, exact exit-node selection, exact listener ownership, setup gating, ladder
 placement, lock-FD isolation, wrong-node rejection, and fail-closed forced selection all pass.
-VPN Gate metadata validation, proxy-environment clearing, and single-session locking have dedicated
-regressions too.
+VPN Gate metadata validation, proxy-environment clearing, compatibility locking,
+and opt-in same-contract admission have dedicated regressions too.
 
 **Not yet exercised against a real iPhone data plane:** advertising and admin approval of this
 phone, the sidecar's live tailnet login, cellular public egress, locked-screen longevity, and a real

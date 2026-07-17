@@ -10,7 +10,7 @@ cleanup(){
 }
 trap cleanup EXIT
 
-GROK_SESSION_LOCK="$tmp/session.lock" READY="$tmp/ready" ROOT="$ROOT" bash -c '
+GROK_TESTING=1 GROK_TEST_CONTROL_DIR="$tmp/control" READY="$tmp/ready" ROOT="$ROOT" bash -c '
   . "$ROOT/grok-remote"
   acquire_session_lock
   : > "$READY"
@@ -21,20 +21,22 @@ for _ in $(seq 1 40); do [[ -e "$tmp/ready" ]] && break; sleep 0.05; done
 [[ -e "$tmp/ready" ]]
 
 set +e
-out="$(GROK_SESSION_LOCK="$tmp/session.lock" ROOT="$ROOT" bash -c '. "$ROOT/grok-remote"; acquire_session_lock' 2>&1)"
+out="$(GROK_TESTING=1 GROK_TEST_CONTROL_DIR="$tmp/control" ROOT="$ROOT" bash -c '. "$ROOT/grok-remote"; acquire_session_lock' 2>&1)"
 rc=$?
 set -e
 [[ $rc -ne 0 ]]
 [[ "$out" == *'another grok-remote session owns'* ]]
 
 set +e
-out="$(GROK_SESSION_LOCK="$tmp/session.lock" "$ROOT/grok-remote" stop 2>&1)"
+out="$(GROK_TESTING=1 GROK_TEST_CONTROL_DIR="$tmp/control" ROOT="$ROOT" \
+  bash -c '. "$ROOT/grok-remote"; main stop' 2>&1)"
 rc=$?
 set -e
 [[ $rc -ne 0 && "$out" == *'another grok-remote session owns'* ]]
 
 set +e
-out="$(GROK_SESSION_LOCK="$tmp/session.lock" "$ROOT/egress.sh" stop 2>&1)"
+out="$(GROK_TESTING=1 GROK_TEST_CONTROL_DIR="$tmp/control" ROOT="$ROOT" \
+  bash -c '. "$ROOT/egress.sh"; standalone_mutation_lock && teardown_all' 2>&1)"
 rc=$?
 set -e
 [[ $rc -ne 0 && "$out" == *'another grok-remote session owns'* ]]
@@ -42,6 +44,6 @@ set -e
 kill "$holder"
 wait "$holder" 2>/dev/null || true
 holder=""
-GROK_SESSION_LOCK="$tmp/session.lock" ROOT="$ROOT" bash -c '. "$ROOT/grok-remote"; acquire_session_lock'
+GROK_TESTING=1 GROK_TEST_CONTROL_DIR="$tmp/control" ROOT="$ROOT" bash -c '. "$ROOT/grok-remote"; acquire_session_lock'
 
 echo "PASS: concurrent launches and mutating stop commands cannot race the shared egress"
