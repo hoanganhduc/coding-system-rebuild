@@ -226,8 +226,9 @@ BASELINE="$PRIVATE_DIR/.baseline.models"            # what the VM is offered wit
 BASELINE_TTL="${GROK_BASELINE_TTL:-21600}"        # re-measure the baseline once it is older than this (s)
 UNLOCKED="$PRIVATE_DIR/.unlocked.models"            # models eligible on the selected route (normally its baseline delta)
 (( PROVIDER_MODE == 0 )) || UNLOCKED="$EG_RUNTIME_DIR/unlocked.models"
-# Optional pin. Left unset (the default), a rung is accepted when it unlocks any model the direct
-# egress cannot see -- see learn_baseline() for why that beats naming a model.
+# Optional pin. Left unset (the default), automatic selection accepts the first
+# preferred route with any nonempty valid catalog. A pin requires that exact
+# model during admission, repair, and demotion.
 REQUIRE_MODEL="${GROK_REQUIRE_MODEL:-}"
 RUNG_RETRIES="${GROK_RUNG_RETRIES:-2}"            # repairs of the same rung before demoting
 WATCH_INTERVAL="${GROK_WATCH_INTERVAL:-10}"       # seconds between liveness checks
@@ -912,12 +913,12 @@ rung_unlocks(){
   eg_ok "$rung: unlocks $(paste -sd, <<<"$extra")"
 }
 
-# A caller that explicitly names a host or iPhone has already chosen the route.
-# It still has to pass country policy and a real model API probe, but it need
-# not beat the direct baseline.  When a concrete target is supplied, admit
-# only that exact model; otherwise retain the complete valid catalog for the
-# normal compatibility picker or a routed `grok models` command.
-rung_offers_forced(){
+# Route preference is independent of catalog novelty. A route still has to
+# pass country policy and a real model API probe, but it need not beat the
+# direct baseline. When a concrete target is supplied, admit only that exact
+# model; otherwise retain the complete valid catalog for the compatibility
+# picker or a routed `grok models` command.
+rung_offers_available(){
   local rung="$1" proxy="$2" required="${3:-}" got hit
   discard_invalid_model_state_file "$UNLOCKED"
   if [[ -n "$required" ]] && ! model_id_valid "$required"; then
@@ -940,8 +941,11 @@ rung_offers_forced(){
   fi
 
   printf '%s\n' "$got" > "$UNLOCKED"
-  eg_ok "$rung: forced route has a usable model catalog"
+  eg_ok "$rung: route has a usable model catalog"
 }
+
+# Retained as the explicit-route API used by compatibility callers and tests.
+rung_offers_forced(){ rung_offers_available "$@"; }
 
 # Country first (free, and rejects a whole class of useless exits), models second.
 rung_probe(){
@@ -960,18 +964,22 @@ rung_probe(){
   rung_unlocks "$rung" "$proxy"
 }
 
-rung_probe_forced(){
+rung_probe_available(){
   local rung="$1" required="${2:-}" proxy="$PROXY" cc
   [[ "$rung" == direct ]] && proxy=""
   cc="$(egress_country "$proxy")"
   if [[ -n "$cc" ]] && ! country_allowed "$cc"; then
-    eg_warn "  $rung: exits in $cc — the EU / X-banned block is not an allowed forced route"
+    eg_warn "  $rung: exits in $cc — the EU / X-banned block is not an allowed route"
     return 1
   fi
   if [[ -n "$cc" ]]; then eg_log "  $rung: exits in $cc — asking grok what it offers"
   else eg_log "  $rung: egress country unknown — asking grok what it offers anyway"; fi
-  rung_offers_forced "$rung" "$proxy" "$required"
+  rung_offers_available "$rung" "$proxy" "$required"
 }
+
+# Explicit host/iPhone callers use the same availability predicate while
+# adding their exact-route watchdog policy at the caller.
+rung_probe_forced(){ rung_probe_available "$@"; }
 
 # ---------------------------------------------------------------- rung: local PC
 
@@ -1943,17 +1951,21 @@ rung_up(){
   esac
 }
 
-# Confirm a rung that was just (re)brought up is not merely alive but still serves the model the
-# session is pinned to. A reconnected VPN lands on a fresh server in a possibly different region, so
-# "the tunnel is up" says nothing about capability; likewise any pinned model must be re-checked
-# after a reconnect. A home PC with no pin has a stable region, so a liveness check is enough there.
+# Confirm a rung that was just (re)brought up is not merely alive but still
+# serves the model the session is pinned to. A reconnected VPN or phone can
+# land on a different public egress, so it is catalog-qualified even without a
+# pin. A home PC with no pin has a stable region, so liveness remains enough.
 rung_confirm(){
   if [[ "$1" == direct ]]; then return 0; fi
   if [[ -n "${FORCE_EXACT_ROUTE:-}" && "$1" == "$FORCE_EXACT_ROUTE" ]]; then
     rung_probe_forced "$1" "$REQUIRE_MODEL"
     return
   fi
-  if [[ -n "$REQUIRE_MODEL" || "$1" == vpn || "$1" == iphone ]]; then rung_probe "$1"; else rung_alive "$1"; fi
+  if [[ -n "$REQUIRE_MODEL" || "$1" == vpn || "$1" == iphone ]]; then
+    rung_probe_available "$1" "$REQUIRE_MODEL"
+  else
+    rung_alive "$1"
+  fi
 }
 
 teardown_provider_pass(){
@@ -2028,8 +2040,11 @@ ensure_selected_egress(){
   local cur=""
   cur="$(active_rung 2>/dev/null || true)"
   if ! recovery_transition_pending \
-     && [[ -n "$cur" ]] && rung_alive "$cur"; then
+     && [[ -n "$cur" && "$cur" != direct ]] && rung_alive "$cur"; then
     return 0
+  fi
+  if [[ "$cur" == direct ]]; then
+    eg_log "rechecking preferred remote routes instead of reusing direct"
   fi
   if recovery_transition_pending || [[ -e "$STATE" || -L "$STATE" ]]; then
     eg_warn "discarding stale or invalid egress ownership before selection"
@@ -2058,8 +2073,8 @@ begin_clean_route_transition(){
 
 # ---------------------------------------------------------------- the ladder
 
-# `direct` is not on the ladder. It is the reference every rung is measured against, so it can
-# never "beat" anything; it is the fallback taken only when no rung unlocks a thing (see below).
+# `direct` is not on the ladder. It is measured before the walk and is the
+# qualified fallback only when no preferred remote route is usable.
 LADDER=()
 build_ladder(){
   LADDER=()
@@ -2097,21 +2112,22 @@ vpn_stable(){
 }
 
 try_vpn_sequence(){
-  local verb=up i=0
+  local required="${1:-$REQUIRE_MODEL}" verb=up i=0
   while (( i < VPN_MAX_TRIES )); do
     if ! vpn_up "$verb"; then eg_warn "  no further VPN Gate server came up"; return 1; fi
-    if rung_probe vpn && vpn_stable; then return 0; fi
+    if rung_probe_available vpn "$required" && vpn_stable; then return 0; fi
     verb=next; i=$((i+1))
   done
   eg_warn "  exhausted $VPN_MAX_TRIES VPN Gate servers"
   return 1
 }
 
-# Walk the ladder from $1 (default: the top) and settle on the first rung that unlocks something.
-# $2=0 forbids the direct fallback: when demoting, the rung being abandoned HAD unlocked models, so
-# landing on direct would silently downgrade the session and unmask the VM's region.
+# Walk the ladder from $1 (default: the top) and settle on the first usable
+# route in configured priority order. $2=0 forbids direct fallback during
+# demotion/reacquisition. $3 optionally requires one concrete model.
 select_egress(){
-  local start="${1:-0}" direct_fallback="${2:-1}" i rung current
+  local start="${1:-0}" direct_fallback="${2:-1}" required="${3:-$REQUIRE_MODEL}"
+  local i rung current direct_ok=0
   if recovery_transition_pending || [[ -e "$STATE" || -L "$STATE" ]]; then
     current="$(active_rung 2>/dev/null || true)"
     eg_err "selection requires proved-empty ownership state${current:+ (currently $current)}"
@@ -2125,7 +2141,7 @@ select_egress(){
     rung="${LADDER[$i]}"
     eg_log "trying rung: $rung"
     if [[ "$rung" == vpn ]]; then
-      if try_vpn_sequence; then
+      if try_vpn_sequence "$required"; then
         end_recovery_transition || return 1
         return 0
       fi
@@ -2144,7 +2160,7 @@ select_egress(){
       fi
       continue
     fi
-    if rung_probe "$rung"; then
+    if rung_probe_available "$rung" "$required"; then
       end_recovery_transition || return 1
       return 0
     fi
@@ -2154,14 +2170,25 @@ select_egress(){
     fi
     clear_active || return 1
   done
-  # Nothing on the ladder offered anything the VM cannot already see. Routing buys nothing, so take
-  # the cheapest path -- but only here, at selection time, never as a demotion.
+  if [[ -s "$BASELINE" ]]; then
+    if [[ -z "$required" ]] || grep -qxF -- "$required" "$BASELINE"; then
+      direct_ok=1
+    fi
+  fi
+  # Direct is a qualified initial fallback only, never a demotion target.
   if [[ "$direct_fallback" == 1 && "$ALLOW_DIRECT" == 1 ]]; then
-    eg_warn "no egress unlocks anything beyond the direct connection — falling back to direct"
-    rm -f "$UNLOCKED"
-    set_active direct || return 1
-    end_recovery_transition || return 1
-    return 0
+    if (( direct_ok )); then
+      eg_warn "no preferred remote route is usable — falling back to qualified direct"
+      rm -f "$UNLOCKED"
+      set_active direct || return 1
+      end_recovery_transition || return 1
+      return 0
+    fi
+    if [[ -n "$required" ]]; then
+      eg_warn "direct fallback does not offer required model $required"
+    else
+      eg_warn "direct fallback has no usable model catalog"
+    fi
   fi
   # A probing walk that comes up empty must not leave a rung named in the state: try_vpn_sequence
   # sets 'vpn' active before its probe, so without this the caller would see a phantom vpn rung.
@@ -2182,7 +2209,7 @@ demote(){
     local verb=next i=0
     while (( i < VPN_MAX_TRIES )); do
       if ! vpn_up "$verb"; then break; fi
-      if rung_probe vpn && vpn_stable; then
+      if rung_probe_available vpn "$REQUIRE_MODEL" && vpn_stable; then
         end_recovery_transition || return 1
         return 0
       fi

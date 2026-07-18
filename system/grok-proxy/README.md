@@ -1,9 +1,9 @@
 # grok-proxy — run grok through an egress that actually offers the model you want
 
-grok.com can offer different model menus by the region of the requesting IP. When a remote VM's
-direct egress lacks a model that a trusted home connection offers, `grok-remote` picks the best
-qualifying egress, then holds it up for as long as grok runs and fails over underneath the session
-when one dies.
+grok.com can offer different model menus by the region of the requesting IP. `grok-remote` walks
+trusted routes in configured priority order, takes the first healthy route with a usable model
+catalog, then holds it up for as long as grok runs and fails over underneath the session when one
+dies.
 
 ```
   home PC over Tailscale  >  iPhone exit node  >  VPN Gate servers ...  [direct = selection fallback]
@@ -26,17 +26,20 @@ only its private backend generation; it revokes old streams during cutover so
 clients retry through the newly qualified generation rather than seeing
 probationary traffic.
 
-**"Works" means it unlocks a model you cannot otherwise get — no model name is hardcoded.**
-The direct connection reaches grok.com perfectly well; it is just handed a smaller menu. So
-grok-remote measures what this VM is offered with *no* tunnel (the **baseline**), then takes the
-first rung that offers something the baseline does not have, and tells you what that was.
+**"Works" means the preferred route can actually serve the session — no model name is hardcoded.**
+grok-remote measures what this VM is offered with *no* tunnel (the **baseline**) for diagnostics
+and direct-fallback qualification. It then takes the first configured remote rung that passes
+country policy, reaches the Grok model API, and offers the required model (or any nonempty valid
+catalog when no model is pinned). An equal catalog is still useful routing: a healthy Windows home
+route is selected immediately instead of being discarded while unavailable phones and VPNs are
+tried.
 
 This is deliberately *not* a version comparison. The id space holds `grok-4.20-0309-reasoning`,
 `grok-420-computer-v0`, `grok-build` and `grok-composer-2.5-fast`, and carries no release date, so
 "pick the highest number" would cheerfully crown `grok-420-computer-v0` the newest chat model.
-What the region gate hides is, by definition, whatever direct cannot see — so that is what gets
-tested. It never goes stale when xAI ships the next flagship, and it self-corrects: a model that
-becomes available *everywhere* simply joins the baseline instead of looking like an unlock.
+The baseline still identifies and reports what a route adds, but a catalog delta is not an
+admission requirement. This avoids turning a newly global model into a reason to reject every
+healthy preferred route.
 
 Each rung is probed by exit country first (free, and rejects the EU / X-banned block outright),
 then by `grok models` through that rung — one API round-trip, no inference tokens.
@@ -75,10 +78,10 @@ that serves your model appears, it is picked up and grok resumes.
 grok-remote never writes grok's own `[models] default` in `~/.grok/config.toml` — doing so would
 break a plain `grok` run outside the tunnel, where the unlocked model does not exist.
 
-> **Invariant: a *demotion* never lands on `direct`.** The rung being abandoned had unlocked
-> models, so dropping to direct would silently downgrade the session *and* unmask the VM's real
-> region — the exact thing this tool exists to prevent. Direct is taken only at selection time, and
-> only when no rung unlocks anything at all, i.e. when a tunnel would buy you nothing.
+> **Invariant: a *demotion* never lands on `direct`.** Dropping a live remote session to direct
+> would silently change its route and unmask the VM's real region. Direct is considered only during
+> initial selection, after every configured remote rung is unavailable or unusable, and only when
+> the direct catalog can serve the request.
 
 ## Files
 
@@ -194,17 +197,17 @@ The default compatibility mode remains a verified singleton: one mutating
 `ip`, setup, or `stop` command fails fast while that lock is held; `status`
 remains read-only.
 
-Explicit host and iPhone selection is intentionally different from automatic
-discovery. Automatic mode uses a home PC or phone only when it adds a model
-beyond the direct baseline. `--host LABEL` and `--iphone` instead honor the
-requested route when it is healthy, passes country policy, reaches the model
-API, and offers the explicit, environment-pinned, or nonempty remembered
-model—even if direct now offers that model too. With no concrete preference, a
+Automatic discovery and explicit selection share the same route-usability
+checks. Automatic mode walks the configured home-PC, phone, and VPN priority
+and takes the first healthy route with a usable catalog, even when direct has
+the same models. `--host LABEL` and `--iphone` additionally bind the session to
+the requested exact route. They require the explicit, environment-pinned, or
+nonempty remembered model when one exists. With no concrete preference, a
 forced model picker or routed `models` command receives the route's complete
 valid catalog. An intentionally empty remembered choice continues to mean “let
-Grok decide.” The watchdog preserves that exact route: it repairs or reacquires
-only the named host or configured phone and never silently demotes an explicit
-session to another home PC, iPhone, VPN, or direct. If exact teardown cannot
+Grok decide.” The exact-route watchdog repairs or reacquires only the named
+host or configured phone and never silently demotes an explicit session to
+another home PC, iPhone, VPN, or direct. If exact teardown cannot
 prove that the old control master/listener stopped, the ownership record is
 retained and no replacement is raised over it. Home-host startup records the
 validated cleanup destination before OpenSSH starts, so publication failure is

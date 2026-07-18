@@ -33,7 +33,7 @@ printf '%s\n' 'pc 100.64.0.2 user 22' > "$tmp/target/hosts.conf"
   # egress can change while the Tailscale peer remains online.
   REQUIRE_MODEL=""
   confirm_log="$tmp/confirm"
-  rung_probe(){ printf '%s\n' "$1" > "$confirm_log"; }
+  rung_probe_available(){ printf '%s\n' "$1" > "$confirm_log"; }
   rung_alive(){ return 1; }
   rung_confirm iphone
   [[ "$(cat "$confirm_log")" == iphone ]]
@@ -184,7 +184,7 @@ printf '%s\n' 'pc 100.64.0.2 user 22' > "$tmp/target/hosts.conf"
     [[ "$1" == local:pc ]] || { : > "$tmp/automatic-host-probe-next-rung"; return 1; }
     set_active local:pc user@100.64.0.2 22
   }
-  rung_probe(){ return 1; }
+  rung_probe_available(){ return 1; }
   rung_down(){ [[ "$1" == local:pc ]] || return 97; return 1; }
   try_vpn_sequence(){ : > "$tmp/automatic-host-probe-vpn"; return 1; }
   ! select_egress
@@ -371,7 +371,7 @@ printf '%s\n' 'pc 100.64.0.2 user 22' > "$tmp/target/hosts.conf"
   set_active iphone 100.64.0.99
   acquire_session_lock(){ :; }
   rung_alive(){ :; }
-  rung_probe(){ printf '%s\n' "$1" > "$tmp/reuse-probe"; return 1; }
+  rung_probe_available(){ printf '%s\n' "$1" > "$tmp/reuse-probe"; return 1; }
   rung_down(){ printf '%s\n' "$1" > "$tmp/reuse-down"; }
   select_egress(){ set_active vpn; }
   launch(){ active_rung > "$tmp/reuse-launch"; }
@@ -395,7 +395,7 @@ set +e
   set_active iphone 100.64.0.99
   acquire_session_lock(){ :; }
   rung_alive(){ :; }
-  rung_probe(){ return 1; }
+  rung_probe_available(){ return 1; }
   rung_down(){ : > "$tmp/reuse-phone-cleanup-failed"; return 1; }
   select_egress(){ : > "$tmp/reuse-phone-cleanup-selected"; return 1; }
   launch(){ : > "$tmp/reuse-phone-cleanup-launched"; }
@@ -1213,6 +1213,163 @@ set -e
   ! rung_probe iphone
   ! rung_probe local:pc
   [[ ! -s "$UNLOCKED" ]]
+)
+
+# Initial automatic selection follows configured route priority. A healthy
+# first home route with a nonempty equal catalog must be committed immediately;
+# later phone/VPN rungs and direct fallback must remain untouched.
+(
+  export GROK_IPHONE_STATE_DIR="$tmp/automatic-equal-home-priority-phone"
+  . "$tmp/target/egress.sh"
+  rm -f "$RECOVERY_MARKER"
+  clear_active
+  rm -f "$RECOVERY_MARKER"
+  BASELINE="$tmp/automatic-equal-home-priority-baseline"
+  UNLOCKED="$tmp/automatic-equal-home-priority-unlocked"
+  ALLOW_DIRECT=1
+  begin_clean_route_transition(){ begin_recovery_transition; }
+  learn_baseline(){ printf '%s\n' grok-4.5 > "$BASELINE"; }
+  build_ladder(){ LADDER=(local:windows iphone vpn); }
+  rung_up(){
+    if [[ "$1" == local:windows ]]; then
+      set_active local:windows fixture@windows 22
+      return 0
+    fi
+    : > "$tmp/automatic-equal-home-priority-later-rung"
+    return 1
+  }
+  rung_probe(){ return 1; }
+  rung_probe_available(){
+    [[ "$1" == local:windows && -z "${2:-}" ]]
+    printf '%s\n' grok-4.5 > "$UNLOCKED"
+  }
+  rung_down(){ clear_active; }
+  try_vpn_sequence(){
+    : > "$tmp/automatic-equal-home-priority-vpn"
+    return 1
+  }
+  select_egress
+  [[ "$(active_rung)" == local:windows ]]
+  [[ "$(cat "$UNLOCKED")" == grok-4.5 ]]
+  [[ ! -e "$tmp/automatic-equal-home-priority-later-rung" \
+     && ! -e "$tmp/automatic-equal-home-priority-vpn" ]]
+  clear_active
+  rm -f "$RECOVERY_MARKER"
+)
+
+# An unavailable earlier host is skipped, but the first later usable host still
+# wins before phone, VPN, or direct fallback.
+(
+  export GROK_IPHONE_STATE_DIR="$tmp/automatic-next-home-phone"
+  . "$tmp/target/egress.sh"
+  rm -f "$RECOVERY_MARKER"
+  clear_active
+  rm -f "$RECOVERY_MARKER"
+  BASELINE="$tmp/automatic-next-home-baseline"
+  UNLOCKED="$tmp/automatic-next-home-unlocked"
+  begin_clean_route_transition(){ begin_recovery_transition; }
+  learn_baseline(){ printf '%s\n' grok-4.5 > "$BASELINE"; }
+  build_ladder(){ LADDER=(local:arch local:windows iphone vpn); }
+  rung_up(){
+    printf '%s\n' "$1" >> "$tmp/automatic-next-home-order"
+    [[ "$1" == local:arch ]] && return 1
+    if [[ "$1" == local:windows ]]; then
+      set_active local:windows fixture@windows 22
+      return 0
+    fi
+    return 1
+  }
+  rung_probe_available(){ printf '%s\n' grok-4.5 > "$UNLOCKED"; }
+  try_vpn_sequence(){ : > "$tmp/automatic-next-home-vpn"; return 1; }
+  select_egress
+  [[ "$(active_rung)" == local:windows ]]
+  [[ "$(cat "$tmp/automatic-next-home-order")" == $'local:arch\nlocal:windows' ]]
+  [[ ! -e "$tmp/automatic-next-home-vpn" ]]
+  clear_active
+  rm -f "$RECOVERY_MARKER"
+)
+
+# A concrete automatic model requirement is passed to every route probe. A
+# route that lacks it is cleaned up before the next candidate is admitted.
+(
+  export GROK_IPHONE_STATE_DIR="$tmp/automatic-required-model-phone"
+  . "$tmp/target/egress.sh"
+  rm -f "$RECOVERY_MARKER"
+  clear_active
+  rm -f "$RECOVERY_MARKER"
+  BASELINE="$tmp/automatic-required-model-baseline"
+  UNLOCKED="$tmp/automatic-required-model-unlocked"
+  begin_clean_route_transition(){ begin_recovery_transition; }
+  learn_baseline(){ printf '%s\n' grok-required > "$BASELINE"; }
+  build_ladder(){ LADDER=(local:first local:second); }
+  rung_up(){ set_active "$1" "fixture@${1#local:}" 22; }
+  rung_probe_available(){
+    [[ "${2:-}" == grok-required ]]
+    [[ "$1" == local:first ]] && return 1
+    printf '%s\n' grok-required > "$UNLOCKED"
+  }
+  rung_down(){
+    printf '%s\n' "$1" > "$tmp/automatic-required-model-down"
+    clear_active
+  }
+  select_egress 0 1 grok-required
+  [[ "$(active_rung)" == local:second ]]
+  [[ "$(cat "$tmp/automatic-required-model-down")" == local:first ]]
+  clear_active
+  rm -f "$RECOVERY_MARKER"
+)
+
+# Direct fallback is catalog-qualified. It cannot satisfy a missing concrete
+# model and remains prohibited when ALLOW_DIRECT is zero.
+(
+  export GROK_IPHONE_STATE_DIR="$tmp/automatic-direct-model-phone"
+  . "$tmp/target/egress.sh"
+  rm -f "$RECOVERY_MARKER"
+  clear_active
+  rm -f "$RECOVERY_MARKER"
+  BASELINE="$tmp/automatic-direct-model-baseline"
+  UNLOCKED="$tmp/automatic-direct-model-unlocked"
+  baseline_value=grok-build
+  begin_clean_route_transition(){ begin_recovery_transition; }
+  build_ladder(){ LADDER=(); }
+  learn_baseline(){ printf '%s\n' "$baseline_value" > "$BASELINE"; }
+  ! select_egress 0 1 grok-required
+  [[ -z "$(active_rung 2>/dev/null || true)" ]]
+  baseline_value=grok-required
+  select_egress 0 1 grok-required
+  [[ "$(active_rung)" == direct ]]
+  clear_active
+  rm -f "$RECOVERY_MARKER"
+  ALLOW_DIRECT=0
+  ! select_egress 0 1 grok-required
+  [[ -z "$(active_rung 2>/dev/null || true)" ]]
+  rm -f "$RECOVERY_MARKER"
+)
+
+# A prior direct fallback is not sticky. A later bare invocation tears down
+# that state and re-walks preferred routes, passing an explicit model through
+# to automatic admission.
+(
+  export GROK_IPHONE_STATE_DIR="$tmp/automatic-direct-rewalk-phone"
+  . "$tmp/target/grok-remote"
+  rm -f "$RECOVERY_MARKER"
+  clear_active
+  rm -f "$RECOVERY_MARKER"
+  set_active direct
+  acquire_session_lock(){ :; }
+  rung_alive(){ :; }
+  teardown_all(){ : > "$tmp/automatic-direct-rewalk-down"; clear_active; }
+  select_egress(){
+    printf '%s\n' "${3:-}" > "$tmp/automatic-direct-rewalk-model"
+    set_active local:windows fixture@windows 22
+  }
+  launch(){ active_rung > "$tmp/automatic-direct-rewalk-launch"; }
+  main -m grok-required
+  [[ -e "$tmp/automatic-direct-rewalk-down" ]]
+  [[ "$(cat "$tmp/automatic-direct-rewalk-model")" == grok-required ]]
+  [[ "$(cat "$tmp/automatic-direct-rewalk-launch")" == local:windows ]]
+  clear_active
+  rm -f "$RECOVERY_MARKER"
 )
 
 for stale in iphone vpn; do

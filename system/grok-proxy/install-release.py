@@ -219,6 +219,11 @@ DIRECT_ADMISSION_PRODUCTION_PATHS = (
 DIRECT_ADMISSION_PRODUCTION_BUNDLES = frozenset(
     {
         (
+            "b63cab9772bdc2b93f05ff58a45015b451f6bd66c81ef96b8dd2ae6bb97a7587",
+            "157b08ead5f6f0a87c5374cec886ac107acaf2bf1ad362bdf799e437b19f01bb",
+            "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
+        ),
+        (
             "838d0f778768e48390c9a8a9075f4b321f86bcd19979ab9afbf4688126277fe7",
             "fc8f966fe233a54659349d3cfa18d81deaf7396d3a8a6287308a1ead7a4457b9",
             "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",

@@ -325,3 +325,34 @@
   Final inventory found no listeners on 1080/11080/11081, owned provider
   processes, `grokvpn`, `tun-grok`, Grok cgroups, compatibility state, or
   recovery marker.
+
+## Automatic preferred-route correction — 2026-07-18
+
+- [x] Reproduce bare equal-catalog Windows rejection and prove live explicit
+  Windows transport/model access succeeds.
+- [x] Add and observe a failing ordered-selector regression for equal catalogs.
+- [x] Admit the first healthy policy-compliant route with a usable catalog,
+  while preserving concrete-model, VPN-stability, ownership, and cleanup gates.
+- [x] Re-walk a prior direct fallback and qualify direct before using it.
+- [x] Cover unavailable/missing-model/blocked-country/no-direct/reuse/watchdog
+  behavior and keep forced host/iPhone regressions green.
+- [x] Bind the reviewed automatic-route entrypoints into the exact production
+  self-admission bundle while retaining hybrid rejection.
+- [x] Run focused and complete deterministic verification plus source parity
+  and leak checks.
+- [x] Install and qualify a new immutable release; prove live bare Windows
+  selection and exact final cleanup.
+
+### Final automatic preferred-route evidence — 2026-07-18
+
+- Immutable release `34bf9e56...21850` is selected and valid with no deny,
+  complete rollback eligibility, and exact installed/source wrapper hashes.
+- Bare `grok-remote models` accepted equal-catalog `local:windows` as the first
+  rung, exited in VN, listed `grok-4.5`, and did not touch later rungs.
+- Fixed `load32`, forced-loss recovery, and the real two-session Windows canary
+  passed. `home:windows` is promoted for contract `3a4cef65...b445`, and an
+  actual feature-on Windows model query passed.
+- Focused ladder tests, all 104 installer tests (five explicit root-cgroup
+  harness skips), the 18-test source-backup pipeline, source parity, diff
+  checks, and the 1,704-file leak scan passed. Final listeners, owned
+  processes, netns/tun, compatibility state/marker, and Grok cgroups are empty.

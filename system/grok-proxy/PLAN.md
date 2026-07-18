@@ -171,3 +171,26 @@ or supporting simultaneous different-route contracts.
 
 Out of scope: altering automatic ladder value policy or forced-VPN selection
 policy, making multi-session default, or changing multi-session contracts.
+
+## Post-v1 correction — automatic preferred-route admission
+
+1. Reproduce bare selection against the installed release and separately prove
+   that explicit Windows transport, country policy, and Grok model API access
+   are healthy.
+2. Add a seen-to-fail selector regression in which direct and Windows expose
+   the same catalog; require the first configured healthy Windows route to win
+   without touching later phone, VPN, or direct rungs.
+3. Replace baseline-delta admission in compatibility ladder selection with a
+   first-usable ordered predicate. Preserve concrete model requirements,
+   country/API checks, VPN stability, transactional startup/teardown, and
+   downward-only no-direct demotion. Re-walk rather than reuse a prior direct
+   fallback.
+4. Cover unavailable and invalid earlier rungs, direct/no-direct fallback,
+   forced-route non-regression, reuse, watchdog repair/demotion, and cleanup
+   uncertainty; run focused and complete deterministic suites.
+5. Capture the canonical source into the sanitized mirror, install a new
+   immutable release, and prove a live bare invocation selects Windows and
+   leaves no route residue after stop.
+
+Out of scope: making multi-session mode default, remotely enabling an offline
+or non-advertising iOS exit node, or weakening immutable-release qualification.

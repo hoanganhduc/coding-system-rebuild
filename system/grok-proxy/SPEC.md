@@ -402,6 +402,41 @@ The corrected source must be captured into the sanitized mirror and installed
 only as a newly admitted immutable release before live Windows and iPhone
 regression checks.
 
+## Compatibility automatic preferred-route correction
+
+A bare compatibility invocation selects the first usable remote route in the
+configured ladder order. A route is usable only after exact startup and
+ownership publication, known-country policy, a reachable nonempty Grok model
+catalog, and any explicit or environment-pinned model requirement all pass.
+The route does not need to add a model beyond the direct catalog. In
+particular, a healthy `local:windows` route with the same `grok-4.5` catalog as
+direct is selected immediately instead of being torn down while slower or
+unavailable phone and VPN rungs are explored.
+
+The direct catalog remains measured as a diagnostic and as the qualification
+source for direct fallback. Direct is selected only after every configured
+remote route is unavailable or unusable, and only when its catalog is nonempty
+and contains any concrete required model. `--no-direct` continues to prohibit
+that fallback. A previously selected direct route is not sticky: a later bare
+invocation re-walks the preferred remote ladder so a newly available home host
+can recover priority.
+
+Initial selection, phone/VPN revalidation, same-rung repair, and downward-only
+demotion use the same usable-catalog predicate. After launch chooses a model,
+repair and demotion remain pinned to that exact model and never demote to
+direct. An unpinned route retains its complete valid catalog for the existing
+picker; blocked countries, unreachable/empty model APIs, failed startup, and
+uncertain teardown remain fail-closed. Explicit host/iPhone exact-route
+semantics and the transactional ownership/recovery rules remain unchanged.
+
+Acceptance requires a seen-to-fail ordered-selector regression for equal
+direct/Windows catalogs; proof that no later phone, VPN, or direct effect is
+attempted after Windows qualifies; unavailable-first-host, missing-model,
+blocked-country, VPN stability, direct/no-direct fallback, revalidation,
+watchdog, and cleanup regressions; canonical/backup parity; a newly admitted
+immutable release; and a live bare Windows selection with exact post-test
+cleanup.
+
 ## Risks
 
 - Grok, iOS, Tailscale, residential peers, and volunteer VPN servers can change

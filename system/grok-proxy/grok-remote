@@ -1,10 +1,10 @@
 #!/bin/bash -p
 # grok-remote — run the grok CLI through an egress that actually offers the model you want.
 #
-# grok.com gates models on the region of the requesting IP, and this VM sits in a blocked one.
-# grok-remote finds an egress that unlocks models this VM cannot otherwise see, launches grok on
-# the model you chose, and holds the egress up for as long as grok runs, failing over underneath
-# the session when one dies:
+# grok.com can vary models by requesting region. grok-remote selects the first
+# healthy configured route that can serve the request, launches grok on the
+# model you chose, and holds the egress up for as long as grok runs, failing
+# over underneath the session when one dies:
 #
 #     home PC over Tailscale  >  iPhone exit node  >  VPN Gate servers ...   [direct = selection fallback]
 #
@@ -20,10 +20,12 @@
 #   grok-remote --no-direct      never fall back to the direct connection
 #   grok-remote --pick-model     re-open the model menu even if nothing has changed
 #
-# No model name is hardcoded: automatic selection accepts a rung when it offers something the
-# direct connection does not. Explicit --host/--iphone selection instead honors a healthy requested
-# route that offers your effective model. Your model choice is remembered, and you are only asked
-# again when the egress starts offering something new. The ladder, probes, and watchdog live in
+# No model name is hardcoded: automatic selection accepts the first healthy
+# configured route with a usable model catalog, even when direct offers the
+# same catalog. Explicit --host/--iphone selection additionally binds the
+# exact requested route. Your model choice is remembered, and you are only
+# asked again when the egress starts offering something new. The ladder,
+# probes, and watchdog live in
 # egress.sh; socks-netns.py lets VPN bind the same local SOCKS port used by SSH routes.
 set -uo pipefail
 
@@ -257,7 +259,7 @@ acquire_session_lock(){
 }
 
 no_egress_help(){ cat >&2 <<EOF
-${c_red}[egress]${c_rst} No egress unlocks anything beyond what this VM already sees.
+${c_red}[egress]${c_rst} No configured route can currently serve this request.
   - Wake a home PC, confirm 'tailscale status' shows it online, and make sure its
     ssh_user is filled in in $CONF
   - Or configure/repair the phone rung:  grok-remote iphone-setup
@@ -369,6 +371,22 @@ forced_probe_model(){
   else
     discard_invalid_model_state_file "$CHOICE"
     model="$(cat "$CHOICE" 2>/dev/null)"
+  fi
+  if [[ -n "$model" ]]; then
+    model_id_valid "$model" || return 1
+    printf '%s' "$model"
+  fi
+}
+
+# Automatic discovery keeps the full route catalog available to model_args()
+# so it can notice new models and preserve the existing picker behavior. Only
+# an explicit CLI model or environment pin constrains initial admission.
+automatic_probe_model(){
+  local model=""
+  if caller_picked_model "$@"; then
+    model="$(caller_model "$@")"
+  elif [[ -n "$REQUIRE_MODEL" ]]; then
+    model="$REQUIRE_MODEL"
   fi
   if [[ -n "$model" ]]; then
     model_id_valid "$model" || return 1
@@ -608,10 +626,13 @@ main(){
   (( force_iphone )) && forced=$((forced + 1))
   (( force_vpn )) && forced=$((forced + 1))
   (( forced <= 1 )) || { eg_err "choose only one of --host, --iphone, or --vpn"; exit 2; }
-  local forced_model=""
-  if (( force_iphone )) || [[ -n "$force_host" ]]; then
+  local forced_model="" automatic_model=""
+  if (( forced )); then
     forced_model="$(forced_probe_model "$@")" \
       || { eg_err "cannot resolve a safe forced-route model"; exit 2; }
+  else
+    automatic_model="$(automatic_probe_model "$@")" \
+      || { eg_err "cannot resolve a safe automatic-route model"; exit 2; }
   fi
   acquire_session_lock || exit 1
 
@@ -637,15 +658,16 @@ main(){
     fi
     cur=""
   fi
-  if [[ -n "$cur" ]] && rung_alive "$cur" && { [[ -z "$want" ]] || [[ "$cur" == "$want" ]]; }; then
+  if [[ -n "$cur" && "$cur" != direct ]] && rung_alive "$cur" \
+     && { [[ -z "$want" ]] || [[ "$cur" == "$want" ]]; }; then
     reusable=1
-    if [[ "$cur" == iphone \
+    if [[ "$cur" == iphone || "$cur" == vpn || -n "$automatic_model" \
        || ( -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ) ]]; then
       local route_qualified=0
       if [[ -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ]]; then
         rung_probe_forced "$cur" "$forced_model" && route_qualified=1
       else
-        rung_probe "$cur" && route_qualified=1
+        rung_probe_available "$cur" "${forced_model:-$automatic_model}" && route_qualified=1
       fi
       if (( ! route_qualified )); then
         eg_warn "the existing $cur route is live but its current egress no longer qualifies"
@@ -663,7 +685,11 @@ main(){
   # SOCKS port. Tear it down before walking from the top, or the stale listener
   # makes every preferred home-PC bind fail and incorrectly pushes selection down.
   if (( ! reusable )) && [[ -n "$cur" ]]; then
-    eg_warn "discarding stale or non-requested egress: $cur"
+    if [[ "$cur" == direct && -z "$want" ]]; then
+      eg_log "rechecking preferred remote routes instead of reusing direct"
+    else
+      eg_warn "discarding stale or non-requested egress: $cur"
+    fi
     if ! teardown_all; then
       eg_err "cannot replace stale egress because exact teardown failed"
       exit 1
@@ -716,14 +742,14 @@ main(){
     learn_baseline
     begin_clean_route_transition \
       || { eg_err "cannot publish forced-VPN recovery intent"; exit 1; }
-    if ! try_vpn_sequence || ! end_recovery_transition; then
+    if ! try_vpn_sequence "$forced_model" || ! end_recovery_transition; then
       discard_failed_exact_route vpn || exit 1
       no_egress_help
       exit 1
     fi
   else
     rm -f "$BASELINE"
-    select_egress || { no_egress_help; exit 1; }
+    select_egress 0 1 "$automatic_model" || { no_egress_help; exit 1; }
   fi
 
   launch "$@"
