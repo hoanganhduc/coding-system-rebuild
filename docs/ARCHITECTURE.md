@@ -55,10 +55,16 @@ token-shaped is ever committed.
 
 `name=https-url@ref`; `ref` is a commit SHA after publish, or
 `LOCAL:~/path` before publish (then `external/<name>` symlinks the live
-checkout). `make components LOCAL=1` forces live mode. **ai-agents-skills is the single
-source of truth, cloned to `~/ai-agents-skills`** (the path the installed skill SKILL.md
-symlinks resolve against, and the source Phase 8 installs the broker from); other components
-live under `external/`. The umbrella owns
+checkout). `make components LOCAL=1` forces live mode. ai-agents-skills keeps a
+compatibility/object repository at `~/ai-agents-skills`; an existing development
+worktree is not checked out or cleaned by restore. Phase 8 derives only the exact
+pinned Git object. Before any privileged materialization call, it binds the exact
+materializer bytes through an opened descriptor and SHA-256 gate into a root-owned,
+content-addressed, no-replace helper; later root calls never execute the mutable
+checkout path. It then verifies every raw blob and executable class and publishes the
+stable execution/reference authority at
+`/usr/local/libexec/coding-system/components/ai-agents-skills/<sha>`. Other
+components live under `external/`. The umbrella owns
 docker images and systemd rendering; openclaw-bot's `install.sh` is invoked
 with `--skip-docker --skip-services` so there is exactly one writer per surface.
 

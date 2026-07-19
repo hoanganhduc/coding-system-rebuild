@@ -27,6 +27,7 @@ from typing import Any, Mapping, Sequence
 from .config import (
     CommandKind,
     ConfigurationError,
+    _cli_models,
     _release_id,
     build_contract,
     classify,
@@ -36,6 +37,8 @@ from .contract import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     RouteContract,
+    RouteMode,
+    canonical_json_bytes,
     qualification_route_profile_matches,
 )
 from .grok_exec import GrokExecutableError, VerifiedGrokExecutable
@@ -52,6 +55,19 @@ from .runtime import (
     read_pid_start_ticks,
 )
 from .secure_files import SecureFileError, read_secure_json
+from .managed_profile import (
+    ManagedProfile,
+    ManagedProfileError,
+    ReadinessPolicy,
+    blocked_status,
+    load_active_profile,
+    load_activation_record,
+    load_managed_profile,
+    open_profile_grok,
+    unconfigured_status,
+    write_content_addressed_profile,
+)
+from .rung_admission import RungAdmissionError, eligible_selected_rungs
 
 
 class ClientError(RuntimeError):
@@ -59,12 +75,15 @@ class ClientError(RuntimeError):
 
 
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
-_RUNG_RE = re.compile(r"^(?:direct|iphone|vpn|home:[A-Za-z0-9._:+@-]{1,120})$")
+_RUNG_RE = re.compile(
+    r"^(?:direct|vpn|home:[A-Za-z0-9._:+@-]{1,120}|ios:[a-z0-9][a-z0-9._-]{0,63})$"
+)
 _ROUTE_PROFILE_RE = re.compile(
-    r"^(?:direct|iphone|vpn|auto|auto-no-direct|home:[A-Za-z0-9._:+@-]{1,120})$"
+    r"^(?:direct|iphone|vpn|auto|auto-no-direct|home:[A-Za-z0-9._:+@-]{1,120}|ios:[a-z0-9][a-z0-9._-]{0,63})$"
 )
 _GROK_RELEASE_RE = re.compile(r"^[A-Za-z0-9._:+@-]{1,128}$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._:+/@-]{1,128}$")
+_RUNG_CANARY_SCHEMA_VERSION = 6
 _CANARY_BINDINGS = (
     "GROK_RELEASE_CANARY_MODE",
     "GROK_RELEASE_CANARY_FD",
@@ -77,10 +96,13 @@ _CANARY_BINDINGS = (
     "GROK_RELEASE_CANARY_KIND",
     "GROK_RELEASE_CANARY_MODEL",
     "GROK_RELEASE_CANARY_NONCE",
+    "GROK_RELEASE_CANARY_PROFILE_SHA256",
 )
 _DIRECT_QUALIFICATION_RECOVERY = "GROK_QUALIFICATION_DIRECT_RECOVERY"
 _DIRECT_QUALIFICATION_BOOTSTRAP = "GROK_INTERNAL_DIRECT_QUALIFICATION"
 _FRONTEND_RELEASE_LOCK_FD = "GROK_FRONTEND_RELEASE_LOCK_FD"
+_MANAGED_PROFILE_AVAILABLE = "GROK_MANAGED_PROFILE_AVAILABLE"
+_DOCTOR_GATE_BLOCKED = "GROK_MANAGED_DOCTOR_GATE_BLOCKED"
 _SUPERVISOR_CHILDREN: list[subprocess.Popen[bytes]] = []
 
 
@@ -269,6 +291,17 @@ def _release_root_uid(env: Mapping[str, str]) -> int:
     return os.getuid() if env.get("GROK_TESTING") == "1" else 0
 
 
+def _release_root_gid(env: Mapping[str, str]) -> int:
+    return os.getgid() if env.get("GROK_TESTING") == "1" else 0
+
+
+def _managed_profile_paths(env: Mapping[str, str]) -> tuple[Path, Path]:
+    return (
+        _state_home(env) / "grok-proxy/profiles",
+        _root_release_control(env) / "active-profile.json",
+    )
+
+
 def _release_gate(release_dir: Path, env: Mapping[str, str]) -> dict[str, Any]:
     """Refuse opt-in while install/rollback is mixed or not atomically selected."""
 
@@ -338,6 +371,20 @@ def _release_gate(release_dir: Path, env: Mapping[str, str]) -> dict[str, Any]:
             or _rung_canary_authorization(str(release_id), env) is None
         ):
             raise ClientError("rung canary deny/authentication is not exact")
+    try:
+        selected = dict(selected)
+        selected["qualified_rungs"] = list(
+            eligible_selected_rungs(
+                selected["qualified_rungs"],
+                control_root=root_control,
+                release_id=str(release_id),
+                host_id=_host_id(),
+                root_uid=_release_root_uid(env),
+                root_gid=_release_root_gid(env),
+            )
+        )
+    except RungAdmissionError as exc:
+        raise ClientError(f"selected qualified rung set is invalid: {exc}") from exc
     return selected
 
 
@@ -408,7 +455,9 @@ def _host_id() -> str:
 def _canary_authorization(
     release_id: str,
     env: Mapping[str, str],
-) -> tuple[dict[str, Any], str, str | None, str, str, str, int, str] | None:
+) -> tuple[
+    dict[str, Any], str, str | None, str, str, str, int, str, str | None
+] | None:
     """Authenticate one release/rung canary without weakening its contract."""
 
     requested = env.get("GROK_RELEASE_RUNG_CANARY")
@@ -445,7 +494,7 @@ def _canary_authorization(
     fields = {
         "schema_version", "release_id", "host_id", "canary_kind", "rung",
         "contract_sha256", "grok_release_id", "model_id", "canary_nonce",
-        "created_unix_ns", "route_profile",
+        "created_unix_ns", "route_profile", "profile_sha256",
     }
     canary_kind = env.get("GROK_RELEASE_CANARY_KIND")
     rung = env.get("GROK_RELEASE_CANARY_RUNG")
@@ -454,9 +503,10 @@ def _canary_authorization(
     model_id = env.get("GROK_RELEASE_CANARY_MODEL")
     canary_nonce = env.get("GROK_RELEASE_CANARY_NONCE")
     route_profile = env.get("GROK_RELEASE_CANARY_ROUTE_PROFILE")
+    profile_sha256 = env.get("GROK_RELEASE_CANARY_PROFILE_SHA256")
     if (
         set(record) != fields
-        or record.get("schema_version") != 4
+        or record.get("schema_version") != _RUNG_CANARY_SCHEMA_VERSION
         or record.get("release_id") != release_id
         or record.get("host_id") != _host_id()
         or canary_kind not in {"release", "rung"}
@@ -488,6 +538,14 @@ def _canary_authorization(
         or type(route_profile) is not str
         or _ROUTE_PROFILE_RE.fullmatch(route_profile) is None
         or record.get("route_profile") != route_profile
+        or not (
+            profile_sha256 is None
+            or (
+                canary_kind == "rung"
+                and _DIGEST_RE.fullmatch(profile_sha256) is not None
+            )
+        )
+        or record.get("profile_sha256") != profile_sha256
         or type(record.get("created_unix_ns")) is not int
         or record.get("created_unix_ns", 0) <= 0
         or env.get("GROK_RELEASE_CANARY_MODE") != "1"
@@ -503,6 +561,7 @@ def _canary_authorization(
         canary_kind,
         descriptor,
         route_profile,
+        profile_sha256,
     )
 
 
@@ -517,7 +576,9 @@ def _scrub_canary_bindings(env: dict[str, str]) -> None:
 
 
 def _close_canary_authorization(
-    authorization: tuple[dict[str, Any], str, str | None, str, str, str, int, str],
+    authorization: tuple[
+        dict[str, Any], str, str | None, str, str, str, int, str, str | None
+    ],
     env: dict[str, str],
 ) -> None:
     descriptor = authorization[6]
@@ -615,6 +676,7 @@ def _canary_rung(
         canary_kind,
         descriptor,
         route_profile,
+        _profile_sha256,
     ) = authorization
     valid = not (
         grok_release != contract.grok_release_id
@@ -646,6 +708,50 @@ def _canary_rung(
     return rung, _ProviderCanary(descriptor, str(_record["canary_nonce"]))
 
 
+def _eligible_qualified_rungs(
+    contract: RouteContract,
+    selection: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return the frozen-order rungs authorized by projected evidence."""
+
+    records = selection.get("qualified_rungs")
+    if not isinstance(records, list):
+        raise ClientError("selected qualified rung set is invalid")
+    allowed: set[str] = set()
+    identities: set[tuple[str, str, str]] = set()
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {
+            "contract_sha256", "evidence_sha256", "grok_release_id", "rung"
+        }:
+            raise ClientError("selected qualified rung record has an unexpected shape")
+        rung = record.get("rung")
+        recorded_contract = record.get("contract_sha256")
+        grok_release = record.get("grok_release_id")
+        evidence = record.get("evidence_sha256")
+        if (
+            type(rung) is not str
+            or _RUNG_RE.fullmatch(rung) is None
+            or type(recorded_contract) is not str
+            or _DIGEST_RE.fullmatch(recorded_contract) is None
+            or type(grok_release) is not str
+            or _GROK_RELEASE_RE.fullmatch(grok_release) is None
+            or type(evidence) is not str
+            or _DIGEST_RE.fullmatch(evidence) is None
+        ):
+            raise ClientError("selected qualified rung identity is invalid")
+        identity = (rung, recorded_contract, grok_release)
+        if identity in identities:
+            raise ClientError("selected qualified rung identity is duplicated")
+        identities.add(identity)
+        if (
+            grok_release == contract.grok_release_id
+            and rung in contract.ladder
+            and recorded_contract == contract.rung_qualification_digest(rung)
+        ):
+            allowed.add(rung)
+    return tuple(rung for rung in contract.ladder if rung in allowed)
+
+
 def _qualified_contract(
     contract: RouteContract,
     selection: Mapping[str, Any],
@@ -654,49 +760,14 @@ def _qualified_contract(
     """Constrain the immutable ladder to externally promoted exact rungs."""
 
     canary_rung, provider_canary = _canary_rung(contract, env)
-    if canary_rung is not None:
-        eligible = (canary_rung,)
-    else:
-        records = selection.get("qualified_rungs")
-        if not isinstance(records, list):
-            raise ClientError("selected qualified rung set is invalid")
-        allowed: set[str] = set()
-        identities: set[tuple[str, str, str]] = set()
-        contract_digest = contract.digest()
-        for record in records:
-            if not isinstance(record, dict) or set(record) != {
-                "contract_sha256", "evidence_sha256", "grok_release_id", "rung"
-            }:
-                raise ClientError("selected qualified rung record has an unexpected shape")
-            rung = record.get("rung")
-            recorded_contract = record.get("contract_sha256")
-            grok_release = record.get("grok_release_id")
-            evidence = record.get("evidence_sha256")
-            if (
-                type(rung) is not str
-                or _RUNG_RE.fullmatch(rung) is None
-                or type(recorded_contract) is not str
-                or _DIGEST_RE.fullmatch(recorded_contract) is None
-                or type(grok_release) is not str
-                or _GROK_RELEASE_RE.fullmatch(grok_release) is None
-                or type(evidence) is not str
-                or _DIGEST_RE.fullmatch(evidence) is None
-            ):
-                raise ClientError("selected qualified rung identity is invalid")
-            identity = (rung, recorded_contract, grok_release)
-            if identity in identities:
-                raise ClientError("selected qualified rung identity is duplicated")
-            identities.add(identity)
-            if (
-                recorded_contract == contract_digest
-                and grok_release == contract.grok_release_id
-                and rung in contract.ladder
-            ):
-                allowed.add(rung)
-        eligible = tuple(rung for rung in contract.ladder if rung in allowed)
+    eligible = (
+        (canary_rung,)
+        if canary_rung is not None
+        else _eligible_qualified_rungs(contract, selection)
+    )
     if not eligible:
         raise ClientError(
-            "no rung is externally promoted for this exact release/Grok/contract"
+            "no rung is externally promoted for this release/Grok/rung qualification"
         )
     return replace(contract, ladder=eligible), provider_canary
 
@@ -1534,6 +1605,353 @@ def _bare_exec(grok_bin: Path, argv: Sequence[str], env: Mapping[str, str]) -> N
         grok.exec([str(grok.path), *argv], env)
 
 
+def _load_active_managed_profile(
+    release_dir: Path,
+    env: Mapping[str, str],
+):
+    profile_root, activation_path = _managed_profile_paths(env)
+    try:
+        return load_active_profile(
+            profile_root,
+            activation_path,
+            profile_uid=os.getuid(),
+            profile_gid=os.getgid(),
+            activation_uid=_release_root_uid(env),
+            activation_gid=_release_root_gid(env),
+            expected_release_id=_release_id(release_dir, env),
+        )
+    except ManagedProfileError as exc:
+        raise ClientError("active managed profile is invalid") from exc
+
+
+def _managed_activation_matches_release(
+    release_dir: Path,
+    env: Mapping[str, str],
+) -> bool:
+    """Independently decide whether the selected release has a safe activation."""
+
+    _profile_root, activation_path = _managed_profile_paths(env)
+    if not activation_path.exists() and not activation_path.is_symlink():
+        return False
+    try:
+        activation = load_activation_record(
+            activation_path,
+            expected_uid=_release_root_uid(env),
+            expected_gid=_release_root_gid(env),
+        )
+    except (ManagedProfileError, OSError) as exc:
+        raise ClientError("active managed profile is invalid") from exc
+    return activation.release_id == _release_id(release_dir, env)
+
+
+def _load_canary_managed_profile(
+    release_dir: Path,
+    env: Mapping[str, str],
+) -> ManagedProfile | None:
+    """Load the private candidate named by one authenticated rung canary."""
+
+    if not any(name in env for name in _CANARY_BINDINGS):
+        return None
+    authorization = _canary_authorization(_release_id(release_dir, env), env)
+    if authorization is None or authorization[8] is None:
+        return None
+    (
+        _record,
+        rung,
+        contract_sha256,
+        grok_release_id,
+        model_id,
+        canary_kind,
+        _descriptor,
+        route_profile,
+        profile_sha256,
+    ) = authorization
+    assert profile_sha256 is not None
+    profile_root, _activation_path = _managed_profile_paths(env)
+    try:
+        profile = load_managed_profile(
+            profile_root / f"{profile_sha256}.json",
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+            expected_sha256=profile_sha256,
+        )
+        with open_profile_grok(profile):
+            pass
+    except (ManagedProfileError, OSError) as exc:
+        raise ClientError("profile-bound rung canary candidate is invalid") from exc
+    if (
+        canary_kind != "rung"
+        or contract_sha256 is None
+        or profile.contract.release_id != _release_id(release_dir, env)
+        or profile.contract_sha256 != contract_sha256
+        or profile.grok_release_id != grok_release_id
+        or profile.contract.model_id != model_id
+        or rung not in profile.contract.ladder
+        or not qualification_route_profile_matches(
+            profile.contract,
+            route_profile,
+            rung,
+        )
+    ):
+        raise ClientError("profile-bound rung canary identity is mismatched")
+    return profile
+
+
+def _managed_model(
+    argv: Sequence[str], profile: ManagedProfile
+) -> tuple[str, bool]:
+    explicit = _cli_models(argv)
+    if not explicit:
+        return profile.contract.model_id, False
+    distinct = tuple(dict.fromkeys(explicit))
+    if (
+        len(distinct) != 1
+        or _MODEL_RE.fullmatch(distinct[0]) is None
+        or distinct[0] != profile.contract.model_id
+    ):
+        raise ClientError("requested model does not match the active managed profile")
+    return distinct[0], True
+
+
+def _profile_contract_for_request(
+    profile: ManagedProfile,
+    classification: Any,
+    model_id: str,
+) -> RouteContract:
+    """Derive only route-selection state from one frozen managed profile."""
+
+    if classification.kind is not CommandKind.GATED:
+        raise ClientError("managed profile derivation requires a gated command")
+    base = profile.contract
+    if model_id != base.model_id:
+        raise ClientError("managed profile model binding changed")
+    if (
+        classification.route_mode is base.route_mode
+        and classification.allow_direct is base.allow_direct
+        and classification.forced_host == base.forced_host
+        and classification.forced_ios_key == base.forced_ios_key
+    ):
+        return base
+    if (
+        classification.route_mode is RouteMode.AUTO
+        and classification.allow_direct
+    ):
+        return base
+
+    route_mode = classification.route_mode
+    forced_host: str | None = None
+    forced_ios_key: str | None = None
+    home_endpoints = base.home_endpoints
+    ios_endpoints = base.ios_endpoints
+    allow_direct = classification.allow_direct
+    if route_mode is RouteMode.AUTO:
+        ladder = tuple(
+            rung
+            for rung in base.ladder
+            if classification.allow_direct or rung != "direct"
+        )
+    elif route_mode is RouteMode.HOME:
+        forced_host = classification.forced_host
+        assert forced_host is not None
+        selected = f"home:{forced_host}"
+        if selected not in base.ladder or base.home_endpoint(forced_host) is None:
+            raise ClientError("requested home rung is outside the managed profile")
+        ladder = (selected,)
+    elif route_mode is RouteMode.IOS:
+        forced_ios_key = classification.forced_ios_key
+        if forced_ios_key is not None:
+            selected = f"ios:{forced_ios_key}"
+            endpoint = base.ios_endpoint(forced_ios_key)
+            if selected not in base.ladder or endpoint is None:
+                raise ClientError("requested iOS rung is outside the managed profile")
+            ios_endpoints = (endpoint,)
+            ladder = (selected,)
+        else:
+            ladder = tuple(rung for rung in base.ladder if rung.startswith("ios:"))
+            keys = {rung.removeprefix("ios:") for rung in ladder}
+            ios_endpoints = tuple(
+                endpoint for endpoint in base.ios_endpoints if endpoint.key in keys
+            )
+            if not ladder:
+                raise ClientError("managed profile contains no iOS rung")
+    elif route_mode is RouteMode.VPN:
+        if "vpn" not in base.ladder:
+            raise ClientError("VPN is outside the managed profile")
+        ladder = ("vpn",)
+    elif route_mode is RouteMode.DIRECT:
+        if "direct" not in base.ladder:
+            raise ClientError("direct routing is outside the managed profile")
+        ladder = ("direct",)
+        allow_direct = True
+    else:
+        raise ClientError("managed profile route selection is unsupported")
+    if not ladder:
+        raise ClientError("managed profile request has no authorized rung")
+    selection_digest = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "profile_sha256": profile.digest(),
+                "route_mode": route_mode.value,
+                "forced_host": forced_host,
+                "forced_ios_key": forced_ios_key,
+                "allow_direct": allow_direct,
+                "ladder": list(ladder),
+            }
+        )
+    ).hexdigest()
+    try:
+        return replace(
+            base,
+            route_mode=route_mode,
+            forced_host=forced_host,
+            ios_endpoints=ios_endpoints,
+            forced_ios_key=forced_ios_key,
+            allow_direct=allow_direct,
+            ladder=ladder,
+            routing_config_digest=selection_digest,
+        )
+    except ValueError as exc:
+        raise ClientError(f"managed profile cannot represent this route: {exc}") from exc
+
+
+def _doctor(release_dir: Path, env: Mapping[str, str]) -> int:
+    """Emit one redacted readiness record without touching provider state."""
+
+    _profile_root, activation_path = _managed_profile_paths(env)
+    if env.get(_DOCTOR_GATE_BLOCKED) == "1":
+        status = blocked_status("release_evidence_invalid")
+    elif not activation_path.exists() and not activation_path.is_symlink():
+        status = unconfigured_status()
+    else:
+        try:
+            selection = _release_gate(release_dir, env)
+            release_id = _release_id(release_dir, env)
+            _validate_current_boot_inventory(release_dir, env)
+            active = _load_active_managed_profile(release_dir, env)
+            eligible = _eligible_qualified_rungs(active.profile.contract, selection)
+            status = active.profile.readiness(eligible)
+        except (ClientError, ManagedProfileError, OSError):
+            status = blocked_status("active_profile_invalid")
+    print(json.dumps(status.to_dict(), sort_keys=True, separators=(",", ":")))
+    return 0 if status.status in {"ready", "degraded"} else 2
+
+
+def _validate_current_boot_inventory(
+    release_dir: Path,
+    env: Mapping[str, str],
+) -> dict[str, Any]:
+    release_id = _release_id(release_dir, env)
+    inventory = _read_json(
+        _root_release_control(env)
+        / "boot-inventory"
+        / f"{release_id}.json",
+        maximum=65_536,
+        expected_mode=0o444,
+        expected_uid=_release_root_uid(env),
+    )
+    if (
+        set(inventory)
+        != {
+            "schema_version",
+            "release_id",
+            "host_id",
+            "boot_id",
+            "checked_unix_ns",
+            "inventory_sha256",
+        }
+        or inventory.get("schema_version") != 1
+        or inventory.get("release_id") != release_id
+        or inventory.get("host_id") != _host_id()
+        or inventory.get("boot_id") != read_boot_id()
+        or type(inventory.get("checked_unix_ns")) is not int
+        or inventory.get("checked_unix_ns", 0) <= 0
+        or type(inventory.get("inventory_sha256")) is not str
+        or _DIGEST_RE.fullmatch(inventory["inventory_sha256"]) is None
+    ):
+        raise ClientError("current-boot inventory is stale")
+    return inventory
+
+
+def _secure_profile_root(path: Path) -> None:
+    try:
+        path.mkdir(mode=0o700, parents=False, exist_ok=True)
+        info = path.lstat()
+    except OSError as exc:
+        raise ClientError(f"cannot prepare managed profile directory: {exc}") from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_gid != os.getgid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise ClientError("managed profile directory is unsafe")
+
+
+def _create_profile_candidate(
+    release_dir: Path,
+    env: dict[str, str],
+) -> int:
+    """Snapshot a private candidate; activation remains an installer action."""
+
+    selection = _release_gate(release_dir, env)
+    release_lock_fd = _release_lock_fd(env)
+    try:
+        _close_frontend_release_lock(env)
+        grok_bin = _grok_bin(env)
+        grok_home = _grok_home(env)
+        private_dir = (
+            release_dir
+            if (release_dir / ".model.choice").exists()
+            else _home(env) / "grok-proxy"
+        )
+        model_id, _explicit = resolve_model(
+            (),
+            choice_path=private_dir / ".model.choice",
+            config_path=grok_home / "config.toml",
+        )
+        with VerifiedGrokExecutable.open(grok_bin) as grok:
+            contract = build_contract(
+                classify(("-m", model_id)),
+                model_id,
+                release_dir=release_dir,
+                grok_bin=grok_bin,
+                env=env,
+                grok_release_id=grok.release_id,
+            )
+        profile = ManagedProfile.create(
+            contract,
+            grok_bin,
+            ReadinessPolicy(1, ()),
+        )
+        profile_root, _activation_path = _managed_profile_paths(env)
+        _secure_profile_root(profile_root)
+        write_content_addressed_profile(
+            profile_root,
+            profile,
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+        eligible = _eligible_qualified_rungs(profile.contract, selection)
+        readiness = profile.readiness(eligible)
+        record = {
+            "schema_version": "grok-remote.profile-candidate.v1",
+            "profile_sha256": profile.digest(),
+            "contract_sha256": profile.contract_sha256,
+            "release_id": profile.contract.release_id,
+            "grok_release_id": profile.grok_release_id,
+            "model_id": profile.contract.model_id,
+            "route_profile": "auto" if profile.contract.allow_direct else "auto-no-direct",
+            "eligible_rungs": list(readiness.eligible_rungs),
+            "missing_rungs": list(readiness.missing_rungs),
+            "activation_ready": readiness.status in {"ready", "degraded"},
+        }
+        print(json.dumps(record, sort_keys=True, separators=(",", ":")))
+        return 0
+    finally:
+        os.close(release_lock_fd)
+
+
 def _maintenance(
     classification_argv: Sequence[str], release_dir: Path, env: Mapping[str, str]
 ) -> None:
@@ -1685,23 +2103,89 @@ def _recover(
 
 
 def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
-    classification = classify(argv)
     dispatch_env = dict(env)
+    if tuple(argv) in {("doctor", "--json"), ("profile-create", "--json")}:
+        if any(name in dispatch_env for name in _CANARY_BINDINGS):
+            raise ClientError("profile commands are forbidden during qualification")
+        execution_env = _execution_env(dispatch_env)
+        if tuple(argv) == ("doctor", "--json"):
+            return _doctor(release_dir, execution_env)
+        return _create_profile_candidate(release_dir, execution_env)
+    classification = classify(argv)
+    canary_requested = any(name in dispatch_env for name in _CANARY_BINDINGS)
     strict_direct_recovery = _prepare_canary_dispatch(
         classification,
         release_dir,
         dispatch_env,
     )
-    canary_active = any(name in dispatch_env for name in _CANARY_BINDINGS)
+    canary_active = canary_requested
+    managed_marker = dispatch_env.get(_MANAGED_PROFILE_AVAILABLE)
+    if managed_marker is not None and managed_marker != "1":
+        raise ClientError("managed profile admission marker is invalid")
+    multi_present = "GROK_MULTI_SESSION" in dispatch_env
+    multi_value = dispatch_env.get("GROK_MULTI_SESSION")
+    managed_requested = (
+        managed_marker == "1"
+        and not canary_active
+        and (not multi_present or multi_value == "1")
+    )
+    if (
+        not managed_requested
+        and not canary_active
+        and not multi_present
+    ):
+        managed_requested = _managed_activation_matches_release(
+            release_dir,
+            dispatch_env,
+        )
     if classification.kind is CommandKind.USAGE:
         legacy_env = dict(dispatch_env)
         legacy_env["GROK_MULTI_SESSION"] = "0"
         os.execvpe(str(release_dir / "grok-remote"), [str(release_dir / "grok-remote"), *argv], legacy_env)
     execution_env = _execution_env(dispatch_env)
+    execution_env.pop(_MANAGED_PROFILE_AVAILABLE, None)
+    if (
+        not canary_active
+        and classification.kind not in {CommandKind.USAGE, CommandKind.RECOVERY}
+        and (
+            managed_requested
+            or multi_value == "1"
+        )
+    ):
+        _validate_current_boot_inventory(release_dir, execution_env)
+    if (
+        not managed_requested
+        and not canary_active
+        and multi_value not in {"0", "1"}
+    ):
+        compatibility_env = dict(execution_env)
+        # Preserve a present nonliteral value so the immutable wrapper keeps
+        # treating it as legacy compatibility.  Normalizing it to exact `0`
+        # would incorrectly acquire the public managed-recovery path when the
+        # command is `recover`.  Only an absent value needs an exact-off
+        # re-entry marker to avoid repeating the managed-default probe.
+        compatibility_env["GROK_MULTI_SESSION"] = (
+            multi_value if multi_present else "0"
+        )
+        wrapper = release_dir / "grok-remote"
+        os.execvpe(
+            str(wrapper),
+            [str(wrapper), *argv],
+            compatibility_env,
+        )
     if classification.kind is CommandKind.MAINTENANCE:
         _maintenance(classification.grok_argv, release_dir, execution_env)
     if classification.kind is CommandKind.CONTROL:
         assert classification.control is not None
+        if classification.control == "iphone-list":
+            legacy_env = dict(execution_env)
+            legacy_env["GROK_MULTI_SESSION"] = "0"
+            wrapper = release_dir / "grok-remote"
+            os.execvpe(
+                str(wrapper),
+                [str(wrapper), "iphone-list"],
+                legacy_env,
+            )
         return _control(classification.control, execution_env)
     if classification.kind is CommandKind.RECOVERY:
         return _recover(
@@ -1709,9 +2193,24 @@ def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
             execution_env,
             strict_direct=strict_direct_recovery,
         )
-    grok_bin = _grok_bin(execution_env)
     if classification.kind is CommandKind.BARE:
-        _bare_exec(grok_bin, classification.grok_argv, execution_env)
+        if managed_requested:
+            selection = _release_gate(release_dir, execution_env)
+            active = _load_active_managed_profile(release_dir, execution_env)
+            status = active.profile.readiness(
+                _eligible_qualified_rungs(active.profile.contract, selection)
+            )
+            if status.status not in {"ready", "degraded"}:
+                raise ClientError("active managed profile is not ready")
+            try:
+                with open_profile_grok(active.profile) as grok:
+                    grok.exec(
+                        [str(grok.path), *classification.grok_argv],
+                        execution_env,
+                    )
+            except ManagedProfileError as exc:
+                raise ClientError("active managed Grok executable is invalid") from exc
+        _bare_exec(_grok_bin(execution_env), classification.grok_argv, execution_env)
     if classification.force_pick:
         raise ClientError("--pick-model is not supported in noninteractive v1 admission; pass -m")
 
@@ -1726,16 +2225,54 @@ def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
             if (release_dir / ".model.choice").exists()
             else _home(execution_env) / "grok-proxy"
         )
-        model_id, explicit = resolve_model(
-            classification.grok_argv,
-            choice_path=private_dir / ".model.choice",
-            config_path=grok_home / "config.toml",
+        canary_profile = _load_canary_managed_profile(
+            release_dir,
+            execution_env,
         )
-        try:
-            grok = VerifiedGrokExecutable.open(grok_bin)
-        except (GrokExecutableError, OSError) as exc:
-            raise ClientError(f"cannot verify Grok executable: {exc}") from exc
-        with grok:
+        if canary_profile is not None:
+            model_id, explicit = _managed_model(
+                classification.grok_argv,
+                canary_profile,
+            )
+            contract = _profile_contract_for_request(
+                canary_profile,
+                classification,
+                model_id,
+            )
+            try:
+                grok = open_profile_grok(canary_profile)
+            except ManagedProfileError as exc:
+                raise ClientError(
+                    "profile-bound canary Grok executable is invalid"
+                ) from exc
+        elif managed_requested:
+            active = _load_active_managed_profile(release_dir, execution_env)
+            readiness = active.profile.readiness(
+                _eligible_qualified_rungs(active.profile.contract, selection)
+            )
+            if readiness.status not in {"ready", "degraded"}:
+                raise ClientError("active managed profile is not ready")
+            model_id, explicit = _managed_model(
+                classification.grok_argv, active.profile
+            )
+            contract = _profile_contract_for_request(
+                active.profile, classification, model_id
+            )
+            try:
+                grok = open_profile_grok(active.profile)
+            except ManagedProfileError as exc:
+                raise ClientError("active managed Grok executable is invalid") from exc
+        else:
+            grok_bin = _grok_bin(execution_env)
+            model_id, explicit = resolve_model(
+                classification.grok_argv,
+                choice_path=private_dir / ".model.choice",
+                config_path=grok_home / "config.toml",
+            )
+            try:
+                grok = VerifiedGrokExecutable.open(grok_bin)
+            except (GrokExecutableError, OSError) as exc:
+                raise ClientError(f"cannot verify Grok executable: {exc}") from exc
             contract = build_contract(
                 classification,
                 model_id,
@@ -1744,6 +2281,7 @@ def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
                 env=execution_env,
                 grok_release_id=grok.release_id,
             )
+        with grok:
             contract, provider_canary = _qualified_contract(
                 contract,
                 selection,

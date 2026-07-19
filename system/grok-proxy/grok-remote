@@ -6,24 +6,31 @@
 # model you chose, and holds the egress up for as long as grok runs, failing
 # over underneath the session when one dies:
 #
-#     home PC over Tailscale  >  iPhone exit node  >  VPN Gate servers ...   [direct = selection fallback]
+#     home PC over Tailscale  >  registered iPhone/iPad nodes  >  VPN Gate ... [direct fallback]
 #
 #   grok-remote [grok-args...]   pick an egress, launch grok through it, supervise it
 #   grok-remote status           active rung, the IP grok.com sees, and the remembered model
 #   grok-remote ip               print that egress IP and exit
 #   grok-remote stop             tear the egress down
-#   grok-remote iphone-setup [NODE] enroll the isolated sidecar and select an iPhone node
+#   grok-remote iphone-setup [NODE] [--label KEY] register one iOS exit node
+#   grok-remote iphone-list      list registered iOS devices in priority order
+#   grok-remote iphone-remove KEY / iphone-reorder KEY... manage that order
 #   grok-remote --host LABEL     force one home PC from hosts.conf
-#   grok-remote --iphone         force the configured iPhone when it offers your selected model
+#   grok-remote --iphone         use registered iOS devices in priority order
+#   grok-remote --ios KEY        force one exact registered iOS device
 #   grok-remote --vpn            skip the home PCs; start on VPN Gate
 #   grok-remote --direct         use the committed direct backend only (feature-on)
 #   grok-remote --no-direct      never fall back to the direct connection
-#   grok-remote --pick-model     re-open the model menu even if nothing has changed
+#   GROK_MULTI_SESSION=0 grok-remote --pick-model  compatibility model menu
+#   grok-remote doctor --json    report managed multi-session readiness without egress
+#   grok-remote profile-create --json snapshot a private managed-profile candidate
+#   GROK_MULTI_SESSION=0 grok-remote ... force the compatibility lane
 #
-# No model name is hardcoded: automatic selection accepts the first healthy
+# Managed profiles freeze one model; changing it requires a new candidate and
+# activation. In compatibility mode, automatic selection accepts the first healthy
 # configured route with a usable model catalog, even when direct offers the
-# same catalog. Explicit --host/--iphone selection additionally binds the
-# exact requested route. Your model choice is remembered, and you are only
+# same catalog. Explicit --host/--ios selection binds one exact route, while
+# --iphone selects the ordered iOS family. Your model choice is remembered, and you are only
 # asked again when the egress starts offering something new. The ladder,
 # probes, and watchdog live in
 # egress.sh; socks-netns.py lets VPN bind the same local SOCKS port used by SSH routes.
@@ -40,11 +47,12 @@ compatibility_classify(){
     -h|--help|help) printf usage; return 0 ;;
     inspect|--version|version|completions|worktree|leader) printf bare; return 0 ;;
     status) [[ ${#args[@]} == 1 ]] || return 2; printf status; return 0 ;;
+    iphone-list) [[ ${#args[@]} == 1 ]] || return 2; printf control; return 0 ;;
     ip) [[ ${#args[@]} == 1 ]] || return 2; printf ip; return 0 ;;
     stop) [[ ${#args[@]} == 1 ]] || return 2; printf maintenance; return 0 ;;
-    iphone-setup) [[ ${#args[@]} -le 2 ]] || return 2; printf maintenance; return 0 ;;
+    iphone-setup|iphone-remove|iphone-reorder) printf maintenance; return 0 ;;
   esac
-  local index=0 forced=0
+  local index=0 forced=0 force_direct=0 deny_direct=0
   while (( index < ${#args[@]} )); do
     case "${args[$index]}" in
       --host)
@@ -52,13 +60,24 @@ compatibility_classify(){
         forced=$((forced + 1)); index=$((index + 2)) ;;
       --iphone|--vpn)
         forced=$((forced + 1)); index=$((index + 1)) ;;
-      --no-direct|--pick-model|--direct)
+      --ios)
+        (( index + 1 < ${#args[@]} )) && [[ -n "${args[$((index + 1))]}" ]] || return 2
+        forced=$((forced + 1)); index=$((index + 2)) ;;
+      --direct)
+        force_direct=1
+        forced=$((forced + 1))
+        index=$((index + 1)) ;;
+      --no-direct)
+        deny_direct=1
+        index=$((index + 1)) ;;
+      --pick-model)
         index=$((index + 1)) ;;
       --) index=$((index + 1)); break ;;
       *) break ;;
     esac
   done
   (( forced <= 1 )) || return 2
+  (( force_direct == 0 || deny_direct == 0 )) || return 2
   case "${args[$index]:-}" in
     completions|worktree|leader) printf bare; return 0 ;;
   esac
@@ -68,7 +87,7 @@ compatibility_classify(){
 RELEASE_ADMITTED=0
 self_admit_release(){
   (( RELEASE_ADMITTED == 0 )) || return 0
-  local control=/var/lib/grok-proxy/release-control
+  local control=/var/lib/grok-proxy/release-control rc=0
   if [[ "${GROK_TESTING:-0}" == 1 && -n "${GROK_TEST_ROOT_RELEASE_CONTROL:-}" ]]; then
     control="$GROK_TEST_ROOT_RELEASE_CONTROL"
   fi
@@ -80,10 +99,19 @@ self_admit_release(){
   )
   if (( RELEASE_CANARY == 1 )); then
     admission+=("$GROK_RELEASE_CANARY_FD")
-  elif (( $# == 1 )) && [[ "$1" == recover ]]; then
+  elif (( $# == 2 )) && [[ "$1" == doctor && "$2" == --json ]]; then
+    admission+=(--managed-doctor)
+  elif (( $# == 1 )) && [[ "$1" == recover ]] \
+       && [[ "${GROK_MULTI_SESSION+x}" != x \
+            || "${GROK_MULTI_SESSION-}" == 0 \
+            || "${GROK_MULTI_SESSION-}" == 1 ]]; then
     admission+=(--public-recovery)
   fi
-  if ! "${admission[@]}"; then
+  "${admission[@]}" || rc=$?
+  if (( rc == 79 )) && (( $# == 2 )) \
+     && [[ "$1" == doctor && "$2" == --json ]]; then
+    export GROK_MANAGED_DOCTOR_GATE_BLOCKED=1
+  elif (( rc != 0 )); then
     exec {GROK_SELF_RELEASE_LOCK_FD}<&-
     return 78
   fi
@@ -164,7 +192,16 @@ PY
       local_up(){ : > "$tmp/local"; set_active "local:$1" "fixture@$1" 22; }
       local_alive(){ [[ -f "$tmp/local" ]]; }
       local_down(){ /bin/rm -f "$tmp/local"; }
-      iphone_up(){ : > "$tmp/iphone"; set_active iphone; }
+      ios_select_context(){ IOS_SELECTED_KEY="$1"; IOS_SELECTED_NODE_ID=n-fixture; }
+      iphone_up(){
+        : > "$tmp/iphone"
+        if [[ "${1:-iphone}" == ios:* ]]; then
+          ios_select_context "${1#ios:}"
+          set_active "$1" "$IOS_SELECTED_NODE_ID"
+        else
+          set_active iphone
+        fi
+      }
       iphone_alive(){ [[ -f "$tmp/iphone" ]]; }
       iphone_down(){ /bin/rm -f "$tmp/iphone"; }
       vpn_up(){ : > "$tmp/vpn"; set_active vpn; }
@@ -176,9 +213,10 @@ PY
       [[ "$(compatibility_classify iphone-setup fixture)" == maintenance ]]
       [[ "$(compatibility_classify --host fixture -m model)" == gated ]]
       [[ "$(compatibility_classify --iphone -m model)" == gated ]]
+      [[ "$(compatibility_classify --ios fixture -m model)" == gated ]]
       [[ "$(compatibility_classify --vpn -m model)" == gated ]]
       ! compatibility_classify --host fixture --vpn >/dev/null
-      for rung in direct local:fixture iphone vpn; do
+      for rung in direct local:fixture iphone ios:fixture vpn; do
         rung_up "$rung"
         [[ "$(active_rung)" == "$rung" ]]
         rung_alive "$rung"
@@ -208,7 +246,7 @@ PY
       exit 0
     fi
   fi
-elif [[ -n "${GROK_RELEASE_CANARY_MODE:-}${GROK_RELEASE_CANARY_FD:-}${GROK_RELEASE_CANARY_RELEASE_ID:-}${GROK_RELEASE_RUNG_CANARY:-}${GROK_RELEASE_CANARY_RUNG:-}${GROK_RELEASE_CANARY_ROUTE_PROFILE:-}${GROK_RELEASE_CANARY_CONTRACT:-}${GROK_RELEASE_CANARY_GROK_RELEASE:-}${GROK_RELEASE_CANARY_KIND:-}${GROK_RELEASE_CANARY_MODEL:-}${GROK_RELEASE_CANARY_NONCE:-}" ]]; then
+elif [[ -n "${GROK_RELEASE_CANARY_MODE:-}${GROK_RELEASE_CANARY_FD:-}${GROK_RELEASE_CANARY_RELEASE_ID:-}${GROK_RELEASE_RUNG_CANARY:-}${GROK_RELEASE_CANARY_RUNG:-}${GROK_RELEASE_CANARY_ROUTE_PROFILE:-}${GROK_RELEASE_CANARY_CONTRACT:-}${GROK_RELEASE_CANARY_GROK_RELEASE:-}${GROK_RELEASE_CANARY_KIND:-}${GROK_RELEASE_CANARY_MODEL:-}${GROK_RELEASE_CANARY_NONCE:-}${GROK_RELEASE_CANARY_PROFILE_SHA256:-}" ]]; then
   printf '[egress] incomplete release canary authorization\n' >&2
   exit 78
 fi
@@ -227,18 +265,24 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   while IFS= read -r variable; do unset "$variable"; done < <(compgen -A variable LD_)
 fi
 
-# The reviewed multi-session lane is opt-in by one exact value.  Dispatch
-# before sourcing the compatibility provider so pure classification/admission
-# cannot inherit legacy state or acquire its singleton lock.  Every other value
-# remains on the literal compatibility path below.
+# Dispatch an installer-attested managed profile by default, while retaining
+# the reviewed feature-on value for qualification and an exact compatibility
+# escape (`GROK_MULTI_SESSION=0`).  Profile inspection/creation is always
+# handled before sourcing compatibility code and never touches provider state.
 if [[ "${BASH_SOURCE[0]}" == "${0}" \
-   && ( "${GROK_MULTI_SESSION:-}" == 1 \
-        || ( $# == 1 && "${1:-}" == recover ) ) ]]; then
+   && ( "${1:-}" == doctor \
+        || "${1:-}" == profile-create \
+        || "${RELEASE_CANARY:-0}" == 1 \
+        || "${GROK_MULTI_SESSION+x}" != x \
+        || "${GROK_MULTI_SESSION-}" == 1 \
+        || ( $# == 1 && "${1:-}" == recover \
+             && "${GROK_MULTI_SESSION-}" == 0 ) ) ]]; then
   export GROK_FRONTEND_RELEASE_LOCK_FD="$GROK_SELF_RELEASE_LOCK_FD"
   exec /usr/bin/python3 -E -s -P -c \
     'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("grok_ms.client",run_name="__main__",alter_sys=True)' \
     "$DIR" --release-dir "$DIR" -- "$@"
 fi
+unset GROK_MANAGED_PROFILE_AVAILABLE
 # shellcheck source=egress.sh
 if ! . "$DIR/egress.sh"; then
   exit 1
@@ -252,7 +296,7 @@ SEEN="$PRIVATE_DIR/.model.seen"           # last offered set (private mutable st
 FORCE_PICK=0
 FORCE_EXACT_ROUTE=""                    # internal watchdog policy; never inherited from callers
 
-usage(){ sed -n '2,26p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage(){ sed -n '2,29p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 acquire_session_lock(){
   acquire_stable_mutation_lock
@@ -262,7 +306,7 @@ no_egress_help(){ cat >&2 <<EOF
 ${c_red}[egress]${c_rst} No configured route can currently serve this request.
   - Wake a home PC, confirm 'tailscale status' shows it online, and make sure its
     ssh_user is filled in in $CONF
-  - Or configure/repair the phone rung:  grok-remote iphone-setup
+  - Or register/inspect iOS devices:  grok-remote iphone-setup / iphone-list
   - Or force the VPN Gate fallback:   grok-remote --vpn
   - Or accept the direct connection:  drop --no-direct
 EOF
@@ -578,6 +622,7 @@ main(){
       # region-independent, local-only grok subcommands: run bare grok, pick no egress
       exec "$GROK_BIN" "$@" ;;
     status) cmd_status; exit 0 ;;
+    iphone-list) iphone_list; exit $? ;;
     ip)     acquire_session_lock || exit 1
             ensure_selected_egress >/dev/null || { no_egress_help; exit 1; }
             egress_ip "$(proxy_for "$(active_rung)")"; echo; exit 0 ;;
@@ -585,18 +630,45 @@ main(){
             stop_egress; exit $? ;;
     iphone-setup)
             acquire_session_lock || exit 1
-            shift; [[ $# -le 1 ]] || { eg_err "usage: grok-remote iphone-setup [NODE]"; exit 2; }
-            iphone_setup "${1:-}"; exit $? ;;
+            shift
+            setup_node=""; setup_label=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --label) [[ $# -ge 2 && -n "$2" ]] \
+                           || { eg_err "--label requires a key"; exit 2; }
+                         [[ -z "$setup_label" ]] \
+                           || { eg_err "--label may be supplied only once"; exit 2; }
+                         setup_label="$2"; shift 2 ;;
+                --*) eg_err "unknown iphone-setup option: $1"; exit 2 ;;
+                *) [[ -z "$setup_node" ]] \
+                     || { eg_err "iphone-setup accepts one selector"; exit 2; }
+                   setup_node="$1"; shift ;;
+              esac
+            done
+            iphone_setup "$setup_node" "$setup_label"; exit $? ;;
+    iphone-remove)
+            acquire_session_lock || exit 1
+            shift; [[ $# == 1 ]] \
+              || { eg_err "usage: grok-remote iphone-remove KEY"; exit 2; }
+            iphone_remove "$1"; exit $? ;;
+    iphone-reorder)
+            acquire_session_lock || exit 1
+            shift
+            iphone_reorder "$@"; exit $? ;;
   esac
 
-  local force_host="" force_vpn=0 force_iphone=0
+  local force_host="" force_vpn=0 force_iphone=0 force_ios_key=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --host)       [[ $# -ge 2 && -n "$2" ]] || { eg_err "--host requires a label"; exit 2; }
                     home_label_valid "$2" || { eg_err "invalid host label"; exit 2; }
                     force_host="$2"; shift 2 ;;
       --iphone)     force_iphone=1; shift ;;
+      --ios)        [[ $# -ge 2 && -n "$2" ]] || { eg_err "--ios requires a key"; exit 2; }
+                    ios_key_valid "$2" || { eg_err "invalid iOS device key"; exit 2; }
+                    force_ios_key="$2"; shift 2 ;;
       --vpn)        force_vpn=1; shift ;;
+      --direct)     eg_err "--direct requires an active managed multi-session profile"; exit 2 ;;
       --no-direct)  ALLOW_DIRECT=0; shift ;;
       --pick-model) FORCE_PICK=1; shift ;;
       --)           shift; break ;;
@@ -624,8 +696,9 @@ main(){
   local forced=0
   [[ -n "$force_host" ]] && forced=$((forced + 1))
   (( force_iphone )) && forced=$((forced + 1))
+  [[ -n "$force_ios_key" ]] && forced=$((forced + 1))
   (( force_vpn )) && forced=$((forced + 1))
-  (( forced <= 1 )) || { eg_err "choose only one of --host, --iphone, or --vpn"; exit 2; }
+  (( forced <= 1 )) || { eg_err "choose only one of --host, --iphone, --ios, or --vpn"; exit 2; }
   local forced_model="" automatic_model=""
   if (( forced )); then
     forced_model="$(forced_probe_model "$@")" \
@@ -640,11 +713,13 @@ main(){
   # different egress that merely happens to be up (e.g. `--host windows` reusing a leftover vpn rung).
   local want=""
   [[ -n "$force_host" ]] && want="local:$force_host"
-  (( force_iphone )) && want="iphone"
+  [[ -n "$force_ios_key" ]] && want="ios:$force_ios_key"
   (( force_vpn )) && want="vpn"
-  if [[ -n "$force_host" ]] || (( force_iphone )); then
+  if [[ -n "$force_host" || -n "$force_ios_key" ]]; then
     FORCE_EXACT_ROUTE="$want"
   fi
+  if (( force_iphone )); then IOS_ONLY=1; fi
+  if [[ -n "$force_ios_key" ]]; then IOS_EXACT_KEY="$force_ios_key"; fi
 
   local cur reusable=0; cur="$(active_rung 2>/dev/null || true)"
   # Marker/file presence is ownership even when the record is malformed.  A
@@ -659,9 +734,10 @@ main(){
     cur=""
   fi
   if [[ -n "$cur" && "$cur" != direct ]] && rung_alive "$cur" \
-     && { [[ -z "$want" ]] || [[ "$cur" == "$want" ]]; }; then
+     && { [[ -z "$want" ]] || [[ "$cur" == "$want" ]]; } \
+     && { (( force_iphone == 0 )) || [[ "$cur" == ios:* ]]; }; then
     reusable=1
-    if [[ "$cur" == iphone || "$cur" == vpn || -n "$automatic_model" \
+    if [[ "$cur" == iphone || "$cur" == ios:* || "$cur" == vpn || -n "$automatic_model" \
        || ( -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ) ]]; then
       local route_qualified=0
       if [[ -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ]]; then
@@ -720,19 +796,34 @@ main(){
     fi
   elif (( force_iphone )); then
     rm -f "$BASELINE"
+    if [[ -n "$cur" && "$cur" != ios:* ]] && ! teardown_all; then
+      eg_err "cannot switch providers because exact teardown failed"
+      exit 1
+    fi
+    learn_baseline
+    if ! select_egress 0 0 "$forced_model"; then
+      eg_err "no registered iOS device is available with an acceptable model"
+      exit 1
+    fi
+  elif [[ -n "$force_ios_key" ]]; then
+    rm -f "$BASELINE"
     if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then
       eg_err "cannot switch providers because exact teardown failed"
       exit 1
     fi
     learn_baseline
     begin_clean_route_transition \
-      || { eg_err "cannot publish forced-iPhone recovery intent"; exit 1; }
-    if ! rung_up iphone || ! rung_probe_forced iphone "$forced_model" \
+      || { eg_err "cannot publish exact-iOS recovery intent"; exit 1; }
+    ios_attempt_begin \
+      || { eg_err "cannot begin the exact-iOS selection envelope"; exit 1; }
+    if ! rung_up "$want" || ! rung_probe_forced "$want" "$forced_model" \
        || ! end_recovery_transition; then
-      eg_err "configured iPhone is unavailable or does not offer an acceptable model"
-      discard_failed_exact_route iphone || exit 1
+      ios_attempt_end
+      eg_err "iOS device '$force_ios_key' is unavailable or does not offer an acceptable model"
+      discard_failed_exact_route "$want" || exit 1
       exit 1
     fi
+    ios_attempt_end
   elif (( force_vpn )); then
     rm -f "$BASELINE"
     if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then

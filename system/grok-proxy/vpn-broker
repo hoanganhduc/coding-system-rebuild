@@ -28,7 +28,7 @@ from typing import Any, Callable, Iterator
 
 SCHEMA_VERSION = 3
 PROTOCOL_VERSION = 1
-_RUNG_CANARY_SCHEMA_VERSION = 4
+_RUNG_CANARY_SCHEMA_VERSION = 6
 _TOKEN = re.compile(r"^[A-Za-z0-9._:+@-]{1,256}$")
 _RELEASE = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_ID = re.compile(r"^[A-Za-z0-9._:+/@-]{1,128}$")
@@ -961,6 +961,7 @@ class Broker:
             "schema_version", "release_id", "host_id", "rung",
             "route_profile", "contract_sha256", "grok_release_id",
             "model_id", "canary_kind", "canary_nonce", "created_unix_ns",
+            "profile_sha256",
         }
         route_profile = record.get("route_profile")
         return bool(
@@ -980,6 +981,13 @@ class Broker:
             and _RELEASE.fullmatch(record["canary_nonce"]) is not None
             and type(record.get("created_unix_ns")) is int
             and record.get("created_unix_ns", 0) > 0
+            and (
+                record.get("profile_sha256") is None
+                or (
+                    type(record.get("profile_sha256")) is str
+                    and _RELEASE.fullmatch(record["profile_sha256"]) is not None
+                )
+            )
         )
 
     def _helpers(self, release_id: str, selected: dict[str, str]) -> dict[str, Path]:
@@ -1004,28 +1012,28 @@ class Broker:
         ):
             raise BrokerError("root manifest identity mismatch")
         entries = manifest.get("files")
-        if type(entries) is not list:
+        if type(entries) is not list or not entries:
             raise BrokerError("root manifest has no files")
+        ordinary_fields = {"path", "mode", "size", "sha256"}
         by_role: dict[str, dict[str, Any]] = {}
+        seen_paths: set[str] = set()
+        helpers: dict[str, Path] = {}
         for entry in entries:
-            if type(entry) is not dict or set(entry) != {"role", "path", "mode", "size", "sha256"}:
+            if (
+                type(entry) is not dict
+                or set(entry) not in (ordinary_fields, ordinary_fields | {"role"})
+            ):
                 raise BrokerError("root manifest has an invalid helper entry")
             role = entry.get("role")
             relative = entry.get("path")
-            if type(role) is not str or role not in _ROOT_ROLES or role in by_role:
-                raise BrokerError("root manifest has a duplicate or unknown helper role")
-            if type(relative) is not str or relative != selected[role]:
-                raise BrokerError("root manifest helper map differs from root selection")
+            if type(relative) is not str or relative in seen_paths:
+                raise BrokerError("root manifest has a duplicate or invalid file path")
             candidate = Path(relative)
             if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
                 raise BrokerError("unsafe root helper path")
-            by_role[role] = entry
-        if set(by_role) != _ROOT_ROLES:
-            raise BrokerError("root manifest helper roles are incomplete")
+            seen_paths.add(relative)
 
-        helpers: dict[str, Path] = {}
-        for role, entry in by_role.items():
-            helper = release / str(entry["path"])
+            helper = release / relative
             try:
                 resolved = helper.resolve(strict=True)
                 resolved.relative_to(release)
@@ -1054,14 +1062,25 @@ class Broker:
                     or expected_mode not in {0o444, 0o555}
                     or stat.S_IMODE(info.st_mode) != expected_mode
                     or type(entry.get("size")) is not int
+                    or entry.get("size", -1) < 0
                     or len(data) != entry.get("size")
                     or type(entry.get("sha256")) is not str
+                    or _RELEASE.fullmatch(entry["sha256"]) is None
                     or hashlib.sha256(data).hexdigest() != entry.get("sha256")
                 ):
                     raise BrokerError("root helper does not match its manifest")
             finally:
                 os.close(fd)
-            helpers[role] = helper
+
+            if role is not None:
+                if type(role) is not str or role not in _ROOT_ROLES or role in by_role:
+                    raise BrokerError("root manifest has a duplicate or unknown helper role")
+                if relative != selected[role]:
+                    raise BrokerError("root manifest helper map differs from root selection")
+                by_role[role] = entry
+                helpers[role] = helper
+        if set(by_role) != _ROOT_ROLES:
+            raise BrokerError("root manifest helper roles are incomplete")
         if stat.S_IMODE(helpers["relay"].stat().st_mode) != 0o555:
             raise BrokerError("root relay is not executable")
         return helpers

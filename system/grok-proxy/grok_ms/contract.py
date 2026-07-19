@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields as dataclass_fields, replace
 from enum import Enum
 import hashlib
 import json
@@ -11,10 +11,13 @@ from typing import Any, Mapping
 
 
 SCHEMA_VERSION = 1
-PROTOCOL_VERSION = 1
+CONTRACT_SCHEMA_VERSION = 2
+PROTOCOL_VERSION = 2
+RUNG_QUALIFICATION_SCHEMA_VERSION = 1
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+/@-]+$")
 _HOME_LABEL_RE = re.compile(r"^[A-Za-z0-9._:+@-]+$")
+_IOS_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
 VPN_BROKER_BASE_TIMEOUT_MS = 120_000
 VPN_BROKER_PER_ATTEMPT_MS = 30_000
@@ -28,7 +31,7 @@ class RouteMode(str, Enum):
     AUTO = "auto"
     DIRECT = "direct"
     HOME = "home"
-    IPHONE = "iphone"
+    IOS = "ios"
     VPN = "vpn"
 
 
@@ -225,6 +228,49 @@ class HomeEndpoint:
                 value["user"], f"{path}.user", maximum=128, pattern=_TOKEN_RE
             ),
             port=_require_int(value["port"], f"{path}.port", 1, 65_535),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class IosEndpoint:
+    """One ordered iOS route key bound to an exact stable Tailscale node ID."""
+
+    key: str
+    stable_node_id: str
+
+    def __post_init__(self) -> None:
+        _require_text(
+            self.key,
+            "ios_endpoint.key",
+            maximum=64,
+            pattern=_IOS_KEY_RE,
+        )
+        _require_text(
+            self.stable_node_id,
+            "ios_endpoint.stable_node_id",
+            maximum=256,
+            pattern=_TOKEN_RE,
+        )
+        if self.stable_node_id.startswith("-"):
+            raise _fail("ios_endpoint.stable_node_id", "cannot be option-shaped")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"key": self.key, "stable_node_id": self.stable_node_id}
+
+    @classmethod
+    def from_dict(cls, value: Any, path: str = "ios_endpoint") -> "IosEndpoint":
+        value = _require_mapping(value, path)
+        _require_exact_keys(value, {"key", "stable_node_id"}, path)
+        return cls(
+            key=_require_text(
+                value["key"], f"{path}.key", maximum=64, pattern=_IOS_KEY_RE
+            ),
+            stable_node_id=_require_text(
+                value["stable_node_id"],
+                f"{path}.stable_node_id",
+                maximum=256,
+                pattern=_TOKEN_RE,
+            ),
         )
 
 
@@ -490,7 +536,8 @@ class RouteContract:
     route_mode: RouteMode
     forced_host: str | None
     home_endpoints: tuple[HomeEndpoint, ...]
-    phone_node_id: str | None
+    ios_endpoints: tuple[IosEndpoint, ...]
+    forced_ios_key: str | None
     allow_direct: bool
     ladder: tuple[str, ...]
     routing_config_digest: str
@@ -505,7 +552,7 @@ class RouteContract:
     limits: ResourceLimits
 
     def __post_init__(self) -> None:
-        if self.schema_version != SCHEMA_VERSION:
+        if self.schema_version != CONTRACT_SCHEMA_VERSION:
             raise _fail("schema_version", f"unsupported value {self.schema_version!r}")
         if self.protocol_version != PROTOCOL_VERSION:
             raise _fail(
@@ -536,15 +583,48 @@ class RouteContract:
             labels.append(endpoint.label)
         if len(set(labels)) != len(labels):
             raise _fail("home_endpoints", "duplicate labels are forbidden")
-        _require_optional_text(self.phone_node_id, "phone_node_id", maximum=256)
+        if type(self.ios_endpoints) is not tuple:
+            raise _fail("ios_endpoints", "expected an immutable tuple")
+        ios_keys: list[str] = []
+        ios_node_ids: list[str] = []
+        for index, endpoint in enumerate(self.ios_endpoints):
+            if not isinstance(endpoint, IosEndpoint):
+                raise _fail(f"ios_endpoints[{index}]", "expected an IosEndpoint")
+            ios_keys.append(endpoint.key)
+            ios_node_ids.append(endpoint.stable_node_id)
+        if len(self.ios_endpoints) > 16:
+            raise _fail("ios_endpoints", "at most 16 devices are supported")
+        if len(set(ios_keys)) != len(ios_keys):
+            raise _fail("ios_endpoints", "duplicate keys are forbidden")
+        if len(set(ios_node_ids)) != len(ios_node_ids):
+            raise _fail("ios_endpoints", "duplicate stable node IDs are forbidden")
+        if self.forced_ios_key is not None:
+            _require_text(
+                self.forced_ios_key,
+                "forced_ios_key",
+                maximum=64,
+                pattern=_IOS_KEY_RE,
+            )
         _require_bool(self.allow_direct, "allow_direct")
 
         if self.route_mode is RouteMode.HOME and self.forced_host is None:
             raise _fail("forced_host", "a forced home route requires a host label")
         if self.route_mode is not RouteMode.HOME and self.forced_host is not None:
             raise _fail("forced_host", "is valid only with route_mode=home")
-        if self.route_mode is RouteMode.IPHONE and self.phone_node_id is None:
-            raise _fail("phone_node_id", "a forced iPhone route requires a stable node ID")
+        if self.route_mode is RouteMode.IOS and not self.ios_endpoints:
+            raise _fail("ios_endpoints", "an iOS route requires a registered device")
+        if self.route_mode is not RouteMode.IOS and self.forced_ios_key is not None:
+            raise _fail("forced_ios_key", "is valid only with route_mode=ios")
+        if self.forced_ios_key is not None and self.forced_ios_key not in ios_keys:
+            raise _fail("forced_ios_key", "does not name a frozen iOS endpoint")
+        if (
+            self.forced_ios_key is not None
+            and tuple(ios_keys) != (self.forced_ios_key,)
+        ):
+            raise _fail(
+                "ios_endpoints",
+                "an exact iOS route must freeze only its selected endpoint",
+            )
         if self.forced_host is not None and self.forced_host not in labels:
             raise _fail("forced_host", "does not name a frozen home endpoint")
         if self.route_mode is RouteMode.DIRECT and not self.allow_direct:
@@ -556,7 +636,9 @@ class RouteContract:
             raise _fail("ladder", "duplicates are forbidden")
         for rung in self.ladder:
             _require_text(rung, "ladder", maximum=128)
-            if rung not in {"direct", "iphone", "vpn"} and not rung.startswith("home:"):
+            if rung not in {"direct", "vpn"} \
+               and not rung.startswith("home:") \
+               and not rung.startswith("ios:"):
                 raise _fail("ladder", f"unsupported rung {rung!r}")
             if rung.startswith("home:"):
                 label = _require_text(
@@ -567,10 +649,30 @@ class RouteContract:
                 )
                 if label not in labels:
                     raise _fail("ladder", f"home endpoint {label!r} is not frozen")
-        if "iphone" in self.ladder and self.phone_node_id is None:
-            raise _fail(
-                "phone_node_id", "an iPhone ladder rung requires a stable node ID"
-            )
+            if rung.startswith("ios:"):
+                key = _require_text(
+                    rung.removeprefix("ios:"),
+                    "ladder.ios_key",
+                    maximum=64,
+                    pattern=_IOS_KEY_RE,
+                )
+                if key not in ios_keys:
+                    raise _fail("ladder", f"iOS endpoint {key!r} is not frozen")
+        if self.route_mode is RouteMode.IOS:
+            if self.forced_ios_key is not None and self.ladder != (
+                f"ios:{self.forced_ios_key}",
+            ):
+                raise _fail(
+                    "ladder",
+                    "an exact iOS route must contain exactly its frozen device selection",
+                )
+            if self.forced_ios_key is None and any(
+                not rung.startswith("ios:") for rung in self.ladder
+            ):
+                raise _fail(
+                    "ladder",
+                    "an iOS family route must contain only frozen iOS devices",
+                )
         if self.route_mode is RouteMode.AUTO:
             ladder_labels = tuple(
                 rung.removeprefix("home:")
@@ -584,6 +686,18 @@ class RouteContract:
                     "home_endpoints",
                     "auto-mode ladder must preserve frozen home endpoint order",
                 )
+        ladder_ios_keys = tuple(
+            rung.removeprefix("ios:")
+            for rung in self.ladder
+            if rung.startswith("ios:")
+        )
+        ios_positions = {key: index for index, key in enumerate(ios_keys)}
+        positions = tuple(ios_positions[key] for key in ladder_ios_keys)
+        if positions != tuple(sorted(positions)):
+            raise _fail(
+                "ios_endpoints",
+                "ladder must preserve frozen iOS endpoint order",
+            )
 
         _require_digest(self.routing_config_digest, "routing_config_digest")
         _require_text(
@@ -668,10 +782,11 @@ class RouteContract:
             "grok_release_id": self.grok_release_id,
             "helper_release_ids": dict(self.helper_release_ids),
             "home_endpoints": [item.to_dict() for item in self.home_endpoints],
+            "ios_endpoints": [item.to_dict() for item in self.ios_endpoints],
+            "forced_ios_key": self.forced_ios_key,
             "ladder": list(self.ladder),
             "limits": self.limits.to_dict(),
             "model_id": self.model_id,
-            "phone_node_id": self.phone_node_id,
             "private_ports": list(self.private_ports),
             "probe_policy_version": self.probe_policy_version,
             "protocol_version": self.protocol_version,
@@ -696,7 +811,8 @@ class RouteContract:
             "route_mode",
             "forced_host",
             "home_endpoints",
-            "phone_node_id",
+            "ios_endpoints",
+            "forced_ios_key",
             "allow_direct",
             "ladder",
             "routing_config_digest",
@@ -720,14 +836,19 @@ class RouteContract:
             raise _fail(f"{path}.route_mode", f"unsupported value {route_text!r}") from exc
         ladder = value["ladder"]
         home_endpoints = value["home_endpoints"]
+        ios_endpoints = value["ios_endpoints"]
         private_ports = value["private_ports"]
         helpers = _require_mapping(value["helper_release_ids"], f"{path}.helper_release_ids")
         if (
             type(ladder) is not list
             or type(home_endpoints) is not list
+            or type(ios_endpoints) is not list
             or type(private_ports) is not list
         ):
-            raise _fail(path, "home_endpoints, ladder, and private_ports must be arrays")
+            raise _fail(
+                path,
+                "home_endpoints, ios_endpoints, ladder, and private_ports must be arrays",
+            )
         helper_pairs = []
         for name, release in helpers.items():
             helper_pairs.append(
@@ -776,8 +897,12 @@ class RouteContract:
                 HomeEndpoint.from_dict(item, f"{path}.home_endpoints[{index}]")
                 for index, item in enumerate(home_endpoints)
             ),
-            phone_node_id=_require_optional_text(
-                value["phone_node_id"], f"{path}.phone_node_id", maximum=256
+            ios_endpoints=tuple(
+                IosEndpoint.from_dict(item, f"{path}.ios_endpoints[{index}]")
+                for index, item in enumerate(ios_endpoints)
+            ),
+            forced_ios_key=_require_optional_text(
+                value["forced_ios_key"], f"{path}.forced_ios_key", maximum=64
             ),
             allow_direct=_require_bool(
                 value["allow_direct"], f"{path}.allow_direct"
@@ -821,6 +946,18 @@ class RouteContract:
     def digest(self) -> str:
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
+    def rung_qualification_contract(
+        self, rung: str
+    ) -> "RungQualificationContract":
+        """Return the stable qualification projection for one authorized rung."""
+
+        return RungQualificationContract.from_route_contract(self, rung)
+
+    def rung_qualification_digest(self, rung: str) -> str:
+        """Return the stable qualification digest for one authorized rung."""
+
+        return self.rung_qualification_contract(rung).digest()
+
     def home_endpoint(self, label: str) -> HomeEndpoint | None:
         """Return the frozen home endpoint for ``label``, if present."""
 
@@ -829,6 +966,15 @@ class RouteContract:
         )
         for endpoint in self.home_endpoints:
             if endpoint.label == label:
+                return endpoint
+        return None
+
+    def ios_endpoint(self, key: str) -> IosEndpoint | None:
+        """Return the frozen iOS endpoint for ``key``, if present."""
+
+        _require_text(key, "ios_endpoint.key", maximum=64, pattern=_IOS_KEY_RE)
+        for endpoint in self.ios_endpoints:
+            if endpoint.key == key:
                 return endpoint
         return None
 
@@ -856,6 +1002,432 @@ class RouteContract:
         return tuple(differences)
 
 
+# Every RouteContract field must have an explicit qualification disposition.
+# Common behavior and security fields are copied exactly, endpoint collections
+# contribute only the selected endpoint, and the final set contains only route
+# selection mechanics whose meaning is already captured by ``rung``.
+_RUNG_QUALIFICATION_INCLUDED_ROUTE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "protocol_version",
+        "release_id",
+        "model_id",
+        "probe_policy_version",
+        "timeout_policy",
+        "stability_policy",
+        "vpn_policy",
+        "helper_release_ids",
+        "grok_release_id",
+        "public_endpoint",
+        "private_ports",
+        "limits",
+    }
+)
+_RUNG_QUALIFICATION_SELECTED_ENDPOINT_FIELDS = frozenset(
+    {"home_endpoints", "ios_endpoints"}
+)
+_RUNG_QUALIFICATION_NORMALIZED_ROUTE_FIELDS = frozenset(
+    {
+        "route_mode",
+        "forced_host",
+        "forced_ios_key",
+        "allow_direct",
+        "ladder",
+        "routing_config_digest",
+    }
+)
+
+
+def _assert_rung_qualification_field_classification() -> None:
+    partitions = (
+        _RUNG_QUALIFICATION_INCLUDED_ROUTE_FIELDS,
+        _RUNG_QUALIFICATION_SELECTED_ENDPOINT_FIELDS,
+        _RUNG_QUALIFICATION_NORMALIZED_ROUTE_FIELDS,
+    )
+    classified = frozenset().union(*partitions)
+    duplicates = {
+        name
+        for name in classified
+        if sum(name in partition for partition in partitions) != 1
+    }
+    actual = frozenset(field.name for field in dataclass_fields(RouteContract))
+    missing = actual - classified
+    unexpected = classified - actual
+    if duplicates or missing or unexpected:
+        raise RuntimeError(
+            "incomplete RouteContract rung-qualification field classification: "
+            f"duplicates={sorted(duplicates)!r}, missing={sorted(missing)!r}, "
+            f"unexpected={sorted(unexpected)!r}"
+        )
+
+
+_assert_rung_qualification_field_classification()
+
+
+@dataclass(frozen=True, slots=True)
+class RungQualificationContract:
+    """Closed authorization projection for one concrete route rung.
+
+    The full :class:`RouteContract` remains the supervisor epoch identity.  This
+    projection deliberately removes only route-selection mechanics so the same
+    concrete rung can reuse evidence across forced and automatic selection.
+    """
+
+    schema_version: int
+    route_contract_schema_version: int
+    protocol_version: int
+    release_id: str
+    model_id: str
+    rung: str
+    selected_home_endpoint: HomeEndpoint | None
+    selected_ios_endpoint: IosEndpoint | None
+    probe_policy_version: str
+    timeout_policy: TimeoutPolicy
+    stability_policy: StabilityPolicy
+    vpn_policy: VpnPolicy
+    helper_release_ids: tuple[tuple[str, str], ...]
+    grok_release_id: str
+    public_endpoint: Endpoint
+    private_ports: tuple[int, ...]
+    limits: ResourceLimits
+
+    def __post_init__(self) -> None:
+        if self.schema_version != RUNG_QUALIFICATION_SCHEMA_VERSION:
+            raise _fail(
+                "schema_version", f"unsupported value {self.schema_version!r}"
+            )
+        if self.route_contract_schema_version != CONTRACT_SCHEMA_VERSION:
+            raise _fail(
+                "route_contract_schema_version",
+                f"unsupported value {self.route_contract_schema_version!r}",
+            )
+        if self.protocol_version != PROTOCOL_VERSION:
+            raise _fail(
+                "protocol_version", f"unsupported value {self.protocol_version!r}"
+            )
+        _require_text(
+            self.release_id, "release_id", maximum=128, pattern=_TOKEN_RE
+        )
+        _require_text(self.model_id, "model_id", maximum=128, pattern=_TOKEN_RE)
+        _require_text(self.rung, "rung", maximum=128)
+
+        if self.rung.startswith("home:"):
+            label = _require_text(
+                self.rung.removeprefix("home:"),
+                "rung.home_label",
+                maximum=120,
+                pattern=_HOME_LABEL_RE,
+            )
+            if not isinstance(self.selected_home_endpoint, HomeEndpoint):
+                raise _fail(
+                    "selected_home_endpoint",
+                    "a home rung requires one HomeEndpoint",
+                )
+            if self.selected_home_endpoint.label != label:
+                raise _fail(
+                    "selected_home_endpoint.label",
+                    "must match the selected home rung",
+                )
+            if self.selected_ios_endpoint is not None:
+                raise _fail(
+                    "selected_ios_endpoint", "must be null for a home rung"
+                )
+        elif self.rung.startswith("ios:"):
+            key = _require_text(
+                self.rung.removeprefix("ios:"),
+                "rung.ios_key",
+                maximum=64,
+                pattern=_IOS_KEY_RE,
+            )
+            if not isinstance(self.selected_ios_endpoint, IosEndpoint):
+                raise _fail(
+                    "selected_ios_endpoint", "an iOS rung requires one IosEndpoint"
+                )
+            if self.selected_ios_endpoint.key != key:
+                raise _fail(
+                    "selected_ios_endpoint.key",
+                    "must match the selected iOS rung",
+                )
+            if self.selected_home_endpoint is not None:
+                raise _fail(
+                    "selected_home_endpoint", "must be null for an iOS rung"
+                )
+        elif self.rung in {"direct", "vpn"}:
+            if self.selected_home_endpoint is not None:
+                raise _fail(
+                    "selected_home_endpoint",
+                    "must be null for a non-endpoint rung",
+                )
+            if self.selected_ios_endpoint is not None:
+                raise _fail(
+                    "selected_ios_endpoint",
+                    "must be null for a non-endpoint rung",
+                )
+        else:
+            raise _fail("rung", f"unsupported rung {self.rung!r}")
+
+        _require_text(
+            self.probe_policy_version,
+            "probe_policy_version",
+            maximum=128,
+            pattern=_TOKEN_RE,
+        )
+        if not isinstance(self.timeout_policy, TimeoutPolicy):
+            raise _fail("timeout_policy", "expected TimeoutPolicy")
+        if not isinstance(self.stability_policy, StabilityPolicy):
+            raise _fail("stability_policy", "expected StabilityPolicy")
+        if not isinstance(self.vpn_policy, VpnPolicy):
+            raise _fail("vpn_policy", "expected VpnPolicy")
+
+        if type(self.helper_release_ids) is not tuple:
+            raise _fail("helper_release_ids", "expected an immutable tuple")
+        if tuple(sorted(self.helper_release_ids)) != self.helper_release_ids:
+            raise _fail("helper_release_ids", "entries must be sorted by helper name")
+        names: list[str] = []
+        for item in self.helper_release_ids:
+            if type(item) is not tuple or len(item) != 2:
+                raise _fail("helper_release_ids", "expected (name, release) pairs")
+            name, release = item
+            _require_text(
+                name, "helper_release_ids.name", maximum=64, pattern=_TOKEN_RE
+            )
+            _require_text(
+                release,
+                "helper_release_ids.release",
+                maximum=128,
+                pattern=_TOKEN_RE,
+            )
+            names.append(name)
+        if len(set(names)) != len(names):
+            raise _fail("helper_release_ids", "duplicate helper names are forbidden")
+
+        _require_text(
+            self.grok_release_id,
+            "grok_release_id",
+            maximum=128,
+            pattern=_TOKEN_RE,
+        )
+        if not isinstance(self.public_endpoint, Endpoint):
+            raise _fail("public_endpoint", "expected Endpoint")
+        if self.public_endpoint.host != "127.0.0.1":
+            raise _fail("public_endpoint.host", "v1 requires 127.0.0.1")
+        if type(self.private_ports) is not tuple or len(self.private_ports) < 2:
+            raise _fail("private_ports", "at least two immutable ports are required")
+        for port in self.private_ports:
+            _require_int(port, "private_ports", 1, 65_535)
+        if len(set(self.private_ports)) != len(self.private_ports):
+            raise _fail("private_ports", "duplicates are forbidden")
+        if self.public_endpoint.port in self.private_ports:
+            raise _fail("private_ports", "must not contain the public frontend port")
+        if not isinstance(self.limits, ResourceLimits):
+            raise _fail("limits", "expected ResourceLimits")
+
+    @classmethod
+    def from_route_contract(
+        cls, contract: RouteContract, rung: str
+    ) -> "RungQualificationContract":
+        """Project one authorized rung from an immutable route contract."""
+
+        if not isinstance(contract, RouteContract):
+            raise _fail("contract", "expected a RouteContract")
+        _require_text(rung, "rung", maximum=128)
+        original = reconstruct_original_contract(contract)
+        if rung not in original.ladder:
+            raise _fail("rung", f"{rung!r} is not an authorized rung")
+
+        selected_home_endpoint: HomeEndpoint | None = None
+        selected_ios_endpoint: IosEndpoint | None = None
+        if rung.startswith("home:"):
+            selected_home_endpoint = original.home_endpoint(
+                rung.removeprefix("home:")
+            )
+            if selected_home_endpoint is None:
+                raise _fail("rung", "selected home endpoint is not frozen")
+        elif rung.startswith("ios:"):
+            selected_ios_endpoint = original.ios_endpoint(rung.removeprefix("ios:"))
+            if selected_ios_endpoint is None:
+                raise _fail("rung", "selected iOS endpoint is not frozen")
+
+        return cls(
+            schema_version=RUNG_QUALIFICATION_SCHEMA_VERSION,
+            route_contract_schema_version=original.schema_version,
+            protocol_version=original.protocol_version,
+            release_id=original.release_id,
+            model_id=original.model_id,
+            rung=rung,
+            selected_home_endpoint=selected_home_endpoint,
+            selected_ios_endpoint=selected_ios_endpoint,
+            probe_policy_version=original.probe_policy_version,
+            timeout_policy=original.timeout_policy,
+            stability_policy=original.stability_policy,
+            vpn_policy=original.vpn_policy,
+            helper_release_ids=original.helper_release_ids,
+            grok_release_id=original.grok_release_id,
+            public_endpoint=original.public_endpoint,
+            private_ports=original.private_ports,
+            limits=original.limits,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "grok_release_id": self.grok_release_id,
+            "helper_release_ids": dict(self.helper_release_ids),
+            "limits": self.limits.to_dict(),
+            "model_id": self.model_id,
+            "private_ports": list(self.private_ports),
+            "probe_policy_version": self.probe_policy_version,
+            "protocol_version": self.protocol_version,
+            "public_endpoint": self.public_endpoint.to_dict(),
+            "release_id": self.release_id,
+            "route_contract_schema_version": self.route_contract_schema_version,
+            "rung": self.rung,
+            "schema_version": self.schema_version,
+            "selected_home_endpoint": (
+                self.selected_home_endpoint.to_dict()
+                if self.selected_home_endpoint is not None
+                else None
+            ),
+            "selected_ios_endpoint": (
+                self.selected_ios_endpoint.to_dict()
+                if self.selected_ios_endpoint is not None
+                else None
+            ),
+            "stability_policy": self.stability_policy.to_dict(),
+            "timeout_policy": self.timeout_policy.to_dict(),
+            "vpn_policy": self.vpn_policy.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(
+        cls, value: Any, path: str = "rung_qualification_contract"
+    ) -> "RungQualificationContract":
+        value = _require_mapping(value, path)
+        fields = {
+            "schema_version",
+            "route_contract_schema_version",
+            "protocol_version",
+            "release_id",
+            "model_id",
+            "rung",
+            "selected_home_endpoint",
+            "selected_ios_endpoint",
+            "probe_policy_version",
+            "timeout_policy",
+            "stability_policy",
+            "vpn_policy",
+            "helper_release_ids",
+            "grok_release_id",
+            "public_endpoint",
+            "private_ports",
+            "limits",
+        }
+        _require_exact_keys(value, fields, path)
+        private_ports = value["private_ports"]
+        if type(private_ports) is not list:
+            raise _fail(f"{path}.private_ports", "expected an array")
+        helpers = _require_mapping(
+            value["helper_release_ids"], f"{path}.helper_release_ids"
+        )
+        helper_pairs = tuple(
+            sorted(
+                (
+                    _require_text(
+                        name,
+                        f"{path}.helper_release_ids.name",
+                        maximum=64,
+                        pattern=_TOKEN_RE,
+                    ),
+                    _require_text(
+                        release,
+                        f"{path}.helper_release_ids.{name}",
+                        maximum=128,
+                        pattern=_TOKEN_RE,
+                    ),
+                )
+                for name, release in helpers.items()
+            )
+        )
+        home_value = value["selected_home_endpoint"]
+        ios_value = value["selected_ios_endpoint"]
+        return cls(
+            schema_version=_require_int(
+                value["schema_version"], f"{path}.schema_version", 1, 2**31 - 1
+            ),
+            route_contract_schema_version=_require_int(
+                value["route_contract_schema_version"],
+                f"{path}.route_contract_schema_version",
+                1,
+                2**31 - 1,
+            ),
+            protocol_version=_require_int(
+                value["protocol_version"],
+                f"{path}.protocol_version",
+                1,
+                2**31 - 1,
+            ),
+            release_id=_require_text(
+                value["release_id"],
+                f"{path}.release_id",
+                maximum=128,
+                pattern=_TOKEN_RE,
+            ),
+            model_id=_require_text(
+                value["model_id"],
+                f"{path}.model_id",
+                maximum=128,
+                pattern=_TOKEN_RE,
+            ),
+            rung=_require_text(value["rung"], f"{path}.rung", maximum=128),
+            selected_home_endpoint=(
+                None
+                if home_value is None
+                else HomeEndpoint.from_dict(
+                    home_value, f"{path}.selected_home_endpoint"
+                )
+            ),
+            selected_ios_endpoint=(
+                None
+                if ios_value is None
+                else IosEndpoint.from_dict(
+                    ios_value, f"{path}.selected_ios_endpoint"
+                )
+            ),
+            probe_policy_version=_require_text(
+                value["probe_policy_version"],
+                f"{path}.probe_policy_version",
+                maximum=128,
+                pattern=_TOKEN_RE,
+            ),
+            timeout_policy=TimeoutPolicy.from_dict(
+                value["timeout_policy"], f"{path}.timeout_policy"
+            ),
+            stability_policy=StabilityPolicy.from_dict(
+                value["stability_policy"], f"{path}.stability_policy"
+            ),
+            vpn_policy=VpnPolicy.from_dict(
+                value["vpn_policy"], f"{path}.vpn_policy"
+            ),
+            helper_release_ids=helper_pairs,
+            grok_release_id=_require_text(
+                value["grok_release_id"],
+                f"{path}.grok_release_id",
+                maximum=128,
+                pattern=_TOKEN_RE,
+            ),
+            public_endpoint=Endpoint.from_dict(
+                value["public_endpoint"], f"{path}.public_endpoint"
+            ),
+            private_ports=tuple(private_ports),
+            limits=ResourceLimits.from_dict(value["limits"], f"{path}.limits"),
+        )
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    def digest(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
 def reconstruct_original_contract(contract: RouteContract) -> RouteContract:
     """Rebuild the pre-qualification route ladder from frozen route inputs.
 
@@ -871,14 +1443,16 @@ def reconstruct_original_contract(contract: RouteContract) -> RouteContract:
     elif contract.route_mode is RouteMode.HOME:
         assert contract.forced_host is not None
         original = (f"home:{contract.forced_host}",)
-    elif contract.route_mode is RouteMode.IPHONE:
-        original = ("iphone",)
+    elif contract.route_mode is RouteMode.IOS:
+        if contract.forced_ios_key is not None:
+            original = (f"ios:{contract.forced_ios_key}",)
+        else:
+            original = tuple(f"ios:{endpoint.key}" for endpoint in contract.ios_endpoints)
     elif contract.route_mode is RouteMode.VPN:
         original = ("vpn",)
     else:
         mutable = [f"home:{endpoint.label}" for endpoint in contract.home_endpoints]
-        if contract.phone_node_id is not None:
-            mutable.append("iphone")
+        mutable.extend(f"ios:{endpoint.key}" for endpoint in contract.ios_endpoints)
         mutable.append("vpn")
         if contract.allow_direct:
             mutable.append("direct")
@@ -915,8 +1489,11 @@ def qualification_route_profile_matches(
     if original.route_mode is RouteMode.HOME:
         expected = f"home:{original.forced_host}"
         return route_profile == expected and rung == expected
-    if original.route_mode is RouteMode.IPHONE:
-        return route_profile == "iphone" and rung == "iphone"
+    if original.route_mode is RouteMode.IOS:
+        if original.forced_ios_key is not None:
+            expected = f"ios:{original.forced_ios_key}"
+            return route_profile == expected and rung == expected
+        return route_profile == "iphone" and rung.startswith("ios:")
     if original.route_mode is RouteMode.VPN:
         return route_profile == "vpn" and rung == "vpn"
     expected = "auto" if original.allow_direct else "auto-no-direct"
@@ -924,12 +1501,16 @@ def qualification_route_profile_matches(
 
 
 __all__ = [
+    "CONTRACT_SCHEMA_VERSION",
     "PROTOCOL_VERSION",
+    "RUNG_QUALIFICATION_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "ContractValidationError",
     "Endpoint",
     "HomeEndpoint",
+    "IosEndpoint",
     "ResourceLimits",
+    "RungQualificationContract",
     "RouteContract",
     "RouteMode",
     "StabilityPolicy",

@@ -81,7 +81,7 @@ entries:
   - id: grokproxy-scripts
     root: grok-proxy
     match: [grok-remote, grok_ms, tests]
-    exclude: ["**/__pycache__/**", "**/*.pyc"]
+    exclude: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]
     class: public-copy
     dest_dir: system/grok-proxy
     authoritative: true
@@ -94,7 +94,7 @@ entries:
     class: private-archive
   - id: grokproxy-generated
     root: grok-proxy
-    match: [".model.choice", ".grok-source-restore*"]
+    match: [".model.choice", ".grok-source-restore*", "**/__pycache__", "**/__pycache__/**", "**/*.pyc"]
     class: exclude-generated
 """,
             encoding="utf-8",
@@ -104,6 +104,118 @@ entries:
             encoding="utf-8",
         )
         return repo, home
+
+    def test_authoritative_capture_rejects_unclassified_nested_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, home = self.make_fixture(Path(td))
+            manifest = repo / "MANIFEST.yaml"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    ', "**/__pycache__", "**/__pycache__/**", "**/*.pyc"',
+                    "",
+                ),
+                encoding="utf-8",
+            )
+            before = (repo / "system/grok-proxy/grok-remote").read_bytes()
+
+            result = self.run_sync(repo, home)
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("authoritative source path is unclassified", result.stderr)
+            self.assertEqual(
+                (repo / "system/grok-proxy/grok-remote").read_bytes(), before
+            )
+
+    def test_authoritative_capture_rejects_duplicate_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo, home = self.make_fixture(Path(td))
+            manifest = repo / "MANIFEST.yaml"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8")
+                + """  - id: grokproxy-duplicate
+    root: grok-proxy
+    match: [grok_ms]
+    class: exclude-generated
+""",
+                encoding="utf-8",
+            )
+            before = (repo / "system/grok-proxy/grok-remote").read_bytes()
+
+            result = self.run_sync(repo, home)
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(
+                "authoritative source path is multiply classified", result.stderr
+            )
+            self.assertEqual(
+                (repo / "system/grok-proxy/grok-remote").read_bytes(), before
+            )
+
+    def test_authoritative_classification_records_walk_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            source = base / "grok-proxy"
+            source.mkdir()
+            entry = {
+                "id": "grokproxy-scripts",
+                "root": "grok-proxy",
+                "match": ["grok-remote"],
+                "class": "public-copy",
+                "dest_dir": "system/grok-proxy",
+                "authoritative": True,
+            }
+
+            def denied_walk(*_args: object, **kwargs: object):
+                def iterator():
+                    kwargs["onerror"](
+                        PermissionError(
+                            13,
+                            "permission denied",
+                            str(source / "denied"),
+                        )
+                    )
+                    return
+                    yield
+
+                return iterator()
+
+            with (
+                mock.patch.object(MANIFEST_SYNC, "HOME", str(base)),
+                mock.patch.object(MANIFEST_SYNC.os, "walk", denied_walk),
+            ):
+                errors = MANIFEST_SYNC.preflight_authoritative_classification(
+                    [entry]
+                )
+            self.assertEqual(len(errors), 1)
+            self.assertIn("cannot classify authoritative source tree", errors[0])
+
+    def test_authoritative_stage_fsync_fails_closed_on_walk_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            stage = Path(td) / "stage"
+            stage.mkdir()
+
+            def denied_walk(*_args: object, **kwargs: object):
+                def iterator():
+                    kwargs["onerror"](
+                        PermissionError(
+                            13,
+                            "permission denied",
+                            str(stage / "denied"),
+                        )
+                    )
+                    return
+                    yield
+
+                return iterator()
+
+            with (
+                mock.patch.object(MANIFEST_SYNC.os, "walk", denied_walk),
+                self.assertRaisesRegex(
+                    MANIFEST_SYNC.SyncError,
+                    "cannot inspect authoritative tree",
+                ),
+            ):
+                MANIFEST_SYNC._fsync_real_tree(str(stage))
 
     def run_sync(
         self, repo: Path, home: Path, manifest: Path | None = None

@@ -117,6 +117,10 @@ def _diagnostic_text(value: object, limit: int) -> str:
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+@/-]{1,256}$")
 _HOME_RUNG_RE = re.compile(r"^home:[A-Za-z0-9._:+@-]{1,120}$")
+_IOS_RUNG_RE = re.compile(r"^ios:[a-z0-9][a-z0-9._-]{0,63}$")
+_RUNG_CANARY_SCHEMA_VERSION = 6
+_IOS_DEVICE_TRANSITION_NS = 30_000_000_000
+_IOS_FAMILY_TRANSITION_NS = 120_000_000_000
 _NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
 _CANARY_NONCE_RE = re.compile(r"^[0-9a-f]{64}$")
 _GROK_RELEASE_RE = re.compile(r"^[A-Za-z0-9._:+@-]{1,128}$")
@@ -1841,25 +1845,28 @@ class Supervisor:
         fields = {
             "schema_version", "release_id", "host_id", "canary_kind", "rung",
             "contract_sha256", "grok_release_id", "model_id", "canary_nonce",
-            "created_unix_ns", "route_profile",
+            "created_unix_ns", "route_profile", "profile_sha256",
         }
         rung = record.get("rung")
         route_profile = record.get("route_profile")
         if (
             set(record) != fields
-            or record.get("schema_version") != 4
+            or record.get("schema_version") != _RUNG_CANARY_SCHEMA_VERSION
             or record.get("release_id") != self.release_id
             or record.get("host_id") != self._host_id()
             or record.get("canary_kind") != "rung"
             or type(rung) is not str
             or rung == "direct"
             or not (
-                rung in {"iphone", "vpn"}
+                rung == "vpn"
                 or _HOME_RUNG_RE.fullmatch(rung) is not None
+                or _IOS_RUNG_RE.fullmatch(rung) is not None
             )
             or type(route_profile) is not str
-            or route_profile
-            not in {rung, "auto", "auto-no-direct"}
+            or not (
+                route_profile in {rung, "auto", "auto-no-direct"}
+                or (_IOS_RUNG_RE.fullmatch(rung) is not None and route_profile == "iphone")
+            )
             or type(record.get("contract_sha256")) is not str
             or _DIGEST_RE.fullmatch(record["contract_sha256"]) is None
             or type(record.get("grok_release_id")) is not str
@@ -1870,6 +1877,11 @@ class Supervisor:
             or _CANARY_NONCE_RE.fullmatch(record["canary_nonce"]) is None
             or type(record.get("created_unix_ns")) is not int
             or record.get("created_unix_ns", 0) <= 0
+            or not (
+                record.get("profile_sha256") is None
+                or _DIGEST_RE.fullmatch(str(record.get("profile_sha256")))
+                is not None
+            )
         ):
             raise AdmissionError("provider canary authorization record is invalid")
         return dict(record)
@@ -1950,7 +1962,7 @@ class Supervisor:
         fields = {
             "schema_version", "release_id", "host_id", "canary_kind", "rung",
             "contract_sha256", "grok_release_id", "model_id", "canary_nonce",
-            "created_unix_ns", "route_profile",
+            "created_unix_ns", "route_profile", "profile_sha256",
         }
         with self._state_lock:
             contract = self.contract
@@ -1968,13 +1980,18 @@ class Supervisor:
             ) from exc
         if (
             set(record) != fields
-            or record.get("schema_version") != 4
+            or record.get("schema_version") != _RUNG_CANARY_SCHEMA_VERSION
             or record.get("release_id") != self.release_id
             or record.get("host_id") != self._host_id()
             or record.get("canary_kind") != "rung"
             or record.get("canary_nonce") != nonce
             or type(record.get("created_unix_ns")) is not int
             or record.get("created_unix_ns", 0) <= 0
+            or not (
+                record.get("profile_sha256") is None
+                or _DIGEST_RE.fullmatch(str(record.get("profile_sha256")))
+                is not None
+            )
             or contract is None
             or active is None
             or phase != "READY"
@@ -3233,7 +3250,25 @@ class Supervisor:
         if deadline is None:
             deadline = TransitionDeadline.after_ms(contract.timeout_policy.transition_ms)
         errors: list[str] = []
+        ios_family_expires_ns: int | None = None
         for rung in rungs:
+            rung_deadline = deadline
+            if rung.startswith("ios:"):
+                now_ns = time.monotonic_ns()
+                if ios_family_expires_ns is None:
+                    ios_family_expires_ns = min(
+                        deadline.expires_ns,
+                        now_ns + _IOS_FAMILY_TRANSITION_NS,
+                    )
+                rung_expires_ns = min(
+                    deadline.expires_ns,
+                    ios_family_expires_ns,
+                    now_ns + _IOS_DEVICE_TRANSITION_NS,
+                )
+                if rung_expires_ns <= now_ns:
+                    errors.append(f"{rung}: iOS family deadline expired")
+                    continue
+                rung_deadline = TransitionDeadline(rung_expires_ns)
             with self._state_lock:
                 if self.phase == "DRAINING" or not self._leases:
                     raise EpochDraining("provider transition lost its live interest")
@@ -3290,7 +3325,7 @@ class Supervisor:
             try:
                 result = adapter.start(
                     request,
-                    deadline,
+                    rung_deadline,
                     self._qualifier,
                     self._cancel_transition,
                 )

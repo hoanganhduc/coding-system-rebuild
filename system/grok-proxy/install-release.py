@@ -35,15 +35,62 @@ import time
 from typing import Callable, Iterable, Mapping, NamedTuple
 import uuid
 
+# The installer is intentionally exercised with Python isolated mode.  The
+# sibling runtime is imported only after a script invocation has authenticated
+# its immutable/native-bootstrap lane.  Normal library imports load it eagerly
+# for the focused unit-test API.
+_INSTALLER_IMPORT_ROOT = str(Path(__file__).resolve().parent)
+if _INSTALLER_IMPORT_ROOT not in sys.path:
+    sys.path.insert(0, _INSTALLER_IMPORT_ROOT)
+
+
+def _load_runtime_dependencies() -> None:
+    global ACTIVATION_RECORD_SCHEMA_VERSION
+    global ActivationCommitUncertain, ActivationRecord, ManagedProfileError
+    global RungAdmissionError, eligible_selected_rungs
+    global load_activation_record, load_managed_profile, open_profile_grok
+    global write_activation_record
+
+    from grok_ms.managed_profile import (
+        ACTIVATION_RECORD_SCHEMA_VERSION as activation_record_schema_version,
+        ActivationCommitUncertain as activation_commit_uncertain,
+        ActivationRecord as activation_record,
+        ManagedProfileError as managed_profile_error,
+        load_activation_record as load_activation,
+        load_managed_profile as load_profile,
+        open_profile_grok as open_grok,
+        write_activation_record as write_activation,
+    )
+    from grok_ms.rung_admission import (
+        RungAdmissionError as rung_admission_error,
+        eligible_selected_rungs as selected_rungs,
+    )
+
+    ACTIVATION_RECORD_SCHEMA_VERSION = activation_record_schema_version
+    ActivationCommitUncertain = activation_commit_uncertain
+    ActivationRecord = activation_record
+    ManagedProfileError = managed_profile_error
+    load_activation_record = load_activation
+    load_managed_profile = load_profile
+    open_profile_grok = open_grok
+    write_activation_record = write_activation
+    RungAdmissionError = rung_admission_error
+    eligible_selected_rungs = selected_rungs
+
+
+if __name__ != "__main__":
+    _load_runtime_dependencies()
+
 
 SCHEMA_VERSION = 2
 CONTROL_SCHEMA_VERSION = 1
 EVIDENCE_SCHEMA_VERSION = 3
-RUNG_CANARY_SCHEMA_VERSION = 4
+RUNG_CANARY_SCHEMA_VERSION = 6
 CANARY_TERMINAL_SCHEMA_VERSION = 1
 RUNG_TRANSCRIPT_SCHEMA_VERSION = 2
-RUNG_EVIDENCE_SCHEMA_VERSION = 6
-QUALIFICATION_RESULT_SCHEMA_VERSION = 3
+RUNG_EVIDENCE_SCHEMA_VERSION = 9
+QUALIFIED_RUNG_CATALOG_SCHEMA_VERSION = 1
+QUALIFICATION_RESULT_SCHEMA_VERSION = 5
 RELEASE_QUALIFICATION_SCHEMA_VERSION = 2
 RUNG_CANARY_TIMEOUT_SECONDS = 900
 QUALIFICATION_CLEANUP_RESERVE_SECONDS = 120
@@ -101,10 +148,11 @@ QUALIFICATION_WORK_TIMEOUT_SECONDS = (
 BOOT_INVENTORY_SCHEMA_VERSION = 1
 HANDSHAKE_PROTOCOL = 1
 DIRECT_ADMISSION_RUNTIME = "grok_ms/release_admission.py"
+INSTALLER_RUNTIME = "install-release.py"
 GROK_SELF_ADMISSION_BLOCK = b'''RELEASE_ADMITTED=0
 self_admit_release(){
   (( RELEASE_ADMITTED == 0 )) || return 0
-  local control=/var/lib/grok-proxy/release-control
+  local control=/var/lib/grok-proxy/release-control rc=0
   if [[ "${GROK_TESTING:-0}" == 1 && -n "${GROK_TEST_ROOT_RELEASE_CONTROL:-}" ]]; then
     control="$GROK_TEST_ROOT_RELEASE_CONTROL"
   fi
@@ -116,10 +164,19 @@ self_admit_release(){
   )
   if (( RELEASE_CANARY == 1 )); then
     admission+=("$GROK_RELEASE_CANARY_FD")
-  elif (( $# == 1 )) && [[ "$1" == recover ]]; then
+  elif (( $# == 2 )) && [[ "$1" == doctor && "$2" == --json ]]; then
+    admission+=(--managed-doctor)
+  elif (( $# == 1 )) && [[ "$1" == recover ]] \\
+       && [[ "${GROK_MULTI_SESSION+x}" != x \\
+            || "${GROK_MULTI_SESSION-}" == 0 \\
+            || "${GROK_MULTI_SESSION-}" == 1 ]]; then
     admission+=(--public-recovery)
   fi
-  if ! "${admission[@]}"; then
+  "${admission[@]}" || rc=$?
+  if (( rc == 79 )) && (( $# == 2 )) \\
+     && [[ "$1" == doctor && "$2" == --json ]]; then
+    export GROK_MANAGED_DOCTOR_GATE_BLOCKED=1
+  elif (( rc != 0 )); then
     exec {GROK_SELF_RELEASE_LOCK_FD}<&-
     return 78
   fi
@@ -164,7 +221,8 @@ EGRESS_ADMISSION_BLOCK = b'''require_frozen_egress_release(){
               GROK_RELEASE_CANARY_RUNG GROK_RELEASE_CANARY_ROUTE_PROFILE \\
               GROK_RELEASE_CANARY_CONTRACT GROK_RELEASE_CANARY_GROK_RELEASE \\
               GROK_RELEASE_CANARY_KIND GROK_RELEASE_CANARY_MODEL \\
-              GROK_RELEASE_CANARY_NONCE; do
+              GROK_RELEASE_CANARY_NONCE \\
+              GROK_RELEASE_CANARY_PROFILE_SHA256; do
     [[ -v $name ]] && canary_extra=1
   done
   if (( canary_binding == 1 || canary_extra == 1 )); then
@@ -219,6 +277,11 @@ DIRECT_ADMISSION_PRODUCTION_PATHS = (
 DIRECT_ADMISSION_PRODUCTION_BUNDLES = frozenset(
     {
         (
+            "c827023c400605e76e3e48a10677d883992d385dea3fed23411b450a3be65df5",
+            "85bb35ac51dff54fd63b0d97108b906d8a04b590f3c7e421c12c0d6f02e0ca6a",
+            "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
+        ),
+        (
             "b63cab9772bdc2b93f05ff58a45015b451f6bd66c81ef96b8dd2ae6bb97a7587",
             "157b08ead5f6f0a87c5374cec886ac107acaf2bf1ad362bdf799e437b19f01bb",
             "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
@@ -272,6 +335,21 @@ DIRECT_ADMISSION_PRODUCTION_BUNDLES = frozenset(
             "99fa57dcddafed69c786af349a837cd17a06f5d6ed17131b3736cb8b506d2a13",
             "269a6954a1a37d8b2bbea7dc0a12a8773b98b27dc8af59e4c66c010b8f23c505",
             "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
+        ),
+        (
+            "503efe76671726e1390fc79764f09675435a745f3637b8cedd98a9792ff184c2",
+            "85bb35ac51dff54fd63b0d97108b906d8a04b590f3c7e421c12c0d6f02e0ca6a",
+            "58a4bfc527af8e51fe033cebe49e59802d916e020c8a469ad547a9303f68d77e",
+        ),
+        (
+            "fe85644bd82f2d4cd083fe1fe40bd04a6678d8b8e454b3785475818d3bd41017",
+            "6af111e4b015016168e38d8d61257e3053e98f906ea8fb8b10d5c520dc6a90a1",
+            "b5ac537979fd5e26bb23688da44766c4119f3a2acd4f6ef0a3ba892cf5a8758f",
+        ),
+        (
+            "1c45779924a7ce462bb6f904f15e56932772b651cf5b00eef9bc3a2062328f82",
+            "6af111e4b015016168e38d8d61257e3053e98f906ea8fb8b10d5c520dc6a90a1",
+            "57d7c1b12d6f005ef6519403afe0259963542a3d1cb896b973ea7434c948ef0f",
         ),
     }
 )
@@ -364,7 +442,7 @@ QUALIFICATION_COMMON_FIELDS = frozenset(
     {
         "schema_version", "kind", "step", "release_id", "canary_nonce",
         "canary_kind", "rung", "route_profile", "contract_sha256", "grok_release_id",
-        "model_id", "status", "started_unix_ns", "completed_unix_ns",
+        "model_id", "profile_sha256", "status", "started_unix_ns", "completed_unix_ns",
         "duration_ms", "observations", "error_code", "error_sha256",
     }
 )
@@ -391,6 +469,7 @@ QUALIFICATION_OBSERVATION_FIELDS = {
     "real-pair": frozenset(
         {
             "sessions_requested", "sessions_completed", "active_rung",
+            "rung_qualification_sha256",
             "model_id", "shared_owner_epoch", "shared_generation",
             "shared_contract", "independent_grok_units",
             "shared_leader_disabled", "leader_socket_count", "unique_session_ids",
@@ -519,9 +598,11 @@ RUNG_RECORD_FIELDS = frozenset(
         "rung",
     }
 )
-RUNG_TOKEN_RE = re.compile(r"^(?:direct|iphone|vpn|home:[A-Za-z0-9._:+@-]{1,120})$")
+RUNG_TOKEN_RE = re.compile(
+    r"^(?:direct|vpn|home:[A-Za-z0-9._:+@-]{1,120}|ios:[a-z0-9][a-z0-9._-]{0,63})$"
+)
 ROUTE_PROFILE_RE = re.compile(
-    r"^(?:direct|iphone|vpn|auto|auto-no-direct|home:[A-Za-z0-9._:+@-]{1,120})$"
+    r"^(?:direct|iphone|vpn|auto|auto-no-direct|home:[A-Za-z0-9._:+@-]{1,120}|ios:[a-z0-9][a-z0-9._-]{0,63})$"
 )
 GROK_RELEASE_RE = re.compile(r"^[A-Za-z0-9._:+@-]{1,128}$")
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:+/@-]{1,128}$")
@@ -537,6 +618,7 @@ CANARY_ENV_BINDINGS = (
     "GROK_RELEASE_CANARY_KIND",
     "GROK_RELEASE_CANARY_MODEL",
     "GROK_RELEASE_CANARY_NONCE",
+    "GROK_RELEASE_CANARY_PROFILE_SHA256",
 )
 CANARY_TEST_ENV = (
     "GROK_BIN",
@@ -565,10 +647,21 @@ CANARY_TEST_ENV = (
     "VPNGATE_PREFER",
 )
 
+# Prefix installs are an explicit test-only build mode, but their user gate is
+# still an environment trust boundary.  Admit only the test seams exercised by
+# the installed client; the gate derives GROK_TESTING and its release-control
+# root itself and rejects every other caller-supplied GROK_TEST_* name.
+USER_GATE_TEST_ENV = (
+    "GROK_TEST_CURL_BIN",
+    "GROK_TEST_IPHONE_STATE_DIR",
+    "GROK_TEST_SKIP_WARM_HANDOFF",
+)
+
 # This is a closed declaration, not a suffix-based scan of the project tree.
 # The grok_ms package is the one recursive runtime namespace; only Python source
 # below it is admitted and links/cache artifacts are rejected or ignored below.
 DECLARED_RUNTIME_REQUIRED = (
+    INSTALLER_RUNTIME,
     "grok-remote",
     "egress.sh",
     "socks-netns.py",
@@ -577,6 +670,12 @@ DECLARED_RUNTIME_REQUIRED = (
 )
 DECLARED_BROKER_CANDIDATES = ("vpn-broker", "vpn-broker.py")
 DECLARED_PACKAGE_ROOT = "grok_ms"
+DECLARED_PACKAGE_REQUIRED = (
+    "grok_ms/__init__.py",
+    DIRECT_ADMISSION_RUNTIME,
+    "grok_ms/managed_profile.py",
+    "grok_ms/rung_admission.py",
+)
 EXCLUDED_PACKAGE_PARTS = frozenset({"__pycache__", "tests", "test"})
 
 AFTER_DENY = "after-deny"
@@ -627,6 +726,193 @@ class ReleaseError(RuntimeError):
 
 class SessionContainmentError(ReleaseError):
     """An owned runner session could not be contained without PID reuse risk."""
+
+
+class ProcAuthority:
+    """Descriptor-bound authority for every installer procfs observation."""
+
+    def __init__(self, descriptor: int, *, display: Path, fixture: bool) -> None:
+        duplicate = -1
+        try:
+            duplicate = os.dup(descriptor)
+            os.set_inheritable(duplicate, False)
+            info = os.fstat(duplicate)
+        except OSError as exc:
+            if duplicate >= 0:
+                os.close(duplicate)
+            raise ReleaseError(f"cannot anchor proc authority: {exc}") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            os.close(duplicate)
+            raise ReleaseError("proc authority is not a directory")
+        self._descriptor = duplicate
+        self.display = Path(display)
+        self.fixture = bool(fixture)
+        if not self.fixture:
+            try:
+                mountinfo = self.read_bytes("self/mountinfo", maximum=4 * 1024 * 1024)
+                rows = mountinfo.decode("ascii").splitlines()
+            except (OSError, UnicodeError, ReleaseError) as exc:
+                self.close()
+                raise ReleaseError("cannot validate the fixed procfs authority") from exc
+            if not any(
+                len(before.split()) >= 5
+                and before.split()[4] == "/proc"
+                and after.split()[:2] == ["proc", "proc"]
+                for row in rows
+                if " - " in row
+                for before, after in (row.split(" - ", 1),)
+            ):
+                self.close()
+                raise ReleaseError("fixed /proc authority is not a procfs mount")
+
+    @classmethod
+    def production(cls) -> "ProcAuthority":
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open("/proc", flags)
+        except OSError as exc:
+            raise ReleaseError("cannot open the fixed procfs authority") from exc
+        try:
+            return cls(descriptor, display=Path("/proc"), fixture=False)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def from_fd(
+        cls,
+        descriptor: int,
+        *,
+        display: Path,
+        fixture: bool,
+    ) -> "ProcAuthority":
+        return cls(descriptor, display=display, fixture=fixture)
+
+    def close(self) -> None:
+        descriptor = getattr(self, "_descriptor", -1)
+        if descriptor >= 0:
+            self._descriptor = -1
+            os.close(descriptor)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except OSError:
+            pass
+
+    def _parts(self, relative: str) -> tuple[str, ...]:
+        path = PurePosixPath(relative)
+        if path.is_absolute() or not path.parts or any(
+            part in {"", ".", ".."} or "/" in part for part in path.parts
+        ):
+            raise ReleaseError(f"unsafe proc authority path: {relative!r}")
+        parts = list(path.parts)
+        if not self.fixture and parts[0] == "self":
+            parts[0] = str(os.getpid())
+        return tuple(parts)
+
+    def open_root(self) -> int:
+        if self._descriptor < 0:
+            raise ReleaseError("proc authority is closed")
+        descriptor = os.dup(self._descriptor)
+        os.set_inheritable(descriptor, False)
+        return descriptor
+
+    def open_directory(self, relative: str) -> int:
+        descriptor = self.open_root()
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            for part in self._parts(relative):
+                child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def read_bytes(
+        self,
+        relative: str,
+        *,
+        maximum: int,
+        budget: "_SwitchInventoryBudget | None" = None,
+        operation: str = "proc inventory",
+    ) -> bytes:
+        if maximum <= 0:
+            raise ReleaseError("proc record bound is invalid")
+        parts = self._parts(relative)
+        parent = self.open_root()
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, flags, dir_fd=parent)
+                os.close(parent)
+                parent = child
+            if budget is not None:
+                return budget.read_at(parent, parts[-1], maximum, operation)
+            descriptor = os.open(
+                parts[-1],
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent,
+            )
+            try:
+                data = bytearray()
+                while len(data) <= maximum:
+                    chunk = os.read(descriptor, min(65_536, maximum + 1 - len(data)))
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                if len(data) > maximum:
+                    raise ReleaseError(f"oversized proc record: {relative}")
+                return bytes(data)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(parent)
+
+    def readlink(self, relative: str) -> str:
+        parts = self._parts(relative)
+        parent = self.open_root()
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, flags, dir_fd=parent)
+                os.close(parent)
+                parent = child
+            return os.readlink(parts[-1], dir_fd=parent)
+        finally:
+            os.close(parent)
+
+    def stat_root_entry(self, name: str) -> os.stat_result:
+        if not name or "/" in name or name in {".", ".."}:
+            raise ReleaseError("unsafe proc root entry")
+        descriptor = self.open_root()
+        try:
+            return os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        finally:
+            os.close(descriptor)
 
 
 class _SwitchInventoryBudget:
@@ -1110,7 +1396,7 @@ def _runner_cgroup_parent(
     target_uid: int,
     target_gid: int,
     *,
-    proc_cgroup: Path = Path("/proc/self/cgroup"),
+    proc_authority: ProcAuthority | None = None,
     mount: Path = Path("/sys/fs/cgroup"),
 ) -> _RunnerCgroupPlacement:
     """Return a target-owned delegated ancestor and caller-equivalent limits."""
@@ -1119,7 +1405,12 @@ def _runner_cgroup_parent(
         raise ReleaseError("installer runner target identity is invalid")
 
     try:
-        raw_bytes = proc_cgroup.read_bytes()
+        authority = proc_authority or ProcAuthority.production()
+        raw_bytes = authority.read_bytes(
+            "self/cgroup",
+            maximum=16_384,
+            operation="installer cgroup membership inventory",
+        )
         if len(raw_bytes) > 16_384:
             raise ReleaseError("installer cgroup membership record is oversized")
         raw = raw_bytes.decode("ascii")
@@ -1218,7 +1509,11 @@ def _runner_cgroup_parent(
                 )
                 procs_info = (candidate / "cgroup.procs").lstat()
                 subtree_info = (candidate / "cgroup.subtree_control").lstat()
-                final_raw = proc_cgroup.read_bytes()
+                final_raw = authority.read_bytes(
+                    "self/cgroup",
+                    maximum=16_384,
+                    operation="installer cgroup membership revalidation",
+                )
                 final_current_info = current.lstat()
                 final_info = candidate.lstat()
             except (OSError, ReleaseError) as exc:
@@ -1829,6 +2124,8 @@ def _route_profile_matches_rung(route_profile: object, rung: object) -> bool:
         return True
     if route_profile == "auto-no-direct":
         return rung != "direct"
+    if route_profile == "iphone":
+        return rung.startswith("ios:")
     return route_profile == rung
 
 
@@ -1978,8 +2275,29 @@ class Layout:
         return self.root_control / "selected-release.json"
 
     @property
+    def profile_root(self) -> Path:
+        return self.state_root.parent / "profiles"
+
+    @property
+    def active_profile(self) -> Path:
+        return self.root_control / "active-profile.json"
+
+    @property
+    def profile_activation_history_root(self) -> Path:
+        return self.root_control / "profile-activations"
+
+    def profile_activation_history_path(self, release_id: str) -> Path:
+        if RELEASE_ID_RE.fullmatch(release_id) is None:
+            raise ReleaseError(f"invalid profile activation release ID: {release_id!r}")
+        return self.profile_activation_history_root / f"{release_id}.json"
+
+    @property
     def rollback_deny(self) -> Path:
         return self.root_control / "rollback-deny.json"
+
+    @property
+    def legacy_migration_authority(self) -> Path:
+        return self.root_control / "legacy-migration-authority.json"
 
     @property
     def install_lock(self) -> Path:
@@ -2020,6 +2338,15 @@ class Layout:
         if RELEASE_ID_RE.fullmatch(digest) is None:
             raise ReleaseError(f"invalid rung evidence digest: {digest!r}")
         return self.rung_evidence_root / release_id / f"{digest}.json"
+
+    @property
+    def qualified_rung_catalog_root(self) -> Path:
+        return self.root_control / "qualified-rungs"
+
+    def qualified_rung_catalog_path(self, release_id: str) -> Path:
+        if RELEASE_ID_RE.fullmatch(release_id) is None:
+            raise ReleaseError(f"invalid qualified-rung catalog release ID: {release_id!r}")
+        return self.qualified_rung_catalog_root / f"{release_id}.json"
 
     @property
     def rung_transcript_root(self) -> Path:
@@ -2349,6 +2676,137 @@ def _check_owner(info: os.stat_result, uid: int, gid: int, path: Path) -> None:
         raise ReleaseError(
             f"unexpected owner for {path}: {info.st_uid}:{info.st_gid}; expected {uid}:{gid}"
         )
+
+
+def _operation_lock_metadata_is_exact(
+    info: os.stat_result, uid: int, gid: int
+) -> bool:
+    return (
+        stat.S_ISREG(info.st_mode)
+        and (info.st_uid, info.st_gid) == (uid, gid)
+        and stat.S_IMODE(info.st_mode) == 0o600
+        and info.st_nlink == 1
+        and info.st_size == 0
+    )
+
+
+def _open_existing_operation_lock(
+    layout: "Layout", *, writable: bool, create_for_test: bool = False
+) -> tuple[int, int, os.stat_result]:
+    """Open the package-provisioned operation lock through its verified parent."""
+
+    control_fd = _open_verified_directory(
+        layout.root_control, 0o755, layout.root_uid, layout.root_gid
+    )
+    descriptor = -1
+    try:
+        if create_for_test:
+            if not layout.test_install:
+                raise ReleaseError(
+                    "operation lock creation requires an explicit test install"
+                )
+            try:
+                descriptor = os.open(
+                    layout.operation_lock.name,
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=control_fd,
+                )
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise ReleaseError(
+                    f"cannot create test operation lock safely: {layout.operation_lock}: {exc}"
+                ) from exc
+            else:
+                try:
+                    os.fchown(descriptor, layout.root_uid, layout.root_gid)
+                    os.fchmod(descriptor, 0o600)
+                    os.fsync(descriptor)
+                    created = os.fstat(descriptor)
+                    if not _operation_lock_metadata_is_exact(
+                        created, layout.root_uid, layout.root_gid
+                    ):
+                        raise ReleaseError(
+                            f"created test operation lock is unsafe: {layout.operation_lock}"
+                        )
+                finally:
+                    os.close(descriptor)
+                    descriptor = -1
+                os.fsync(control_fd)
+
+        flags = (
+            (os.O_RDWR if writable else os.O_RDONLY)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            named = os.stat(
+                layout.operation_lock.name,
+                dir_fd=control_fd,
+                follow_symlinks=False,
+            )
+            descriptor = os.open(
+                layout.operation_lock.name, flags, dir_fd=control_fd
+            )
+        except OSError as exc:
+            qualifier = "test " if layout.test_install else "package-provisioned "
+            raise ReleaseError(
+                f"cannot open {qualifier}operation lock safely: "
+                f"{layout.operation_lock}: {exc}"
+            ) from exc
+        opened = os.fstat(descriptor)
+        if (
+            not _operation_lock_metadata_is_exact(
+                named, layout.root_uid, layout.root_gid
+            )
+            or not _operation_lock_metadata_is_exact(
+                opened, layout.root_uid, layout.root_gid
+            )
+            or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise ReleaseError(f"operation lock is unsafe: {layout.operation_lock}")
+        return control_fd, descriptor, opened
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(control_fd)
+        raise
+
+
+def _recheck_locked_operation_lock(
+    layout: "Layout",
+    control_fd: int,
+    descriptor: int,
+    original: os.stat_result,
+) -> None:
+    try:
+        named = os.stat(
+            layout.operation_lock.name,
+            dir_fd=control_fd,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise ReleaseError(
+            f"operation lock changed while held: {layout.operation_lock}: {exc}"
+        ) from exc
+    opened = os.fstat(descriptor)
+    if (
+        not _operation_lock_metadata_is_exact(named, layout.root_uid, layout.root_gid)
+        or not _operation_lock_metadata_is_exact(
+            opened, layout.root_uid, layout.root_gid
+        )
+        or (named.st_dev, named.st_ino)
+        != (original.st_dev, original.st_ino)
+        or (opened.st_dev, opened.st_ino)
+        != (original.st_dev, original.st_ino)
+    ):
+        raise ReleaseError(f"operation lock changed while held: {layout.operation_lock}")
 
 
 def _verify_dir(path: Path, mode: int, uid: int, gid: int) -> None:
@@ -2947,6 +3405,8 @@ class ReleaseInstaller:
         runtime_files: Iterable[str],
         root_files: Mapping[str, str],
         switch_timeout: float = 60.0,
+        proc_authority: ProcAuthority | None = None,
+        installed_release_id: str | None = None,
     ) -> None:
         self.layout = layout
         normalized = tuple(sorted({_safe_relpath(path) for path in runtime_files}))
@@ -2966,6 +3426,19 @@ class ReleaseInstaller:
         if switch_timeout <= 0 or switch_timeout > 300:
             raise ReleaseError("switch timeout must be in (0, 300] seconds")
         self.switch_timeout = float(switch_timeout)
+        if (
+            installed_release_id is not None
+            and RELEASE_ID_RE.fullmatch(installed_release_id) is None
+        ):
+            raise ReleaseError("installed installer release identity is invalid")
+        self.proc_authority = proc_authority or ProcAuthority.production()
+        self.installed_release_id = installed_release_id
+        self._legacy_validation_releases: set[str] = set()
+        self.profile_transition: dict[str, object] = {
+            "status": "not-checked",
+            "release_id": None,
+            "reason_code": None,
+        }
 
     def validate_apply_prerequisites(self) -> None:
         """Prove fixed privileged runtime dependencies without installing them."""
@@ -3003,6 +3476,18 @@ class ReleaseInstaller:
         _ensure_dir(layout.broker_state, 0o700, layout.root_uid, layout.root_gid)
         _ensure_dir(layout.evidence_root, 0o755, layout.root_uid, layout.root_gid)
         _ensure_dir(layout.rung_evidence_root, 0o755, layout.root_uid, layout.root_gid)
+        _ensure_dir(
+            layout.qualified_rung_catalog_root,
+            0o755,
+            layout.root_uid,
+            layout.root_gid,
+        )
+        _ensure_dir(
+            layout.profile_activation_history_root,
+            0o755,
+            layout.root_uid,
+            layout.root_gid,
+        )
         _ensure_dir(layout.rung_transcript_root, 0o755, layout.root_uid, layout.root_gid)
         _ensure_dir(layout.qualification_root, 0o755, layout.root_uid, layout.root_gid)
         _ensure_dir(layout.boot_inventory_root, 0o755, layout.root_uid, layout.root_gid)
@@ -3014,6 +3499,7 @@ class ReleaseInstaller:
         _ensure_dir(layout.user_root, 0o755, layout.root_uid, layout.root_gid)
         _ensure_dir(layout.user_releases, 0o755, layout.root_uid, layout.root_gid)
         _ensure_dir(layout.state_root, 0o700, layout.target_uid, layout.target_gid)
+        _ensure_dir(layout.profile_root, 0o700, layout.target_uid, layout.target_gid)
         _ensure_dir(layout.entrypoint.parent, 0o755, layout.target_uid, layout.target_gid)
         self._ensure_canary_auth()
         self._ensure_broker_lock()
@@ -3325,28 +3811,98 @@ class ReleaseInstaller:
         layout = self.layout
         _ensure_dir(layout.root_root, 0o755, layout.root_uid, layout.root_gid)
         _ensure_dir(layout.root_control, 0o755, layout.root_uid, layout.root_gid)
-        flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+        control_fd, fd, original = _open_existing_operation_lock(
+            layout,
+            writable=True,
+            create_for_test=layout.test_install,
         )
-        fd = os.open(layout.operation_lock, flags, 0o600)
+        locked = False
         try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise ReleaseError(f"operation lock is not regular: {layout.operation_lock}")
-            _check_owner(info, layout.root_uid, layout.root_gid, layout.operation_lock)
-            os.fchmod(fd, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+            _recheck_locked_operation_lock(layout, control_fd, fd, original)
             self._prepare_roots()
             self._ensure_selection_lock()
+            if self.installed_release_id is not None:
+                _assert_installed_release_authority(
+                    self, self.installed_release_id
+                )
             yield
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                if locked:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
+                os.close(control_fd)
+
+    @contextmanager
+    def _installed_snapshot_locked(self):
+        """Hold a shared, verification-only snapshot lock for installed status."""
+
+        layout = self.layout
+        root_fd = _open_verified_directory(
+            layout.root_root, 0o755, layout.root_uid, layout.root_gid
+        )
+        control_fd = -1
+        operation_fd = -1
+        selection_fd = -1
+        locked = False
+        try:
+            control_fd = _open_verified_directory(
+                layout.root_control, 0o755, layout.root_uid, layout.root_gid
+            )
+            control_lock_fd, operation_fd, operation_info = (
+                _open_existing_operation_lock(layout, writable=False)
+            )
+            lock_parent = os.fstat(control_lock_fd)
+            snapshot_parent = os.fstat(control_fd)
+            if (lock_parent.st_dev, lock_parent.st_ino) != (
+                snapshot_parent.st_dev,
+                snapshot_parent.st_ino,
+            ):
+                os.close(control_lock_fd)
+                raise ReleaseError(
+                    f"installed control directory changed: {layout.root_control}"
+                )
+            os.close(control_lock_fd)
+            fcntl.flock(operation_fd, fcntl.LOCK_SH)
+            locked = True
+            _recheck_locked_operation_lock(
+                layout, control_fd, operation_fd, operation_info
+            )
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            selection_fd = os.open(layout.install_lock, flags)
+            selection_info = os.fstat(selection_fd)
+            named_selection = layout.install_lock.lstat()
+            if (
+                not stat.S_ISREG(selection_info.st_mode)
+                or (selection_info.st_dev, selection_info.st_ino)
+                != (named_selection.st_dev, named_selection.st_ino)
+                or (selection_info.st_uid, selection_info.st_gid)
+                != (layout.root_uid, layout.root_gid)
+                or stat.S_IMODE(selection_info.st_mode) != 0o644
+            ):
+                raise ReleaseError(
+                    f"installed selection lock is unsafe: {layout.install_lock}"
+                )
+            yield
+        except OSError as exc:
+            raise ReleaseError(f"cannot acquire installed status snapshot: {exc}") from exc
+        finally:
+            if selection_fd >= 0:
+                os.close(selection_fd)
+            if locked:
+                fcntl.flock(operation_fd, fcntl.LOCK_UN)
+            if operation_fd >= 0:
+                os.close(operation_fd)
+            if control_fd >= 0:
+                os.close(control_fd)
+            os.close(root_fd)
 
     def _ensure_selection_lock(self) -> None:
         layout = self.layout
@@ -3456,7 +4012,13 @@ class ReleaseInstaller:
         if kind == "user":
             selected = [(None, record) for record in plan.files]
         elif kind == "root":
-            selected = [(role, records[path]) for role, path in plan.root_files]
+            roles_by_path = {path: role for role, path in plan.root_files}
+            # The privileged release contains the complete immutable installer
+            # closure, not only the four executable helper roles.  This is the
+            # concrete source of installed maintenance commands.
+            selected = [
+                (roles_by_path.get(record.path), record) for record in plan.files
+            ]
         else:
             raise ReleaseError(f"unknown release kind: {kind}")
         files: list[dict[str, object]] = []
@@ -3628,11 +4190,14 @@ class ReleaseInstaller:
                 os.fsync(releases_fd)
 
                 record_by_path = {record.path: record for record in plan.files}
-                selections = (
-                    [(None, record) for record in plan.files]
-                    if kind == "user"
-                    else [(role, record_by_path[path]) for role, path in plan.root_files]
-                )
+                if kind == "user":
+                    selections = [(None, record) for record in plan.files]
+                else:
+                    roles_by_path = {path: role for role, path in plan.root_files}
+                    selections = [
+                        (roles_by_path.get(record.path), record)
+                        for record in plan.files
+                    ]
                 for _role, record in selections:
                     self._copy_record(
                         layout.source_dir / record.path,
@@ -3794,8 +4359,13 @@ class ReleaseInstaller:
         for entry in entries:
             if not isinstance(entry, dict):
                 raise ReleaseError(f"invalid file manifest entry in {directory}")
-            allowed = {"path", "sha256", "size", "mode"} | ({"role"} if kind == "root" else set())
-            if set(entry) != allowed:
+            ordinary_fields = {"path", "sha256", "size", "mode"}
+            allowed_field_sets = (
+                (ordinary_fields, ordinary_fields | {"role"})
+                if kind == "root"
+                else (ordinary_fields,)
+            )
+            if set(entry) not in allowed_field_sets:
                 raise ReleaseError(f"unexpected file manifest fields in {directory}")
             relpath = _safe_relpath(str(entry.get("path", "")))
             if relpath in expected_paths:
@@ -3816,9 +4386,16 @@ class ReleaseInstaller:
                 raise ReleaseError(f"release file mismatch: {directory / relpath}")
             if kind == "root":
                 role = entry.get("role")
-                if not isinstance(role, str) or role not in ROOT_ROLES or role in roles:
-                    raise ReleaseError(f"invalid or duplicate root helper role in {directory}")
-                roles.add(role)
+                if role is not None:
+                    if (
+                        not isinstance(role, str)
+                        or role not in ROOT_ROLES
+                        or role in roles
+                    ):
+                        raise ReleaseError(
+                            f"invalid or duplicate root helper role in {directory}"
+                        )
+                    roles.add(role)
         actual_files: set[str] = set()
         actual_dirs: set[str] = set()
         for path in directory.rglob("*"):
@@ -3869,10 +4446,22 @@ class ReleaseInstaller:
             for entry in user_files
         ]
         root_projection = sorted(
-            [{"role": entry["role"], "path": entry["path"]} for entry in root_files],
+            [
+                {"role": entry["role"], "path": entry["path"]}
+                for entry in root_files
+                if "role" in entry
+            ],
             key=lambda entry: (str(entry["role"]), str(entry["path"])),
         )
-        if user_projection != runtime_entries or root_projection != root_entries:
+        root_runtime_projection = [
+            {key: entry[key] for key in ("path", "sha256", "size", "mode")}
+            for entry in root_files
+        ]
+        if (
+            user_projection != runtime_entries
+            or root_runtime_projection != runtime_entries
+            or root_projection != root_entries
+        ):
             raise ReleaseError(f"release manifests do not match hashed identity: {release_id}")
         self._root_files_from_identity(identity, release_id)
         return user, root
@@ -3884,15 +4473,32 @@ class ReleaseInstaller:
 
         user, root = self.validate_release_pair(release_id)
         entries = user.get("files")
-        if not isinstance(entries, list) or not any(
-            isinstance(entry, dict)
-            and entry.get("path") == DIRECT_ADMISSION_RUNTIME
-            and entry.get("mode") == "0444"
-            for entry in entries
-        ):
+        root_entries = root.get("files")
+        if not isinstance(entries, list) or not isinstance(root_entries, list):
+            raise ReleaseError(f"release closure is invalid: {release_id}")
+
+        def contains(
+            values: list[object], relative: str, expected_mode: str
+        ) -> bool:
+            return any(
+                isinstance(entry, dict)
+                and entry.get("path") == relative
+                and entry.get("mode") == expected_mode
+                for entry in values
+            )
+
+        if not contains(entries, DIRECT_ADMISSION_RUNTIME, "0444"):
             raise ReleaseError(
                 "release predates mandatory direct self-admission and cannot be selected: "
                 f"{release_id}"
+            )
+        if not (
+            contains(entries, INSTALLER_RUNTIME, "0444")
+            and contains(root_entries, INSTALLER_RUNTIME, "0444")
+        ):
+            raise ReleaseError(
+                "release predates the mandatory installed installer closure and "
+                f"cannot be selected: {release_id}"
             )
         if self._production_release_layout():
             contents: dict[str, bytes] = {}
@@ -3938,8 +4544,23 @@ class ReleaseInstaller:
             raise ReleaseError(f"incomplete or aliased root helper identity: {release_id}")
         return dict(sorted(result.items()))
 
+    @contextmanager
+    def _permit_legacy_release_validation(self, release_id: str):
+        if RELEASE_ID_RE.fullmatch(release_id) is None:
+            raise ReleaseError("legacy validation release ID is invalid")
+        already_present = release_id in self._legacy_validation_releases
+        self._legacy_validation_releases.add(release_id)
+        try:
+            yield
+        finally:
+            if not already_present:
+                self._legacy_validation_releases.remove(release_id)
+
     def _target_root_files(self, release_id: str) -> dict[str, str]:
-        user, _root = self.validate_target_release_pair(release_id)
+        if release_id in self._legacy_validation_releases:
+            user, _root = self.validate_release_pair(release_id)
+        else:
+            user, _root = self.validate_target_release_pair(release_id)
         identity = user.get("identity")
         assert isinstance(identity, dict)
         return self._root_files_from_identity(identity, release_id)
@@ -4029,6 +4650,8 @@ class ReleaseInstaller:
             "QUALIFICATION_ROOT": str(layout.root_control / "qualification"),
             "RUNG_CANARY": str(layout.root_control / "rung-canary.json"),
             "CANARY_TERMINAL": str(layout.canary_terminal),
+            "ACTIVE_PROFILE": str(layout.root_control / "active-profile.json"),
+            "ACTIVATION_RECORD_SCHEMA": ACTIVATION_RECORD_SCHEMA_VERSION,
             "BOOT_INVENTORY": str(
                 layout.root_control / "boot-inventory" / f"{release_id}.json"
             ),
@@ -4057,6 +4680,7 @@ class ReleaseInstaller:
             "RUNG_MEASUREMENT_FIELDS": tuple(sorted(RUNG_MEASUREMENT_FIELDS)),
             "RUNG_RECORD_FIELDS": tuple(sorted(RUNG_RECORD_FIELDS)),
             "CANARY_BINDINGS": CANARY_ENV_BINDINGS,
+            "USER_GATE_TEST_ENV": USER_GATE_TEST_ENV,
             "HOST_ID": self._host_id(),
             "ZERO_DIGEST": ZERO_DIGEST,
         }
@@ -4070,8 +4694,8 @@ import stat
 import sys
 
 RID = re.compile(r"^[0-9a-f]{64}$")
-RUNG = re.compile(r"^(?:direct|iphone|vpn|home:[A-Za-z0-9._:+@-]{1,120})$")
-ROUTE_PROFILE = re.compile(r"^(?:direct|iphone|vpn|auto|auto-no-direct|home:[A-Za-z0-9._:+@-]{1,120})$")
+RUNG = re.compile(r"^(?:direct|vpn|home:[A-Za-z0-9._:+@-]{1,120}|ios:[a-z0-9][a-z0-9._-]{0,63})$")
+ROUTE_PROFILE = re.compile(r"^(?:direct|iphone|vpn|auto|auto-no-direct|home:[A-Za-z0-9._:+@-]{1,120}|ios:[a-z0-9][a-z0-9._-]{0,63})$")
 GROK_RELEASE = re.compile(r"^[A-Za-z0-9._:+@-]{1,128}$")
 MODEL_ID = re.compile(r"^[A-Za-z0-9._:+/@-]{1,128}$")
 BOOT = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -4128,6 +4752,57 @@ def read_json(path, uid, gid, mode):
     if not isinstance(value, dict):
         fail(f"metadata is not an object: {path}")
     return value
+
+def active_profile_matches_selected_release():
+    """Treat only a canonical activation for this release as the default.
+
+    A valid activation for an older release is dormant after an upgrade or
+    rollback, so bare invocations retain compatibility behavior until the new
+    release is explicitly qualified and activated.  Malformed current state is
+    still routed to the managed client, which reports it as blocked rather than
+    silently bypassing it.
+    """
+    if KIND != "user" or not os.path.lexists(ACTIVE_PROFILE):
+        return False
+    raw = read_file(ACTIVE_PROFILE, ROOT_UID, ROOT_GID, 0o444)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, ValueError):
+        return True
+    fields = {
+        "schema_version", "profile_name", "profile_sha256", "release_id",
+        "contract_sha256", "grok_release_id", "model_id",
+        "activated_unix_ns",
+    }
+    valid = (
+        isinstance(value, dict)
+        and set(value) == fields
+        and value.get("schema_version") == ACTIVATION_RECORD_SCHEMA
+        and value.get("profile_name") == "default"
+        and type(value.get("profile_sha256")) is str
+        and RID.fullmatch(value["profile_sha256"]) is not None
+        and type(value.get("release_id")) is str
+        and RID.fullmatch(value["release_id"]) is not None
+        and type(value.get("contract_sha256")) is str
+        and RID.fullmatch(value["contract_sha256"]) is not None
+        and type(value.get("grok_release_id")) is str
+        and value["grok_release_id"].startswith("sha256:")
+        and len(value["grok_release_id"]) == 71
+        and RID.fullmatch(value["grok_release_id"][7:]) is not None
+        and type(value.get("model_id")) is str
+        and MODEL_ID.fullmatch(value["model_id"]) is not None
+        and type(value.get("activated_unix_ns")) is int
+        and 1 <= value["activated_unix_ns"] <= (1 << 63) - 1
+        and raw == (
+            json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ) + "\n"
+        ).encode("ascii")
+    )
+    return not valid or value["release_id"] == EXPECTED
 
 def resource_proves(step, observations):
     contract_fields = {
@@ -4198,7 +4873,7 @@ def resource_proves(step, observations):
         and observed["post_memory_delta_bytes"] <= expected["post_memory_tolerance_bytes"]
     )
 
-def fixed_qualification(path, step, nonce, canary_kind, rung, route_profile, grok_release, model_id, contract=None):
+def fixed_qualification(path, step, nonce, canary_kind, rung, route_profile, grok_release, model_id, contract=None, profile_sha256=None):
     raw = read_file(path, ROOT_UID, ROOT_GID, 0o444)
     try:
         value = json.loads(raw)
@@ -4208,7 +4883,7 @@ def fixed_qualification(path, step, nonce, canary_kind, rung, route_profile, gro
     common = {
         "schema_version", "kind", "step", "release_id", "canary_nonce",
         "canary_kind", "rung", "route_profile", "contract_sha256", "grok_release_id",
-        "model_id", "status", "started_unix_ns", "completed_unix_ns",
+        "model_id", "profile_sha256", "status", "started_unix_ns", "completed_unix_ns",
         "duration_ms", "observations", "error_code", "error_sha256",
     }
     if (
@@ -4225,6 +4900,7 @@ def fixed_qualification(path, step, nonce, canary_kind, rung, route_profile, gro
         or value.get("route_profile") != route_profile
         or value.get("grok_release_id") != grok_release
         or value.get("model_id") != model_id
+        or value.get("profile_sha256") != profile_sha256
         or type(value.get("contract_sha256")) is not str
         or RID.fullmatch(value["contract_sha256"]) is None
         or (contract is not None and value.get("contract_sha256") != contract)
@@ -4293,6 +4969,7 @@ def fixed_qualification(path, step, nonce, canary_kind, rung, route_profile, gro
     elif step == "real-pair":
         expected_observations = {
             "sessions_requested", "sessions_completed", "active_rung", "model_id",
+            "rung_qualification_sha256",
             "shared_owner_epoch", "shared_generation", "shared_contract",
             "independent_grok_units", "shared_leader_disabled",
             "leader_socket_count", "unique_session_ids", "outputs_valid",
@@ -4317,6 +4994,8 @@ def fixed_qualification(path, step, nonce, canary_kind, rung, route_profile, gro
             and observations.get("sessions_completed") == 2
             and observations.get("active_rung") == rung
             and observations.get("model_id") == model_id
+            and type(observations.get("rung_qualification_sha256")) is str
+            and RID.fullmatch(observations["rung_qualification_sha256"]) is not None
             and observations.get("independent_grok_units") == 2
             and observations.get("leader_socket_count") == 0
             and observations.get("unique_session_ids") == 2
@@ -4441,7 +5120,7 @@ def broker_rung_canary_request(argv):
     fields = {
         "schema_version", "release_id", "host_id", "rung", "route_profile",
         "contract_sha256", "grok_release_id", "model_id", "canary_kind",
-        "canary_nonce", "created_unix_ns",
+        "canary_nonce", "created_unix_ns", "profile_sha256",
     }
     route_profile = record.get("route_profile")
     return (
@@ -4461,10 +5140,24 @@ def broker_rung_canary_request(argv):
         and RID.fullmatch(record["canary_nonce"]) is not None
         and type(record.get("created_unix_ns")) is int
         and record.get("created_unix_ns", 0) > 0
+        and (
+            record.get("profile_sha256") is None
+            or (
+                type(record.get("profile_sha256")) is str
+                and RID.fullmatch(record["profile_sha256"]) is not None
+            )
+        )
     )
 
 def public_recovery_request(argv):
-    return KIND == "user" and argv == ["recover"]
+    return (
+        KIND == "user"
+        and argv == ["recover"]
+        and (
+            "GROK_MULTI_SESSION" not in os.environ
+            or os.environ.get("GROK_MULTI_SESSION") in {"0", "1"}
+        )
+    )
 
 def canary_command_class(argv):
     if not argv:
@@ -4474,9 +5167,9 @@ def canary_command_class(argv):
         return "usage"
     if first in {"inspect", "--version", "version", "completions", "worktree", "leader"}:
         return "bare"
-    if first in {"stop", "iphone-setup"}:
+    if first in {"stop", "iphone-setup", "iphone-remove", "iphone-reorder"}:
         return "maintenance"
-    if first in {"status", "ip"} and len(argv) == 1:
+    if first in {"status", "ip", "iphone-list"} and len(argv) == 1:
         return "control"
     if argv == ["recover"]:
         return "recovery"
@@ -4484,6 +5177,11 @@ def canary_command_class(argv):
     while index < len(argv):
         item = argv[index]
         if item == "--host":
+            if index + 1 >= len(argv):
+                return "gated"
+            index += 2
+            continue
+        if item == "--ios":
             if index + 1 >= len(argv):
                 return "gated"
             index += 2
@@ -4538,7 +5236,7 @@ def canary_request(argv):
     fields = {
         "schema_version", "release_id", "host_id", "rung", "route_profile",
         "contract_sha256", "grok_release_id", "model_id", "canary_kind",
-        "canary_nonce", "created_unix_ns",
+        "canary_nonce", "created_unix_ns", "profile_sha256",
     }
     rung = os.environ.get("GROK_RELEASE_CANARY_RUNG")
     route_profile = os.environ.get("GROK_RELEASE_CANARY_ROUTE_PROFILE")
@@ -4547,6 +5245,7 @@ def canary_request(argv):
     model_id = os.environ.get("GROK_RELEASE_CANARY_MODEL")
     canary_kind = os.environ.get("GROK_RELEASE_CANARY_KIND")
     canary_nonce = os.environ.get("GROK_RELEASE_CANARY_NONCE")
+    profile_sha256 = os.environ.get("GROK_RELEASE_CANARY_PROFILE_SHA256")
     if (
         set(record) != fields
         or record.get("schema_version") != RUNG_CANARY_SCHEMA
@@ -4562,6 +5261,7 @@ def canary_request(argv):
             route_profile == rung
             or route_profile == "auto"
             or (route_profile == "auto-no-direct" and rung != "direct")
+            or (route_profile == "iphone" and rung.startswith("ios:"))
         )
         or record.get("canary_kind") != canary_kind
         or canary_kind not in {"release", "rung"}
@@ -4589,6 +5289,14 @@ def canary_request(argv):
         or record.get("canary_nonce") != canary_nonce
         or type(canary_nonce) is not str
         or RID.fullmatch(canary_nonce) is None
+        or not (
+            profile_sha256 is None
+            or (
+                canary_kind == "rung"
+                and RID.fullmatch(profile_sha256) is not None
+            )
+        )
+        or record.get("profile_sha256") != profile_sha256
         or type(record.get("created_unix_ns")) is not int
         or record.get("created_unix_ns", 0) <= 0
     ):
@@ -4701,7 +5409,37 @@ if hashlib.sha256(read_file(ENTRYPOINT, ROOT_UID, ROOT_GID, 0o555)).hexdigest() 
     fail("entrypoint gate digest mismatch")
 if hashlib.sha256(read_file(BROKER_GATE, ROOT_UID, ROOT_GID, 0o555)).hexdigest() != root_record.get("broker_gate_sha256"):
     fail("broker gate digest mismatch")
-if selection_phase == "READY" and not evidence_recovery_bypass:
+managed_profile_command = KIND == "user" and sys.argv[1:] in (
+    ["doctor", "--json"],
+    ["profile-create", "--json"],
+)
+doctor_evidence_parent = False
+doctor_evidence_child = False
+doctor_evidence_blocked = False
+if KIND == "user" and sys.argv[1:] == ["doctor", "--json"]:
+    probe_pid = os.fork()
+    if probe_pid == 0:
+        doctor_evidence_child = True
+        try:
+            null_fd = os.open("/dev/null", os.O_WRONLY | getattr(os, "O_CLOEXEC", 0))
+            os.dup2(null_fd, 2)
+            if null_fd != 2:
+                os.close(null_fd)
+        except OSError:
+            os._exit(78)
+    else:
+        doctor_evidence_parent = True
+        waited_pid, probe_status = os.waitpid(probe_pid, 0)
+        doctor_evidence_blocked = (
+            waited_pid != probe_pid
+            or not os.WIFEXITED(probe_status)
+            or os.WEXITSTATUS(probe_status) != 0
+        )
+if (
+    selection_phase == "READY"
+    and not evidence_recovery_bypass
+    and not doctor_evidence_parent
+):
     evidence_raw = read_file(
         os.path.join(EVIDENCE_ROOT, EXPECTED + ".json"),
         ROOT_UID,
@@ -4750,13 +5488,29 @@ if selection_phase == "READY" and not evidence_recovery_bypass:
         ):
             fail("promotion evidence criterion failed or mismatched")
 
-if not evidence_recovery_bypass:
+# The doctor probe child answers only whether release-level evidence admits.
+# Per-rung terminal evidence is deliberately a last-client decision so one
+# revoked rung degrades the ladder instead of aborting every wrapper command.
+if doctor_evidence_child:
+    os._exit(0)
+
+# These exact commands inspect/report managed state inside the selected client.
+# Do not let an unsafe activation object prevent doctor from returning its
+# closed JSON status, and do not make candidate creation depend on a mutable
+# prior activation. Ordinary commands still validate activation here before
+# the wrapper can choose the managed lane.
+managed_profile_requested = (
+    "GROK_MULTI_SESSION" not in os.environ
+    or os.environ.get("GROK_MULTI_SESSION") == "1"
+)
+managed_profile_present = (
+    False
+    if managed_profile_command or not managed_profile_requested
+    else active_profile_matches_selected_release()
+)
+if not evidence_recovery_bypass and not doctor_evidence_parent:
     normalized_rungs = []
     identities = set()
-    owner_mode(info(RUNG_EVIDENCE_ROOT), RUNG_EVIDENCE_ROOT, ROOT_UID, ROOT_GID, 0o755, "dir")
-    release_rung_root = os.path.join(RUNG_EVIDENCE_ROOT, EXPECTED)
-    if qualified_rungs:
-        owner_mode(info(release_rung_root), release_rung_root, ROOT_UID, ROOT_GID, 0o755, "dir")
     for record in qualified_rungs:
         if not isinstance(record, dict) or set(record) != set(RUNG_RECORD_FIELDS):
             fail("qualified rung record has an unexpected shape")
@@ -4767,163 +5521,16 @@ if not evidence_recovery_bypass:
         if (
             type(rung) is not str or RUNG.fullmatch(rung) is None
             or type(contract) is not str or RID.fullmatch(contract) is None
-            or type(grok_release) is not str or GROK_RELEASE.fullmatch(grok_release) is None
-            or type(rung_evidence_sha) is not str or RID.fullmatch(rung_evidence_sha) is None
+            or type(grok_release) is not str
+            or GROK_RELEASE.fullmatch(grok_release) is None
+            or type(rung_evidence_sha) is not str
+            or RID.fullmatch(rung_evidence_sha) is None
         ):
             fail("qualified rung identity is invalid")
         identity = (rung, contract, grok_release)
         if identity in identities:
             fail("qualified rung identity is duplicated")
         identities.add(identity)
-        rung_raw = read_file(
-            os.path.join(release_rung_root, rung_evidence_sha + ".json"),
-            ROOT_UID,
-            ROOT_GID,
-            0o444,
-        )
-        if hashlib.sha256(rung_raw).hexdigest() != rung_evidence_sha:
-            fail("qualified rung evidence digest mismatch")
-        try:
-            rung_evidence = json.loads(rung_raw)
-        except (UnicodeDecodeError, ValueError) as exc:
-            fail(f"invalid qualified rung evidence: {exc}")
-        rung_fields = {
-            "schema_version", "release_id", "host_id", "rung",
-            "route_profile", "contract_sha256", "grok_release_id", "model_id",
-            "measured_unix_ns", "canary_nonce",
-            "release_qualification_sha256", "real_pair_result_sha256",
-            "measurements", "overall_pass",
-        }
-        measurements = rung_evidence.get("measurements") if isinstance(rung_evidence, dict) else None
-        canary_nonce = rung_evidence.get("canary_nonce") if isinstance(rung_evidence, dict) else None
-        model_id = rung_evidence.get("model_id") if isinstance(rung_evidence, dict) else None
-        route_profile = rung_evidence.get("route_profile") if isinstance(rung_evidence, dict) else None
-        release_qualification_sha = rung_evidence.get("release_qualification_sha256") if isinstance(rung_evidence, dict) else None
-        real_pair_sha = rung_evidence.get("real_pair_result_sha256") if isinstance(rung_evidence, dict) else None
-        if (
-            not isinstance(rung_evidence, dict)
-            or set(rung_evidence) != rung_fields
-            or rung_evidence.get("schema_version") != RUNG_EVIDENCE_SCHEMA
-            or rung_evidence.get("release_id") != EXPECTED
-            or rung_evidence.get("host_id") != HOST_ID
-            or rung_evidence.get("rung") != rung
-            or type(route_profile) is not str or ROUTE_PROFILE.fullmatch(route_profile) is None
-            or not (
-                route_profile == rung
-                or route_profile == "auto"
-                or (route_profile == "auto-no-direct" and rung != "direct")
-            )
-            or rung_evidence.get("contract_sha256") != contract
-            or rung_evidence.get("grok_release_id") != grok_release
-            or type(model_id) is not str or MODEL_ID.fullmatch(model_id) is None
-            or type(canary_nonce) is not str or RID.fullmatch(canary_nonce) is None
-            or type(release_qualification_sha) is not str or RID.fullmatch(release_qualification_sha) is None
-            or type(real_pair_sha) is not str or RID.fullmatch(real_pair_sha) is None
-            or type(rung_evidence.get("measured_unix_ns")) is not int
-            or rung_evidence.get("measured_unix_ns", 0) <= 0
-            or not isinstance(measurements, dict)
-            or set(measurements) != set(RUNG_MEASUREMENT_FIELDS)
-            or any(measurements.get(field) is not True for field in RUNG_MEASUREMENT_FIELDS if field not in {"duration_ms", "result_sha256"})
-            or type(measurements.get("duration_ms")) is not int
-            or not 1 <= measurements.get("duration_ms", 0) <= 2700000
-            or type(measurements.get("result_sha256")) is not str
-            or RID.fullmatch(measurements["result_sha256"]) is None
-            or rung_evidence.get("overall_pass") is not True
-        ):
-            fail("qualified rung evidence is failed or mismatched")
-        qualification_dir = os.path.join(QUALIFICATION_ROOT, EXPECTED)
-        owner_mode(info(QUALIFICATION_ROOT), QUALIFICATION_ROOT, ROOT_UID, ROOT_GID, 0o755, "dir")
-        owner_mode(info(qualification_dir), qualification_dir, ROOT_UID, ROOT_GID, 0o755, "dir")
-        try:
-            qualification_entries = sorted(os.listdir(qualification_dir))
-        except OSError as exc:
-            fail(f"cannot list release qualification: {exc}")
-        if qualification_entries != ["fault-recovery.json", "load32.json", "release.json"]:
-            fail("release qualification step set is incomplete or contains residue")
-        release_state_raw = read_file(os.path.join(qualification_dir, "release.json"), ROOT_UID, ROOT_GID, 0o444)
-        if hashlib.sha256(release_state_raw).hexdigest() != release_qualification_sha:
-            fail("release qualification digest mismatch")
-        try:
-            release_state = json.loads(release_state_raw)
-        except (UnicodeDecodeError, ValueError) as exc:
-            fail(f"invalid release qualification state: {exc}")
-        release_fields = {
-            "schema_version", "release_id", "host_id", "boot_id", "canary_nonce",
-            "contract_sha256", "grok_release_id", "model_id", "step_sha256s",
-            "entrypoint_sha256", "broker_gate_sha256",
-            "qualified_unix_ns", "overall_pass",
-        }
-        if (
-            not isinstance(release_state, dict)
-            or set(release_state) != release_fields
-            or release_state.get("schema_version") != RELEASE_QUALIFICATION_SCHEMA
-            or release_state.get("release_id") != EXPECTED
-            or release_state.get("host_id") != HOST_ID
-            or type(release_state.get("boot_id")) is not str
-            or BOOT.fullmatch(release_state["boot_id"]) is None
-            or type(release_state.get("canary_nonce")) is not str
-            or RID.fullmatch(release_state["canary_nonce"]) is None
-            or type(release_state.get("contract_sha256")) is not str
-            or RID.fullmatch(release_state["contract_sha256"]) is None
-            or release_state.get("entrypoint_sha256") != root_record.get("entrypoint_sha256")
-            or release_state.get("broker_gate_sha256") != root_record.get("broker_gate_sha256")
-            or type(release_state.get("grok_release_id")) is not str
-            or GROK_RELEASE.fullmatch(release_state["grok_release_id"]) is None
-            or release_state.get("model_id") != "grok-4.5"
-            or type(release_state.get("qualified_unix_ns")) is not int
-            or release_state.get("qualified_unix_ns", 0) <= 0
-            or release_state.get("overall_pass") is not True
-        ):
-            fail("release qualification state is failed or mismatched")
-        fake_raw = read_file(
-            os.path.join(user_release, "grok_ms", "qualification_fake_grok.py"),
-            ROOT_UID, ROOT_GID, 0o555,
-        )
-        if release_state.get("grok_release_id") != "sha256:" + hashlib.sha256(fake_raw).hexdigest():
-            fail("release qualification fake Grok identity mismatch")
-        release_results = []
-        step_digests = {}
-        for step in ("load32", "fault-recovery"):
-            result, result_sha = fixed_qualification(
-                os.path.join(qualification_dir, step + ".json"), step,
-                release_state["canary_nonce"], "release", "direct", "direct",
-                release_state["grok_release_id"], release_state["model_id"],
-            )
-            if result.get("contract_sha256") != release_state.get("contract_sha256"):
-                fail("release qualification contract differs between steps")
-            release_results.append(result)
-            step_digests[step] = result_sha
-        if release_state.get("step_sha256s") != step_digests:
-            fail("release qualification step digests mismatch")
-        release_transcript_root = os.path.join(RUNG_TRANSCRIPT_ROOT, EXPECTED)
-        nonce_transcript_root = os.path.join(release_transcript_root, canary_nonce)
-        owner_mode(info(RUNG_TRANSCRIPT_ROOT), RUNG_TRANSCRIPT_ROOT, ROOT_UID, ROOT_GID, 0o755, "dir")
-        owner_mode(info(release_transcript_root), release_transcript_root, ROOT_UID, ROOT_GID, 0o755, "dir")
-        owner_mode(info(nonce_transcript_root), nonce_transcript_root, ROOT_UID, ROOT_GID, 0o755, "dir")
-        try:
-            actual_entries = sorted(os.listdir(nonce_transcript_root))
-        except OSError as exc:
-            fail(f"cannot list rung qualification results: {exc}")
-        if "real-pair.json" not in actual_entries or any(
-            name != "real-pair.json" and re.fullmatch(r"[0-9a-f]{64}\.json", name) is None
-            for name in actual_entries
-        ):
-            fail("rung qualification result set contains residue")
-        real_result, actual_real_sha = fixed_qualification(
-            os.path.join(nonce_transcript_root, "real-pair.json"), "real-pair",
-            canary_nonce, "rung", rung, route_profile, grok_release, model_id, contract,
-        )
-        if actual_real_sha != real_pair_sha:
-            fail("real-pair qualification digest mismatch")
-        derived_result = hashlib.sha256(
-            (json.dumps(
-                {"real_pair_result_sha256": real_pair_sha, "release_qualification_sha256": release_qualification_sha},
-                sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-            ) + "\n").encode("ascii")
-        ).hexdigest()
-        expected_duration = max(1, sum(item["duration_ms"] for item in release_results) + real_result["duration_ms"])
-        if measurements.get("result_sha256") != derived_result or measurements.get("duration_ms") != expected_duration:
-            fail("rung measurement is not derived from fixed qualification results")
         normalized_rungs.append(record)
     if qualified_rungs != sorted(
         normalized_rungs,
@@ -4932,8 +5539,20 @@ if not evidence_recovery_bypass:
         ),
     ):
         fail("qualified rung selection is not canonical")
-
-    feature_on = KIND == "user" and os.environ.get("GROK_MULTI_SESSION") == "1"
+if not evidence_recovery_bypass:
+    feature_on = KIND == "user" and (
+        os.environ.get("GROK_MULTI_SESSION") == "1"
+        or (
+            "GROK_MULTI_SESSION" not in os.environ
+            and managed_profile_present
+        )
+    ) and sys.argv[1:] not in (
+        ["--help"],
+        ["-h"],
+        ["help"],
+        ["doctor", "--json"],
+        ["profile-create", "--json"],
+    )
     broker_mutation = KIND == "broker" and not broker_cleanup and canary_fd is None
     if feature_on or broker_mutation:
         boot_inventory = read_json(BOOT_INVENTORY, ROOT_UID, ROOT_GID, 0o444)
@@ -5039,6 +5658,13 @@ if KIND == "broker":
 user_env = dict(os.environ)
 user_env["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
 user_env["GROK_RELEASE_LOCK_FD"] = str(lock_fd)
+user_env.pop("GROK_MANAGED_DOCTOR_GATE_BLOCKED", None)
+if doctor_evidence_blocked:
+    user_env["GROK_MANAGED_DOCTOR_GATE_BLOCKED"] = "1"
+if managed_profile_present:
+    user_env["GROK_MANAGED_PROFILE_AVAILABLE"] = "1"
+else:
+    user_env.pop("GROK_MANAGED_PROFILE_AVAILABLE", None)
 if canary_fd is not None:
     try:
         os.set_inheritable(canary_fd, True)
@@ -5059,11 +5685,26 @@ if canary_fd is not None:
 else:
     for name in CANARY_BINDINGS:
         user_env.pop(name, None)
-if TEST_INSTALL and user_env.get("GROK_TESTING") == "1":
-    user_env["GROK_TEST_ROOT_RELEASE_CONTROL"] = os.path.dirname(ROOT_SELECTED)
+trusted_test_env = {}
+if TEST_INSTALL:
+    trusted_test_env = {
+        "GROK_TESTING": "1",
+        "GROK_TEST_ROOT_RELEASE_CONTROL": os.path.dirname(ROOT_SELECTED),
+    }
+    for name in USER_GATE_TEST_ENV:
+        value = os.environ.get(name)
+        if value is not None:
+            trusted_test_env[name] = value
 for name in tuple(user_env):
     if (
-        ((name == "GROK_TESTING" or name.startswith("GROK_TEST_")) and not TEST_INSTALL)
+        (
+            (name == "GROK_TESTING" or name.startswith("GROK_TEST_"))
+            and name not in trusted_test_env
+        )
+        or name.startswith("GROK_BOOTSTRAP_")
+        or name.startswith("GROK_LAUNCHER_TEST_")
+        or name == "GROK_RUN_ROOT_CGROUP_TEST"
+        or name == "GROK_INSTALLER_INTERNAL_PROC_FD"
         or name.startswith("LD_")
         or name in {
             "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS",
@@ -5071,6 +5712,7 @@ for name in tuple(user_env):
         }
     ):
         user_env.pop(name, None)
+user_env.update(trusted_test_env)
 os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
 '''
         # Isolated mode prevents PYTHONPATH/user-site injection into the root gate.
@@ -5453,7 +6095,8 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
     ) -> dict[str, str]:
         fields = {
             "schema_version", "release_id", "host_id", "rung", "route_profile",
-            "contract_sha256", "grok_release_id", "model_id", "measured_unix_ns",
+            "contract_sha256", "rung_qualification_sha256", "grok_release_id",
+            "model_id", "qualification_profile_sha256", "measured_unix_ns",
             "canary_nonce", "release_qualification_sha256",
             "real_pair_result_sha256", "measurements", "overall_pass",
         }
@@ -5462,10 +6105,14 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         rung = value.get("rung")
         route_profile = value.get("route_profile")
         contract = value.get("contract_sha256")
+        qualification = value.get("rung_qualification_sha256")
         grok_release = value.get("grok_release_id")
         model_id = value.get("model_id")
         measurements = value.get("measurements")
         nonce = value.get("canary_nonce")
+        qualification_profile_sha256 = value.get(
+            "qualification_profile_sha256"
+        )
         if (
             value.get("schema_version") != RUNG_EVIDENCE_SCHEMA_VERSION
             or value.get("release_id") != release_id
@@ -5475,10 +6122,20 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             or not _route_profile_matches_rung(route_profile, rung)
             or type(contract) is not str
             or RELEASE_ID_RE.fullmatch(contract) is None
+            or type(qualification) is not str
+            or RELEASE_ID_RE.fullmatch(qualification) is None
             or type(grok_release) is not str
             or GROK_RELEASE_RE.fullmatch(grok_release) is None
             or type(model_id) is not str
             or MODEL_ID_RE.fullmatch(model_id) is None
+            or not (
+                qualification_profile_sha256 is None
+                or (
+                    type(qualification_profile_sha256) is str
+                    and RELEASE_ID_RE.fullmatch(qualification_profile_sha256)
+                    is not None
+                )
+            )
             or type(value.get("measured_unix_ns")) is not int
             or value.get("measured_unix_ns", 0) <= 0
             or not isinstance(measurements, dict)
@@ -5516,6 +6173,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             "contract_sha256": contract,
             "grok_release_id": grok_release,
             "model_id": model_id,
+            "profile_sha256": qualification_profile_sha256,
         }
         run_root = self.layout.rung_transcript_dir(release_id, nonce)
         _verify_dir(run_root, 0o755, self.layout.root_uid, self.layout.root_gid)
@@ -5564,6 +6222,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 "contract_sha256": None,
                 "grok_release_id": release_state["grok_release_id"],
                 "model_id": release_state["model_id"],
+                "profile_sha256": None,
             },
         )
         fault_result, _ = self._read_qualification_result(
@@ -5578,6 +6237,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 "contract_sha256": None,
                 "grok_release_id": release_state["grok_release_id"],
                 "model_id": release_state["model_id"],
+                "profile_sha256": None,
             },
         )
         expected_measurements = {
@@ -5599,6 +6259,9 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         if (
             value.get("release_qualification_sha256") != release_digest
             or value.get("real_pair_result_sha256") != real_digest
+            or real_result.get("observations", {}).get(
+                "rung_qualification_sha256"
+            ) != qualification
             or measurements != expected_measurements
         ):
             raise ReleaseError("rung evidence does not match fixed qualification results")
@@ -5607,9 +6270,10 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         if RELEASE_ID_RE.fullmatch(expected_digest) is None:
             raise ReleaseError("rung evidence digest is invalid")
         assert isinstance(rung, str) and isinstance(contract, str)
+        assert isinstance(qualification, str)
         assert isinstance(grok_release, str)
         return {
-            "contract_sha256": contract,
+            "contract_sha256": qualification,
             "evidence_sha256": expected_digest,
             "grok_release_id": grok_release,
             "rung": rung,
@@ -5621,37 +6285,104 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         records: Iterable[Mapping[str, object]],
     ) -> list[dict[str, str]]:
         normalized = self._normalize_qualified_rungs(records)
-        root = self.layout.rung_evidence_root
-        _verify_dir(root, 0o755, self.layout.root_uid, self.layout.root_gid)
-        if normalized:
-            _verify_dir(
-                root / release_id,
-                0o755,
-                self.layout.root_uid,
-                self.layout.root_gid,
+        try:
+            return list(
+                eligible_selected_rungs(
+                    normalized,
+                    control_root=self.layout.root_control,
+                    release_id=release_id,
+                    host_id=self._host_id(),
+                    root_uid=self.layout.root_uid,
+                    root_gid=self.layout.root_gid,
+                )
             )
-        for record in normalized:
-            digest = record["evidence_sha256"]
-            raw, _mode = _read_regular(
-                root / release_id / f"{digest}.json",
-                uid=self.layout.root_uid,
-                gid=self.layout.root_gid,
-                mode=0o444,
-                maximum=1024 * 1024,
-            )
-            if _sha256_bytes(raw) != digest:
-                raise ReleaseError("qualified rung evidence digest changed")
-            try:
-                value = json.loads(raw)
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise ReleaseError(f"cannot parse qualified rung evidence: {exc}") from exc
-            if self._validate_rung_evidence_value(
-                release_id,
-                value,
-                expected_digest=digest,
-            ) != record:
-                raise ReleaseError("qualified rung selection/evidence mismatch")
+        except RungAdmissionError as exc:
+            raise ReleaseError("qualified rung selection is invalid") from exc
+
+    def _write_qualified_rung_catalog(
+        self,
+        release_id: str,
+        records: Iterable[Mapping[str, object]],
+    ) -> list[dict[str, str]]:
+        normalized = self._normalize_qualified_rungs(records)
+        _ensure_dir(
+            self.layout.qualified_rung_catalog_root,
+            0o755,
+            self.layout.root_uid,
+            self.layout.root_gid,
+        )
+        _atomic_json(
+            self.layout.qualified_rung_catalog_path(release_id),
+            {
+                "schema_version": QUALIFIED_RUNG_CATALOG_SCHEMA_VERSION,
+                "release_id": release_id,
+                "host_id": self._host_id(),
+                "qualified_rungs": normalized,
+                "updated_unix_ns": time.time_ns(),
+            },
+            mode=0o444,
+            uid=self.layout.root_uid,
+            gid=self.layout.root_gid,
+            parent_mode=0o755,
+        )
         return normalized
+
+    def _read_qualified_rung_catalog(
+        self,
+        release_id: str,
+    ) -> list[dict[str, str]]:
+        path = self.layout.qualified_rung_catalog_path(release_id)
+        if not _present(path):
+            return []
+        value = self._read_json(
+            path,
+            uid=self.layout.root_uid,
+            gid=self.layout.root_gid,
+            mode=0o444,
+        )
+        records = value.get("qualified_rungs")
+        updated = value.get("updated_unix_ns")
+        if (
+            set(value)
+            != {
+                "schema_version",
+                "release_id",
+                "host_id",
+                "qualified_rungs",
+                "updated_unix_ns",
+            }
+            or value.get("schema_version")
+            != QUALIFIED_RUNG_CATALOG_SCHEMA_VERSION
+            or value.get("release_id") != release_id
+            or value.get("host_id") != self._host_id()
+            or not isinstance(records, list)
+            or type(updated) is not int
+            or not 1 <= updated <= 2**63 - 1
+        ):
+            raise ReleaseError("qualified-rung catalog is invalid")
+        normalized = self._normalize_qualified_rungs(records)
+        if records != normalized:
+            raise ReleaseError("qualified-rung catalog is not canonical")
+        return normalized
+
+    def _snapshot_active_qualified_rungs(self) -> None:
+        release_id = self.active_release_id()
+        if (
+            release_id is None
+            or self.root_active_release_id() != release_id
+            or not self._selection_is_exact(release_id, permit_deny=True)
+        ):
+            return
+        selected = self._read_json(
+            self.layout.selected,
+            uid=self.layout.target_uid,
+            gid=self.layout.target_gid,
+            mode=0o444,
+        )
+        records = selected.get("qualified_rungs")
+        if not isinstance(records, list):
+            raise ReleaseError("selected qualified rung set is invalid")
+        self._write_qualified_rung_catalog(release_id, records)
 
     def _deny_record(self) -> dict[str, object] | None:
         if not _present(self.layout.rollback_deny):
@@ -5716,6 +6447,273 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         _fsync_dir(self.layout.root_control)
 
     @staticmethod
+    def _deny_digest(record: Mapping[str, object]) -> str:
+        return _sha256_bytes(_canonical_json(dict(record)))
+
+    def _legacy_pair_digest(self, release_id: str) -> str:
+        self.validate_release_pair(release_id)
+        user_raw, _ = _read_regular(
+            self.layout.user_releases / release_id / "release.json",
+            uid=self.layout.root_uid,
+            gid=self.layout.root_gid,
+            mode=0o444,
+        )
+        root_raw, _ = _read_regular(
+            self.layout.root_releases / release_id / "release.json",
+            uid=self.layout.root_uid,
+            gid=self.layout.root_gid,
+            mode=0o444,
+        )
+        return _sha256_bytes(
+            _canonical_json(
+                {
+                    "legacy_release_id": release_id,
+                    "user_manifest_sha256": _sha256_bytes(user_raw),
+                    "root_manifest_sha256": _sha256_bytes(root_raw),
+                }
+            )
+        )
+
+    def _helper_only_legacy_digest(self, release_id: str) -> str | None:
+        user, root = self.validate_release_pair(release_id)
+        user_entries = user.get("files")
+        root_entries = root.get("files")
+        if not isinstance(user_entries, list) or not isinstance(root_entries, list):
+            raise ReleaseError("legacy release manifests are invalid")
+        user_paths = {
+            str(entry.get("path")) for entry in user_entries if isinstance(entry, dict)
+        }
+        root_paths = {
+            str(entry.get("path")) for entry in root_entries if isinstance(entry, dict)
+        }
+        if (
+            DIRECT_ADMISSION_RUNTIME in user_paths
+            or INSTALLER_RUNTIME in user_paths
+            or INSTALLER_RUNTIME in root_paths
+        ):
+            return None
+        return self._legacy_pair_digest(release_id)
+
+    def _legacy_authority_record(self) -> dict[str, object] | None:
+        path = self.layout.legacy_migration_authority
+        if not _present(path):
+            return None
+        value = self._read_json(
+            path,
+            uid=self.layout.root_uid,
+            gid=self.layout.root_gid,
+            mode=0o444,
+        )
+        fields = {
+            "schema_version",
+            "attempt_id",
+            "legacy_release_id",
+            "legacy_pair_sha256",
+            "target_release_id",
+            "deny_sha256",
+            "state",
+            "ready_release_id",
+            "consumed_unix_ns",
+        }
+        state = value.get("state")
+        ready = value.get("ready_release_id")
+        consumed = value.get("consumed_unix_ns")
+        if (
+            set(value) != fields
+            or value.get("schema_version") != CONTROL_SCHEMA_VERSION
+            or type(value.get("attempt_id")) is not str
+            or RUN_ID_RE.fullmatch(str(value["attempt_id"])) is None
+            or type(value.get("legacy_release_id")) is not str
+            or RELEASE_ID_RE.fullmatch(str(value["legacy_release_id"])) is None
+            or type(value.get("legacy_pair_sha256")) is not str
+            or RELEASE_ID_RE.fullmatch(str(value["legacy_pair_sha256"])) is None
+            or type(value.get("target_release_id")) is not str
+            or RELEASE_ID_RE.fullmatch(str(value["target_release_id"])) is None
+            or type(value.get("deny_sha256")) is not str
+            or RELEASE_ID_RE.fullmatch(str(value["deny_sha256"])) is None
+            or state not in {"AVAILABLE", "CONSUMED"}
+            or (
+                state == "AVAILABLE"
+                and (ready is not None or consumed is not None)
+            )
+            or (
+                state == "CONSUMED"
+                and (
+                    type(ready) is not str
+                    or ready
+                    not in {
+                        value.get("legacy_release_id"),
+                        value.get("target_release_id"),
+                    }
+                    or type(consumed) is not int
+                    or int(consumed) <= 0
+                )
+            )
+        ):
+            raise ReleaseError("legacy migration authority is invalid")
+        return value
+
+    def _prepare_legacy_migration_authority(
+        self,
+        source_release: str | None,
+        target_plan: ReleasePlan,
+        deny_record: Mapping[str, object],
+    ) -> None:
+        if source_release is None:
+            return
+        legacy_digest = self._helper_only_legacy_digest(source_release)
+        if legacy_digest is None:
+            return
+        target_paths = {record.path for record in target_plan.files}
+        if not {DIRECT_ADMISSION_RUNTIME, INSTALLER_RUNTIME} <= target_paths:
+            raise ReleaseError("legacy migration target lacks the full installer closure")
+        with self._permit_legacy_release_validation(source_release):
+            if not self._selection_is_exact(source_release):
+                raise ReleaseError(
+                    "legacy migration source is not the exact selected pair"
+                )
+        deny_sha256 = self._deny_digest(deny_record)
+        existing = self._legacy_authority_record()
+        if existing is not None:
+            if (
+                existing.get("state") == "AVAILABLE"
+                and existing.get("legacy_release_id") == source_release
+                and existing.get("legacy_pair_sha256") == legacy_digest
+                and existing.get("target_release_id") == target_plan.release_id
+                and existing.get("deny_sha256") == deny_sha256
+            ):
+                return
+            raise ReleaseError("one-shot legacy migration authority is unavailable")
+        _atomic_json(
+            self.layout.legacy_migration_authority,
+            {
+                "schema_version": CONTROL_SCHEMA_VERSION,
+                "attempt_id": uuid.uuid4().hex,
+                "legacy_release_id": source_release,
+                "legacy_pair_sha256": legacy_digest,
+                "target_release_id": target_plan.release_id,
+                "deny_sha256": deny_sha256,
+                "state": "AVAILABLE",
+                "ready_release_id": None,
+                "consumed_unix_ns": None,
+            },
+            mode=0o444,
+            uid=self.layout.root_uid,
+            gid=self.layout.root_gid,
+            parent_mode=0o755,
+        )
+
+    def _bound_legacy_authority(
+        self,
+        deny: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        authority = self._legacy_authority_record()
+        if authority is None:
+            return None
+        binding_matches = (
+            deny.get("operation") == "install"
+            and authority.get("legacy_release_id") == deny.get("from_release")
+            and authority.get("target_release_id") == deny.get("to_release")
+            and authority.get("deny_sha256") == self._deny_digest(deny)
+        )
+        if not binding_matches:
+            if authority.get("state") == "CONSUMED":
+                return None
+            raise ReleaseError("legacy migration authority binding changed")
+        if authority.get("legacy_pair_sha256") != self._legacy_pair_digest(
+            str(authority["legacy_release_id"])
+        ):
+            raise ReleaseError("legacy migration authority binding changed")
+        return authority
+
+    def _legacy_restore_authorized(
+        self,
+        source_release: str,
+        target_release: str,
+    ) -> bool:
+        deny = self._deny_record()
+        if deny is None:
+            return False
+        authority = self._bound_legacy_authority(deny)
+        return bool(
+            authority
+            and authority.get("state") == "AVAILABLE"
+            and authority.get("legacy_release_id") == source_release
+            and authority.get("target_release_id") == target_release
+        )
+
+    def _consume_legacy_authority(self, ready_release: str) -> None:
+        deny = self._deny_record()
+        if deny is None:
+            return
+        authority = self._bound_legacy_authority(deny)
+        if authority is None:
+            return
+        if authority.get("state") == "CONSUMED":
+            if authority.get("ready_release_id") != ready_release:
+                raise ReleaseError("one-shot legacy migration authority was already consumed")
+            return
+        if ready_release not in {
+            authority.get("legacy_release_id"),
+            authority.get("target_release_id"),
+        }:
+            raise ReleaseError("legacy migration authority cannot be consumed before READY")
+        if ready_release == authority.get("legacy_release_id"):
+            with self._permit_legacy_release_validation(ready_release):
+                ready_is_exact = self._selection_is_exact(
+                    ready_release, permit_deny=True
+                )
+        else:
+            ready_is_exact = self._selection_is_exact(
+                ready_release, permit_deny=True
+            )
+        if not ready_is_exact:
+            raise ReleaseError("legacy migration authority cannot be consumed before READY")
+        consumed = dict(authority)
+        consumed["state"] = "CONSUMED"
+        consumed["ready_release_id"] = ready_release
+        consumed["consumed_unix_ns"] = time.time_ns()
+        _atomic_json(
+            self.layout.legacy_migration_authority,
+            consumed,
+            mode=0o444,
+            uid=self.layout.root_uid,
+            gid=self.layout.root_gid,
+            parent_mode=0o755,
+        )
+
+    def _converge_legacy_ready_terminal(
+        self,
+        deny: Mapping[str, object],
+    ) -> str | None:
+        authority = self._bound_legacy_authority(deny)
+        if authority is None:
+            return None
+        candidates = (
+            str(authority["target_release_id"]),
+            str(authority["legacy_release_id"]),
+        )
+        ready: str | None = None
+        for release_id in candidates:
+            if release_id == authority.get("legacy_release_id"):
+                with self._permit_legacy_release_validation(release_id):
+                    exact = self._selection_is_exact(
+                        release_id, permit_deny=True
+                    )
+            else:
+                exact = self._selection_is_exact(release_id, permit_deny=True)
+            if exact:
+                ready = release_id
+                break
+        if ready is None:
+            if authority.get("state") == "CONSUMED":
+                raise ReleaseError("consumed legacy migration authority lost READY state")
+            return None
+        self._consume_legacy_authority(ready)
+        self._clear_deny()
+        return ready
+
+    @staticmethod
     def _host_id() -> str:
         """Return a stable non-secret digest for the installed host identity."""
 
@@ -5727,13 +6725,14 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             raise ReleaseError("host machine identity is invalid")
         return hashlib.sha256(raw.encode("ascii")).hexdigest()
 
-    @staticmethod
-    def _boot_id() -> str:
+    def _boot_id(self) -> str:
         try:
-            value = Path("/proc/sys/kernel/random/boot_id").read_text(
-                encoding="ascii"
-            ).strip()
-        except OSError as exc:
+            value = self.proc_authority.read_bytes(
+                "sys/kernel/random/boot_id",
+                maximum=128,
+                operation="boot identity inventory",
+            ).decode("ascii").strip()
+        except (OSError, UnicodeError) as exc:
             raise ReleaseError(f"cannot read boot identity: {exc}") from exc
         if re.fullmatch(
             r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
@@ -5962,7 +6961,11 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 "cannot anchor installer runner owner identity"
             ) from exc
         try:
-            raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            raw = self.proc_authority.read_bytes(
+                f"{pid}/stat",
+                maximum=MAX_SWITCH_PROC_RECORD_BYTES,
+                operation="runner owner identity inventory",
+            ).decode("ascii")
             close = raw.rfind(")")
             fields = raw[close + 2 :].split() if close >= 0 else []
             if (
@@ -6360,6 +7363,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         placement = _runner_cgroup_parent(
             self.layout.target_uid,
             self.layout.target_gid,
+            proc_authority=self.proc_authority,
         )
         parent = placement.parent
         parent_info = placement.parent_info
@@ -7401,7 +8405,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             qualified_rungs = (
                 []
                 if expected_phase == "CANARY"
-                else self._validate_qualified_rungs(release_id, selected_rungs)
+                else self._normalize_qualified_rungs(selected_rungs)
             )
             evidence_sha256 = (
                 ZERO_DIGEST
@@ -7430,23 +8434,36 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         except (OSError, ReleaseError, ValueError):
             return False
 
-    @staticmethod
     def _proc_start_ticks(
-        pid: int,
+        self,
+        pid: int | _SwitchInventoryBudget | None = None,
         inventory_budget: _SwitchInventoryBudget | None = None,
     ) -> int:
-        path = Path(f"/proc/{pid}/stat")
-        if inventory_budget is None:
-            raw = path.read_text(encoding="ascii")
+        # Retain the historical class-call test helper while routing every
+        # installer instance through its single anchored authority.
+        temporary_authority = not isinstance(self, ReleaseInstaller)
+        if temporary_authority:
+            actual_pid = int(self)
+            if isinstance(pid, _SwitchInventoryBudget):
+                inventory_budget = pid
+            authority = ProcAuthority.production()
         else:
-            try:
-                raw = inventory_budget.read_path(
-                    path,
-                    MAX_SWITCH_PROC_RECORD_BYTES,
-                    "process identity inventory",
-                ).decode("ascii")
-            except UnicodeDecodeError as exc:
-                raise ReleaseError("supervisor /proc stat is non-ASCII") from exc
+            if type(pid) is not int:
+                raise ReleaseError("process identity PID is invalid")
+            actual_pid = pid
+            authority = self.proc_authority
+        try:
+            raw = authority.read_bytes(
+                f"{actual_pid}/stat",
+                maximum=MAX_SWITCH_PROC_RECORD_BYTES,
+                budget=inventory_budget,
+                operation="process identity inventory",
+            ).decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ReleaseError("supervisor proc stat is non-ASCII") from exc
+        finally:
+            if temporary_authority:
+                authority.close()
         close = raw.rfind(")")
         if close < 0:
             raise ReleaseError("supervisor /proc stat is malformed")
@@ -7520,10 +8537,11 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         assert isinstance(pid, int) and isinstance(start_ticks, int)
         assert isinstance(release_id, str) and isinstance(boot_id, str)
         try:
-            running_boot = budget.read_path(
-                Path("/proc/sys/kernel/random/boot_id"),
-                128,
-                "supervisor boot identity inventory",
+            running_boot = self.proc_authority.read_bytes(
+                "sys/kernel/random/boot_id",
+                maximum=128,
+                budget=budget,
+                operation="supervisor boot identity inventory",
             ).decode("ascii").strip()
             if (
                 running_boot != boot_id
@@ -7532,20 +8550,22 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 raise ReleaseError(
                     "multi-session fence owner is not live; explicit recovery is required"
                 )
-            status = budget.read_path(
-                Path(f"/proc/{pid}/status"),
-                MAX_SWITCH_PROC_RECORD_BYTES,
-                "supervisor status inventory",
+            status = self.proc_authority.read_bytes(
+                f"{pid}/status",
+                maximum=MAX_SWITCH_PROC_RECORD_BYTES,
+                budget=budget,
+                operation="supervisor status inventory",
             ).decode("ascii")
             uid_line = next(
                 (line for line in status.splitlines() if line.startswith("Uid:")), None
             )
             if uid_line is None or int(uid_line.split()[1]) != layout.target_uid:
                 raise ReleaseError("recorded supervisor has the wrong user identity")
-            cmdline = budget.read_path(
-                Path(f"/proc/{pid}/cmdline"),
-                MAX_SWITCH_PROC_RECORD_BYTES,
-                "supervisor command identity inventory",
+            cmdline = self.proc_authority.read_bytes(
+                f"{pid}/cmdline",
+                maximum=MAX_SWITCH_PROC_RECORD_BYTES,
+                budget=budget,
+                operation="supervisor command identity inventory",
             ).split(b"\0")
             if cmdline and cmdline[-1] == b"":
                 cmdline.pop()
@@ -7584,7 +8604,12 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 or not warm_tail_ok
             ):
                 raise ReleaseError("recorded supervisor command line is not exact")
-            if Path(f"/proc/{pid}/cwd").resolve(strict=True) != release_dir:
+            cwd = self.proc_authority.readlink(f"{pid}/cwd")
+            budget.consume_bytes(
+                len(cwd.encode("utf-8", "surrogateescape")),
+                "supervisor working directory inventory",
+            )
+            if Path(cwd) != release_dir:
                 raise ReleaseError("recorded supervisor working directory is not exact")
             budget.check("supervisor working directory inventory")
             if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
@@ -7698,8 +8723,8 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             )
 
         try:
-            proc_fd = os.open("/proc", directory_flags)
-        except OSError as exc:
+            proc_fd = self.proc_authority.open_root()
+        except (OSError, ReleaseError) as exc:
             raise ReleaseError("cannot inspect legacy OpenVPN process inventory") from exc
         suspects: list[int] = []
         try:
@@ -7808,7 +8833,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             | getattr(os, "O_NOFOLLOW", 0)
         )
         records: list[dict[str, object]] = []
-        proc_fd = os.open("/proc", directory_flags)
+        proc_fd = self.proc_authority.open_root()
         try:
             with os.scandir(proc_fd) as entries:
                 for entry in entries:
@@ -7892,12 +8917,13 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         inventory_budget.check("TCP listener inventory")
         owned_ports = {1080, 11080, 11081}
         records: set[tuple[int, int]] = set()
-        for table in (Path("/proc/self/net/tcp"), Path("/proc/self/net/tcp6")):
+        for table in ("self/net/tcp", "self/net/tcp6"):
             try:
-                rows = inventory_budget.read_path(
+                rows = self.proc_authority.read_bytes(
                     table,
-                    MAX_SWITCH_INVENTORY_BYTES,
-                    "TCP listener inventory",
+                    maximum=MAX_SWITCH_INVENTORY_BYTES,
+                    budget=inventory_budget,
+                    operation="TCP listener inventory",
                 ).decode("ascii").splitlines()
             except (OSError, UnicodeDecodeError) as exc:
                 raise ReleaseError(f"cannot inspect TCP listener inventory: {exc}") from exc
@@ -8451,13 +9477,62 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         fault_at: str | None,
         *,
         allow_legacy_residue: bool = False,
-        qualified_rungs: Iterable[Mapping[str, object]] = (),
+        qualified_rungs: Iterable[Mapping[str, object]] | None = None,
+    ) -> None:
+        deny = self._deny_record()
+        permit_legacy = bool(
+            operation == "rollback"
+            and deny is not None
+            and type(deny.get("to_release")) is str
+            and self._legacy_restore_authorized(
+                release_id, str(deny["to_release"])
+            )
+        )
+        if permit_legacy:
+            with self._permit_legacy_release_validation(release_id):
+                self._complete_promoted_selection_inner(
+                    release_id,
+                    operation,
+                    fault_at,
+                    allow_legacy_residue=allow_legacy_residue,
+                    qualified_rungs=qualified_rungs,
+                )
+            return
+        self._complete_promoted_selection_inner(
+            release_id,
+            operation,
+            fault_at,
+            allow_legacy_residue=allow_legacy_residue,
+            qualified_rungs=qualified_rungs,
+        )
+
+    def _complete_promoted_selection_inner(
+        self,
+        release_id: str,
+        operation: str,
+        fault_at: str | None,
+        *,
+        allow_legacy_residue: bool = False,
+        qualified_rungs: Iterable[Mapping[str, object]] | None = None,
     ) -> None:
         self._assert_switch_quiescent(
             allow_root_artifact_residue=allow_legacy_residue
         )
+        restored_rungs: list[dict[str, str]]
         with self._selection_locked(self.switch_timeout):
             self._assert_switch_quiescent(broker_inventory=False)
+            self._snapshot_active_qualified_rungs()
+            self._snapshot_active_profile_activation()
+            if qualified_rungs is None:
+                restored_rungs = self._validate_qualified_rungs(
+                    release_id,
+                    self._read_qualified_rung_catalog(release_id),
+                )
+            else:
+                restored_rungs = self._validate_qualified_rungs(
+                    release_id,
+                    qualified_rungs,
+                )
             self._publish_selection(
                 release_id,
                 operation,
@@ -8497,11 +9572,19 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 selection_phase="READY",
                 fault_at=None,
                 selector_faults=False,
-                qualified_rungs=qualified_rungs,
+                qualified_rungs=self._validate_qualified_rungs(
+                    release_id,
+                    restored_rungs,
+                ),
             )
-            self._fault(fault_at, AFTER_FINAL_SELECTION)
             if not self._selection_is_exact(release_id, permit_deny=True):
                 raise ReleaseError("final evidence-bound selection is not coherent")
+            self._restore_profile_activation(release_id)
+            # READY and one-shot consumption form a recoverable terminal pair:
+            # READY+AVAILABLE is consumed by resume, while READY+CONSUMED with
+            # a remaining deny only needs the final ledger clear.
+            self._consume_legacy_authority(release_id)
+            self._fault(fault_at, AFTER_FINAL_SELECTION)
             self._fault(fault_at, BEFORE_DENY_CLEAR)
             self._clear_deny()
         self._fault(fault_at, AFTER_DENY_CLEAR)
@@ -8542,7 +9625,10 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                     raise
                 raise target_error from exc
             try:
-                self.validate_target_release_pair(from_release)
+                if self._legacy_restore_authorized(from_release, release_id):
+                    self.validate_release_pair(from_release)
+                else:
+                    self.validate_target_release_pair(from_release)
                 self._complete_promoted_selection(from_release, "rollback", None)
             except (ReleaseError, OSError, subprocess.SubprocessError) as restore_exc:
                 restore_error = (
@@ -8562,12 +9648,13 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         fields = {
             "schema_version", "release_id", "host_id", "rung", "route_profile",
             "contract_sha256", "grok_release_id", "model_id", "canary_kind",
-            "canary_nonce", "created_unix_ns",
+            "canary_nonce", "created_unix_ns", "profile_sha256",
         }
         if not isinstance(value, dict):
             raise ReleaseError("rung canary authorization record is invalid")
         canary_kind = value.get("canary_kind")
         contract = value.get("contract_sha256")
+        profile_sha256 = value.get("profile_sha256")
         if (
             set(value) != fields
             or value.get("schema_version") != RUNG_CANARY_SCHEMA_VERSION
@@ -8595,6 +9682,14 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             or (canary_kind == "release" and value.get("rung") != "direct")
             or (canary_kind == "release" and value.get("route_profile") != "direct")
             or (canary_kind == "release" and value.get("model_id") != QUALIFICATION_FAKE_MODEL)
+            or not (
+                profile_sha256 is None
+                or (
+                    canary_kind == "rung"
+                    and type(profile_sha256) is str
+                    and RELEASE_ID_RE.fullmatch(profile_sha256) is not None
+                )
+            )
             or type(value.get("canary_nonce")) is not str
             or RELEASE_ID_RE.fullmatch(str(value.get("canary_nonce"))) is None
             or type(value.get("created_unix_ns")) is not int
@@ -8625,6 +9720,55 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         )
         return "sha256:" + _sha256_bytes(raw)
 
+    @staticmethod
+    def _managed_profile_route(profile: object) -> str:
+        contract = profile.contract
+        mode = contract.route_mode.value
+        if mode == "auto":
+            return "auto" if contract.allow_direct else "auto-no-direct"
+        if mode == "home":
+            if contract.forced_host is None:
+                raise ReleaseError("managed profile home route is incomplete")
+            return f"home:{contract.forced_host}"
+        if mode == "ios":
+            return (
+                f"ios:{contract.forced_ios_key}"
+                if contract.forced_ios_key is not None
+                else "iphone"
+            )
+        if mode in {"direct", "vpn"}:
+            return mode
+        raise ReleaseError("managed profile route mode is unsupported")
+
+    def _profile_rung_bindings(
+        self,
+        *,
+        profile_sha256: str,
+        release_id: str,
+        rung: str,
+    ) -> tuple[object, str]:
+        if RELEASE_ID_RE.fullmatch(profile_sha256) is None:
+            raise ReleaseError("managed profile digest is invalid")
+        try:
+            profile = load_managed_profile(
+                self.layout.profile_root / f"{profile_sha256}.json",
+                expected_uid=self.layout.target_uid,
+                expected_gid=self.layout.target_gid,
+                expected_sha256=profile_sha256,
+            )
+            with open_profile_grok(
+                profile,
+                allowed_owner_uids=frozenset(
+                    (self.layout.root_uid, self.layout.target_uid)
+                ),
+            ):
+                pass
+        except ManagedProfileError as exc:
+            raise ReleaseError("managed profile qualification binding is invalid") from exc
+        if profile.contract.release_id != release_id or rung not in profile.contract.ladder:
+            raise ReleaseError("managed profile does not bind the requested release/rung")
+        return profile, self._managed_profile_route(profile)
+
     def _canary_environment(
         self,
         descriptor: int,
@@ -8650,6 +9794,11 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         contract = record.get("contract_sha256")
         if contract is not None:
             environment["GROK_RELEASE_CANARY_CONTRACT"] = str(contract)
+        profile_sha256 = record.get("profile_sha256")
+        if profile_sha256 is not None:
+            environment["GROK_RELEASE_CANARY_PROFILE_SHA256"] = str(
+                profile_sha256
+            )
         if self.layout.test_install:
             environment.update(
                 {
@@ -9004,6 +10153,17 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             raise ReleaseError("canary terminal selection digest changed")
         self._assert_switch_quiescent()
         self._assert_terminal_canary_residue(canary)
+        if terminal["disposition"] == "rung-promoted":
+            selected = self._read_json(
+                self.layout.selected,
+                uid=self.layout.target_uid,
+                gid=self.layout.target_gid,
+                mode=0o444,
+            )
+            records = selected.get("qualified_rungs")
+            if not isinstance(records, list):
+                raise ReleaseError("promoted selection has no qualified rung set")
+            self._write_qualified_rung_catalog(release_id, records)
         self._clear_deny()
         self._fault(fault_at, AFTER_DENY_CLEAR)
         # The terminal record deliberately outlives durable deny clearance.  A
@@ -9028,29 +10188,161 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         self._prepare_canary_terminal(canary, disposition)
         return self._converge_canary_terminal(fault_at=fault_at)
 
+    def _restore_precanary_rung_selection(
+        self,
+        canary: Mapping[str, object],
+    ) -> None:
+        """Undo only the exact READY publication before its commit terminal."""
+
+        if canary.get("canary_kind") != "rung":
+            return
+        release_id = str(canary["release_id"])
+        selected = self._read_json(
+            self.layout.selected,
+            uid=self.layout.target_uid,
+            gid=self.layout.target_gid,
+            mode=0o444,
+        )
+        current_value = selected.get("qualified_rungs")
+        if not isinstance(current_value, list):
+            raise ReleaseError("selected qualified rung set is invalid")
+        current = self._normalize_qualified_rungs(current_value)
+        prior = self._read_qualified_rung_catalog(release_id)
+        if current == prior:
+            return
+
+        added = [record for record in current if record not in prior]
+        removed = [record for record in prior if record not in current]
+        if len(added) != 1 or len(removed) > 1:
+            raise ReleaseError(
+                "canary selection differs from both pre-canary and exact promoted state"
+            )
+        promoted = added[0]
+        if removed and (
+            removed[0]["rung"],
+            removed[0]["contract_sha256"],
+            removed[0]["grok_release_id"],
+        ) != (
+            promoted["rung"],
+            promoted["contract_sha256"],
+            promoted["grok_release_id"],
+        ):
+            raise ReleaseError(
+                "canary selection replacement identity is inconsistent"
+            )
+        if self._validate_qualified_rungs(release_id, [promoted]) != [promoted]:
+            raise ReleaseError("published canary promotion evidence is unavailable")
+        evidence = self._read_json(
+            self.layout.rung_evidence_path(
+                release_id,
+                promoted["evidence_sha256"],
+            ),
+            uid=self.layout.root_uid,
+            gid=self.layout.root_gid,
+            mode=0o444,
+        )
+        if (
+            evidence.get("rung") != canary.get("rung")
+            or evidence.get("route_profile") != canary.get("route_profile")
+            or evidence.get("contract_sha256") != canary.get("contract_sha256")
+            or evidence.get("rung_qualification_sha256")
+            != promoted["contract_sha256"]
+            or evidence.get("grok_release_id") != canary.get("grok_release_id")
+            or evidence.get("model_id") != canary.get("model_id")
+            or evidence.get("qualification_profile_sha256")
+            != canary.get("profile_sha256")
+            or evidence.get("canary_nonce") != canary.get("canary_nonce")
+        ):
+            raise ReleaseError("published canary promotion does not match its fence")
+        operation = selected.get("operation")
+        if operation not in {"install", "rollback"}:
+            raise ReleaseError("selected release operation is invalid")
+        evidence_digest = self._validate_evidence(release_id, str(operation))
+        with self._selection_locked(self.switch_timeout):
+            if not self._selection_is_exact(release_id, permit_deny=True):
+                raise ReleaseError("canary selection changed before abort restoration")
+            locked = self._read_json(
+                self.layout.selected,
+                uid=self.layout.target_uid,
+                gid=self.layout.target_gid,
+                mode=0o444,
+            )
+            locked_rungs = locked.get("qualified_rungs")
+            if not isinstance(locked_rungs, list) or self._normalize_qualified_rungs(
+                locked_rungs
+            ) != current:
+                raise ReleaseError("canary selection changed before abort restoration")
+            self._publish_selection(
+                release_id,
+                str(operation),
+                evidence_sha256=evidence_digest,
+                selection_phase="READY",
+                fault_at=None,
+                selector_faults=False,
+                qualified_rungs=prior,
+            )
+            if not self._selection_is_exact(release_id, permit_deny=True):
+                raise ReleaseError("pre-canary selection restoration is incoherent")
+
     def begin_rung_canary(
         self,
         *,
         release_id: str,
         rung: str,
-        route_profile: str,
-        contract_sha256: str,
-        grok_release_id: str,
-        model_id: str = QUALIFICATION_FAKE_MODEL,
+        route_profile: str | None = None,
+        contract_sha256: str | None = None,
+        grok_release_id: str | None = None,
+        model_id: str | None = None,
+        profile_sha256: str | None = None,
     ) -> InstallResult:
         if RELEASE_ID_RE.fullmatch(release_id) is None:
             raise ReleaseError("rung canary release ID is invalid")
         if RUNG_TOKEN_RE.fullmatch(rung) is None:
             raise ReleaseError("rung canary name is invalid")
-        if not _route_profile_matches_rung(route_profile, rung):
-            raise ReleaseError("rung canary route profile does not authorize the rung")
-        if RELEASE_ID_RE.fullmatch(contract_sha256) is None:
-            raise ReleaseError("rung canary contract digest is invalid")
-        if GROK_RELEASE_RE.fullmatch(grok_release_id) is None:
-            raise ReleaseError("rung canary Grok release identity is invalid")
-        if MODEL_ID_RE.fullmatch(model_id) is None:
-            raise ReleaseError("rung canary model identity is invalid")
         with self._locked():
+            if profile_sha256 is not None:
+                profile, frozen_route_profile = self._profile_rung_bindings(
+                    profile_sha256=profile_sha256,
+                    release_id=release_id,
+                    rung=rung,
+                )
+                frozen = {
+                    "route_profile": frozen_route_profile,
+                    "contract_sha256": profile.contract_sha256,
+                    "grok_release_id": profile.grok_release_id,
+                    "model_id": profile.contract.model_id,
+                }
+                supplied = {
+                    "route_profile": route_profile,
+                    "contract_sha256": contract_sha256,
+                    "grok_release_id": grok_release_id,
+                    "model_id": model_id,
+                }
+                for name, value in supplied.items():
+                    if value is not None and value != frozen[name]:
+                        raise ReleaseError(
+                            f"profile-bound rung canary {name} is mismatched"
+                        )
+                route_profile = frozen_route_profile
+                contract_sha256 = profile.contract_sha256
+                grok_release_id = profile.grok_release_id
+                model_id = profile.contract.model_id
+            if not _route_profile_matches_rung(route_profile, rung):
+                raise ReleaseError(
+                    "rung canary route profile does not authorize the rung"
+                )
+            if (
+                type(contract_sha256) is not str
+                or RELEASE_ID_RE.fullmatch(contract_sha256) is None
+            ):
+                raise ReleaseError("rung canary contract digest is invalid")
+            if (
+                type(grok_release_id) is not str
+                or GROK_RELEASE_RE.fullmatch(grok_release_id) is None
+            ):
+                raise ReleaseError("rung canary Grok release identity is invalid")
+            if type(model_id) is not str or MODEL_ID_RE.fullmatch(model_id) is None:
+                raise ReleaseError("rung canary model identity is invalid")
             if _present(self.layout.canary_terminal):
                 self._converge_canary_terminal()
             if not _present(self.layout.rollback_deny):
@@ -9066,6 +10358,19 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                         broker_inventory=False
                     )
                     locked_snapshot["broker"] = snapshot["broker"]
+                    selected = self._read_json(
+                        self.layout.selected,
+                        uid=self.layout.target_uid,
+                        gid=self.layout.target_gid,
+                        mode=0o444,
+                    )
+                    selected_rungs = selected.get("qualified_rungs")
+                    if not isinstance(selected_rungs, list):
+                        raise ReleaseError("selected qualified rung set is invalid")
+                    self._write_qualified_rung_catalog(
+                        release_id,
+                        selected_rungs,
+                    )
                     self._write_boot_inventory(release_id, locked_snapshot)
                     self._publish_deny("canary", release_id, release_id)
             deny = self._deny_record()
@@ -9088,6 +10393,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 "canary_kind": "rung",
                 "canary_nonce": secrets.token_hex(32),
                 "created_unix_ns": time.time_ns(),
+                "profile_sha256": profile_sha256,
             }
             if _present(self.layout.rung_canary):
                 existing = self._read_rung_canary()
@@ -9202,6 +10508,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 "canary_kind": "release",
                 "canary_nonce": secrets.token_hex(32),
                 "created_unix_ns": time.time_ns(),
+                "profile_sha256": None,
             }
             if _present(self.layout.rung_canary):
                 existing = self._read_rung_canary()
@@ -9271,6 +10578,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             or value.get("route_profile") != canary.get("route_profile")
             or value.get("grok_release_id") != canary.get("grok_release_id")
             or value.get("model_id") != canary.get("model_id")
+            or value.get("profile_sha256") != canary.get("profile_sha256")
             or type(contract) is not str
             or RELEASE_ID_RE.fullmatch(contract) is None
             or (
@@ -9314,6 +10622,13 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         digest = observations.get("detail_sha256")
         if type(digest) is not str or RELEASE_ID_RE.fullmatch(digest) is None:
             raise ReleaseError("qualification detail digest is invalid")
+        if step == "real-pair":
+            qualification_digest = observations.get("rung_qualification_sha256")
+            if (
+                type(qualification_digest) is not str
+                or RELEASE_ID_RE.fullmatch(qualification_digest) is None
+            ):
+                raise ReleaseError("rung qualification digest is invalid")
         if step == "load32":
             true_fields = {
                 "shared_owner_epoch", "shared_generation", "shared_contract",
@@ -9811,6 +11126,25 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                     raise ReleaseError("qualification step does not match canary kind")
                 if kind == "rung" and step != "real-pair":
                     raise ReleaseError("actual rung canary requires real-pair")
+                profile_sha256 = canary.get("profile_sha256")
+                if type(profile_sha256) is str:
+                    profile, frozen_route_profile = self._profile_rung_bindings(
+                        profile_sha256=profile_sha256,
+                        release_id=release_id,
+                        rung=str(canary["rung"]),
+                    )
+                    if (
+                        canary.get("route_profile") != frozen_route_profile
+                        or canary.get("contract_sha256")
+                        != profile.contract_sha256
+                        or canary.get("grok_release_id")
+                        != profile.grok_release_id
+                        or canary.get("model_id")
+                        != profile.contract.model_id
+                    ):
+                        raise ReleaseError(
+                            "profile-bound qualification changed identity"
+                        )
                 if step == "real-pair":
                     self._validate_release_qualification(release_id)
                     root = self.layout.rung_transcript_dir(
@@ -10188,6 +11522,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             "contract_sha256": None,
             "grok_release_id": release_state["grok_release_id"],
             "model_id": release_state["model_id"],
+            "profile_sha256": None,
         }
         release_results = [
             self._read_qualification_result(
@@ -10213,8 +11548,12 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             "rung": canary["rung"],
             "route_profile": canary["route_profile"],
             "contract_sha256": canary["contract_sha256"],
+            "rung_qualification_sha256": real_result["observations"][
+                "rung_qualification_sha256"
+            ],
             "grok_release_id": canary["grok_release_id"],
             "model_id": canary["model_id"],
+            "qualification_profile_sha256": canary.get("profile_sha256"),
             "measured_unix_ns": time.time_ns(),
             "canary_nonce": canary["canary_nonce"],
             "release_qualification_sha256": release_digest,
@@ -10240,6 +11579,324 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         return value, self._validate_rung_evidence_value(
             release_id, value, expected_digest=digest
         )
+
+    def _profile_readiness(self, release_id: str, profile: object) -> object:
+        selected = self._read_json(
+            self.layout.selected,
+            uid=self.layout.target_uid,
+            gid=self.layout.target_gid,
+            mode=0o444,
+        )
+        records = selected.get("qualified_rungs")
+        if not isinstance(records, list):
+            raise ReleaseError("selected qualified rung set is invalid")
+        qualified = self._validate_qualified_rungs(release_id, records)
+        allowed = {
+            str(record["rung"])
+            for record in qualified
+            if record["grok_release_id"] == profile.grok_release_id
+            and record["rung"] in profile.contract.ladder
+            and record["contract_sha256"]
+            == profile.contract.rung_qualification_digest(str(record["rung"]))
+        }
+        return profile.readiness(
+            tuple(rung for rung in profile.contract.ladder if rung in allowed)
+        )
+
+    def _load_profile_activation_binding(
+        self,
+        path: Path,
+        release_id: str,
+    ) -> tuple[ActivationRecord, object]:
+        activation = load_activation_record(
+            path,
+            expected_uid=self.layout.root_uid,
+            expected_gid=self.layout.root_gid,
+        )
+        if activation.release_id != release_id:
+            raise ManagedProfileError(
+                "profile activation belongs to a different proxy release"
+            )
+        profile = load_managed_profile(
+            self.layout.profile_root / f"{activation.profile_sha256}.json",
+            expected_uid=self.layout.target_uid,
+            expected_gid=self.layout.target_gid,
+            expected_sha256=activation.profile_sha256,
+        )
+        activation.validate_profile(profile)
+        with open_profile_grok(
+            profile,
+            allowed_owner_uids=frozenset(
+                (self.layout.root_uid, self.layout.target_uid)
+            ),
+        ):
+            pass
+        return activation, profile
+
+    def _write_profile_activation_history(
+        self,
+        activation: ActivationRecord,
+    ) -> None:
+        _ensure_dir(
+            self.layout.profile_activation_history_root,
+            0o755,
+            self.layout.root_uid,
+            self.layout.root_gid,
+        )
+        write_activation_record(
+            self.layout.profile_activation_history_path(activation.release_id),
+            activation,
+            owner_uid=self.layout.root_uid,
+            owner_gid=self.layout.root_gid,
+        )
+
+    def _snapshot_active_profile_activation(self) -> None:
+        if not _present(self.layout.active_profile):
+            return
+        release_id = self.active_release_id()
+        if release_id is None:
+            return
+        try:
+            activation = load_activation_record(
+                self.layout.active_profile,
+                expected_uid=self.layout.root_uid,
+                expected_gid=self.layout.root_gid,
+            )
+            if activation.release_id != release_id:
+                return
+            exact, _profile = self._load_profile_activation_binding(
+                self.layout.active_profile,
+                release_id,
+            )
+            self._write_profile_activation_history(exact)
+        except ReleaseError:
+            raise
+        except (ManagedProfileError, OSError) as exc:
+            raise ReleaseError("active managed profile cannot be archived") from exc
+
+    def _restore_profile_activation(self, release_id: str) -> None:
+        current_state = "absent"
+        if _present(self.layout.active_profile):
+            try:
+                current_activation = load_activation_record(
+                    self.layout.active_profile,
+                    expected_uid=self.layout.root_uid,
+                    expected_gid=self.layout.root_gid,
+                )
+            except ManagedProfileError:
+                current_state = "invalid"
+            else:
+                if current_activation.release_id != release_id:
+                    current_state = "different-release"
+                else:
+                    current_state = "target-release-invalid"
+                    try:
+                        exact, current_profile = self._load_profile_activation_binding(
+                            self.layout.active_profile,
+                            release_id,
+                        )
+                    except ManagedProfileError:
+                        pass
+                    else:
+                        readiness = self._profile_readiness(
+                            release_id,
+                            current_profile,
+                        )
+                        if readiness.status in {"ready", "degraded"}:
+                            history_degraded = False
+                            try:
+                                self._write_profile_activation_history(exact)
+                            except (ManagedProfileError, ReleaseError, OSError):
+                                history_degraded = True
+                            self.profile_transition = {
+                                "status": (
+                                    "restored-history-degraded"
+                                    if history_degraded
+                                    else "restored"
+                                ),
+                                "release_id": release_id,
+                                "reason_code": (
+                                    "release_profile_history_write_failed"
+                                    if history_degraded
+                                    else None
+                                ),
+                            }
+                            return
+                        current_state = "target-release-not-ready"
+
+        history = self.layout.profile_activation_history_path(release_id)
+        if not _present(history):
+            self.profile_transition = {
+                "status": (
+                    "unconfigured"
+                    if current_state in {"absent", "different-release"}
+                    else "blocked"
+                ),
+                "release_id": release_id,
+                "reason_code": (
+                    "no_release_profile_history"
+                    if current_state in {"absent", "different-release"}
+                    else (
+                        "release_profile_not_ready"
+                        if current_state == "target-release-not-ready"
+                        else "active_profile_invalid"
+                    )
+                ),
+            }
+            return
+        try:
+            activation, profile = self._load_profile_activation_binding(
+                history,
+                release_id,
+            )
+        except ManagedProfileError:
+            self.profile_transition = {
+                "status": "blocked",
+                "release_id": release_id,
+                "reason_code": "release_profile_history_invalid",
+            }
+            return
+        readiness = self._profile_readiness(release_id, profile)
+        if readiness.status not in {"ready", "degraded"}:
+            self.profile_transition = {
+                "status": "blocked",
+                "release_id": release_id,
+                "reason_code": "release_profile_not_ready",
+            }
+            return
+        try:
+            write_activation_record(
+                self.layout.active_profile,
+                activation,
+                owner_uid=self.layout.root_uid,
+                owner_gid=self.layout.root_gid,
+            )
+        except ActivationCommitUncertain:
+            self.profile_transition = {
+                "status": "restored-durability-uncertain",
+                "release_id": release_id,
+                "reason_code": "active_profile_directory_fsync_failed",
+            }
+            return
+        except ManagedProfileError as exc:
+            raise ReleaseError("cannot restore managed profile activation") from exc
+        self.profile_transition = {
+            "status": "restored",
+            "release_id": release_id,
+            "reason_code": None,
+        }
+
+    def activate_profile(self, profile_sha256: str) -> InstallResult:
+        """Atomically attest one private profile after projected evidence checks."""
+
+        if RELEASE_ID_RE.fullmatch(profile_sha256) is None:
+            raise ReleaseError("managed profile digest is invalid")
+        with self._locked():
+            if _present(self.layout.rollback_deny) or _present(self.layout.rung_canary):
+                raise ReleaseError("managed profile activation is fenced by release work")
+            release_id = self.active_release_id()
+            if (
+                release_id is None
+                or self.root_active_release_id() != release_id
+                or not self._selection_is_exact(release_id)
+            ):
+                raise ReleaseError("managed profile activation lacks one exact release")
+            profile_path = self.layout.profile_root / f"{profile_sha256}.json"
+            try:
+                profile = load_managed_profile(
+                    profile_path,
+                    expected_uid=self.layout.target_uid,
+                    expected_gid=self.layout.target_gid,
+                )
+                if profile.contract.release_id != release_id:
+                    raise ReleaseError(
+                        "managed profile belongs to a different proxy release"
+                    )
+                with open_profile_grok(
+                    profile,
+                    allowed_owner_uids=frozenset(
+                        (self.layout.root_uid, self.layout.target_uid)
+                    ),
+                ):
+                    pass
+            except ManagedProfileError as exc:
+                raise ReleaseError(f"managed profile is invalid: {exc}") from exc
+            readiness = self._profile_readiness(release_id, profile)
+            if readiness.status not in {"ready", "degraded"}:
+                missing = ",".join(readiness.missing_rungs) or "none"
+                raise ReleaseError(
+                    "managed profile readiness policy is not satisfied; "
+                    f"missing={missing}"
+                )
+            activation = ActivationRecord.from_profile(profile)
+            history_degraded = False
+            activation_durability_uncertain = False
+            self._assert_switch_quiescent()
+            with self._selection_locked(self.switch_timeout):
+                if not self._selection_is_exact(release_id):
+                    raise ReleaseError(
+                        "selected release changed during managed profile activation"
+                    )
+                try:
+                    current_profile = load_managed_profile(
+                        profile_path,
+                        expected_uid=self.layout.target_uid,
+                        expected_gid=self.layout.target_gid,
+                    )
+                    if current_profile != profile:
+                        raise ReleaseError(
+                            "managed profile changed during activation"
+                        )
+                    with open_profile_grok(
+                        current_profile,
+                        allowed_owner_uids=frozenset(
+                            (self.layout.root_uid, self.layout.target_uid)
+                        ),
+                    ):
+                        pass
+                    try:
+                        write_activation_record(
+                            self.layout.active_profile,
+                            activation,
+                            owner_uid=self.layout.root_uid,
+                            owner_gid=self.layout.root_gid,
+                        )
+                    except ActivationCommitUncertain:
+                        activation_durability_uncertain = True
+                except ManagedProfileError as exc:
+                    raise ReleaseError(
+                        f"cannot publish managed profile activation: {exc}"
+                    ) from exc
+                # The active pointer rename above is the activation commit
+                # point.  A later archive failure must not report that the
+                # activation itself failed: a subsequent release switch will
+                # re-snapshot this exact active binding before it can proceed.
+                try:
+                    self._write_profile_activation_history(activation)
+                except (ManagedProfileError, ReleaseError, OSError):
+                    history_degraded = True
+            self.profile_transition = {
+                "status": (
+                    "activated-durability-uncertain"
+                    if activation_durability_uncertain
+                    else (
+                        "activated-history-degraded"
+                        if history_degraded
+                        else "activated"
+                    )
+                ),
+                "release_id": release_id,
+                "reason_code": (
+                    "active_profile_directory_fsync_failed"
+                    if activation_durability_uncertain
+                    else (
+                        "release_profile_history_write_failed"
+                        if history_degraded
+                        else None
+                    )
+                ),
+            }
+            return InstallResult(release_id, True, "activate-profile")
 
     def promote_rung(
         self,
@@ -10280,9 +11937,15 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             value, record = self._derive_rung_evidence(canary)
             raw = _canonical_json(value) + b"\n"
             digest = _sha256_bytes(raw)
-            for field in ("rung", "contract_sha256", "grok_release_id"):
+            for field in ("rung", "grok_release_id"):
                 if record[field] != canary[field]:
                     raise ReleaseError(f"derived rung evidence mismatches canary {field}")
+            if value.get("contract_sha256") != canary.get("contract_sha256"):
+                raise ReleaseError("derived rung evidence mismatches canary contract")
+            if record.get("contract_sha256") != value.get(
+                "rung_qualification_sha256"
+            ):
+                raise ReleaseError("derived rung evidence projection is mismatched")
             if value.get("canary_nonce") != canary.get("canary_nonce"):
                 raise ReleaseError("attested rung evidence mismatches canary nonce")
             destination = self.layout.rung_evidence_path(release_id, digest)
@@ -10371,7 +12034,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             self._validate_boot_inventory(release_id)
             return InstallResult(release_id, True, "revalidate")
 
-    def resume(self) -> InstallResult:
+    def resume(self, *, canary_only: bool = False) -> InstallResult:
         with self._locked():
             if _present(self.layout.canary_terminal):
                 terminal = self._read_canary_terminal()
@@ -10385,10 +12048,15 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             if deny is None:
                 raise ReleaseError("no interrupted release operation is fenced")
             operation = deny.get("operation")
+            if canary_only and operation != "canary":
+                raise ReleaseError("installed recovery is limited to canary state")
             if operation == "canary":
                 raise ReleaseError("rung canary must be promoted or aborted")
             if operation not in {"install", "rollback"}:
                 raise ReleaseError("deny ledger operation is invalid")
+            ready = self._converge_legacy_ready_terminal(deny)
+            if ready is not None:
+                return InstallResult(ready, True, "resume")
             target = str(deny.get("to_release", ""))
             source = deny.get("from_release")
             if RELEASE_ID_RE.fullmatch(target) is None:
@@ -10412,6 +12080,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         restore_from: str | None = None,
         *,
         fault_at: str | None = None,
+        canary_only: bool = False,
     ) -> InstallResult:
         if fault_at not in {None, AFTER_CANARY_UNLINK, AFTER_DENY_CLEAR}:
             raise ReleaseError("unknown abort fault stage")
@@ -10422,13 +12091,19 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 if restore_from is not None and restore_from != release_id:
                     raise ReleaseError("--restore-from differs from the terminal record")
                 self._converge_canary_terminal(fault_at=fault_at)
-                return InstallResult(release_id, True, "abort")
+                return InstallResult(
+                    release_id,
+                    True,
+                    str(terminal["disposition"]),
+                )
             deny = self._deny_record()
             if deny is None:
                 raise ReleaseError("no interrupted release operation is fenced")
             operation = deny.get("operation")
             source = deny.get("from_release")
             target = deny.get("to_release")
+            if canary_only and operation != "canary":
+                raise ReleaseError("installed recovery is limited to canary state")
             if operation == "canary":
                 if source != target or type(source) is not str:
                     raise ReleaseError("canary deny ledger is invalid")
@@ -10437,6 +12112,7 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 if not self._selection_is_exact(source, permit_deny=True):
                     raise ReleaseError("canary selection is not coherent enough to abort")
                 canary = self._read_rung_canary()
+                self._restore_precanary_rung_selection(canary)
                 self._finish_canary_terminal(
                     canary,
                     "abort",
@@ -10445,11 +12121,20 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 return InstallResult(source, True, "abort")
             if operation not in {"install", "rollback"}:
                 raise ReleaseError("deny ledger operation is invalid")
+            ready = self._converge_legacy_ready_terminal(deny)
+            if ready is not None:
+                return InstallResult(ready, True, "abort")
             if type(source) is not str or RELEASE_ID_RE.fullmatch(source) is None:
                 raise ReleaseError("deny ledger has no restorable prior release")
             if restore_from is not None and restore_from != source:
                 raise ReleaseError("--restore-from differs from the deny ledger")
-            self.validate_target_release_pair(source)
+            if (
+                type(target) is str
+                and self._legacy_restore_authorized(source, target)
+            ):
+                self.validate_release_pair(source)
+            else:
+                self.validate_target_release_pair(source)
             self._converge_deny_release_access(deny)
             self._drain_active()
             self._complete_promoted_selection(source, "rollback", None)
@@ -10480,6 +12165,10 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 if not _present(self.layout.rollback_deny):
                     raise ReleaseError("unfenced mixed root/user selectors")
             existing_deny = self._deny_record()
+            if existing_deny is not None:
+                ready = self._converge_legacy_ready_terminal(existing_deny)
+                if ready is not None:
+                    return InstallResult(ready, True, "install")
             deny_source = (
                 existing_deny.get("from_release")
                 if existing_deny is not None
@@ -10490,6 +12179,18 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             # Repeating the same legacy command remains compatible, but the
             # authoritative source is always the durable ledger.  `resume`
             # is the source-independent recovery interface.
+            proposed_deny = {
+                "schema_version": CONTROL_SCHEMA_VERSION,
+                "operation": "install",
+                "from_release": deny_source,
+                "to_release": plan.release_id,
+            }
+            if existing_deny is None:
+                self._prepare_legacy_migration_authority(
+                    deny_source,
+                    plan,
+                    proposed_deny,
+                )
             self._publish_deny("install", deny_source, plan.release_id)
             deny_record = self._deny_record()
             assert deny_record is not None
@@ -10621,7 +12322,22 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         except ReleaseError:
             return None
 
-    def status(self) -> dict[str, object]:
+    def status(
+        self,
+        *,
+        installed: bool = False,
+        installed_release_id: str | None = None,
+    ) -> dict[str, object]:
+        if installed:
+            with self._installed_snapshot_locked():
+                if installed_release_id is not None:
+                    _assert_installed_release_authority(
+                        self, installed_release_id
+                    )
+                return self._status_snapshot()
+        return self._status_snapshot()
+
+    def _status_snapshot(self) -> dict[str, object]:
         active_user = self._read_selector_for_status("user")
         active_root = self._read_selector_for_status("root")
         denied = _present(self.layout.rollback_deny)
@@ -10766,11 +12482,11 @@ def _default_runtime_files(source: Path) -> tuple[str, ...]:
             continue
         if path.suffix == ".py":
             selected.append(relative.as_posix())
-    if f"{DECLARED_PACKAGE_ROOT}/__init__.py" not in selected:
-        raise ReleaseError("runtime package lacks __init__.py")
-    if DIRECT_ADMISSION_RUNTIME not in selected:
+    missing_package = sorted(set(DECLARED_PACKAGE_REQUIRED) - set(selected))
+    if missing_package:
         raise ReleaseError(
-            "runtime package lacks mandatory direct self-admission module"
+            "runtime package lacks mandatory module(s): "
+            + ",".join(missing_package)
         )
     for relative, markers in DIRECT_ADMISSION_MARKERS.items():
         raw, _mode = _read_regular(source / relative)
@@ -10799,17 +12515,73 @@ def _default_root_files(runtime_files: Iterable[str]) -> dict[str, str]:
     }
 
 
+_INVOCATION_COMMAND_OPTIONS = {
+    "plan": frozenset(),
+    "install": frozenset({"apply", "dry_run"}),
+    "rollback": frozenset({"release_id", "apply", "dry_run"}),
+    "status": frozenset(),
+    "resume": frozenset({"apply"}),
+    "abort": frozenset({"restore_from", "apply"}),
+    "revalidate": frozenset({"apply"}),
+    "begin-release-qualification": frozenset({"release_id", "apply"}),
+    "begin-rung-canary": frozenset(
+        {
+            "release_id",
+            "rung",
+            "route_profile",
+            "contract_sha256",
+            "grok_release_id",
+            "model_id",
+            "profile_sha256",
+            "apply",
+        }
+    ),
+    "canary-exec": frozenset({"canary_arg", "qualification_step", "apply"}),
+    "promote-rung": frozenset({"apply"}),
+    "activate-profile": frozenset({"profile_sha256", "apply"}),
+}
+_BOOTSTRAP_COMMANDS = frozenset(
+    {"plan", "install", "rollback", "status", "resume", "abort"}
+)
+_INSTALLED_COMMANDS = frozenset(
+    {
+        "status",
+        "resume",
+        "abort",
+        "revalidate",
+        "begin-release-qualification",
+        "begin-rung-canary",
+        "canary-exec",
+        "promote-rung",
+        "activate-profile",
+    }
+)
+_PREFIX_COMMANDS = frozenset(_INVOCATION_COMMAND_OPTIONS)
+_PREFIX_PROC_FD_ENV = "GROK_INSTALLER_INTERNAL_PROC_FD"
+_BOOTSTRAP_AUTHORITY_FD_ENV = "GROK_BOOTSTRAP_AUTHORITY_FD"
+
+
+class InvocationContext(NamedTuple):
+    lane: str
+    executable: Path
+    installed_release_id: str | None
+    explicit_options: frozenset[str]
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        argument_default=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "command",
         choices=(
             "plan", "install", "rollback", "status", "resume", "abort",
             "revalidate", "begin-release-qualification", "begin-rung-canary",
-            "canary-exec", "promote-rung",
+            "canary-exec", "promote-rung", "activate-profile",
         ),
     )
-    parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument("--source", type=Path)
     parser.add_argument("--prefix", type=Path)
     parser.add_argument("--home", type=Path)
     parser.add_argument(
@@ -10823,13 +12595,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--route-profile",
         help=(
-            "exact route profile: direct, iphone, vpn, home:<label>, "
-            "auto, or auto-no-direct"
+            "exact route profile: direct, iphone, ios:<key>, vpn, "
+            "home:<label>, auto, or auto-no-direct"
         ),
     )
     parser.add_argument("--contract-sha256", help="exact RouteContract digest")
     parser.add_argument("--grok-release-id", help="exact verified Grok executable identity")
     parser.add_argument("--model-id", help="exact concrete model for rung qualification")
+    parser.add_argument(
+        "--profile-sha256",
+        help=(
+            "content-addressed private profile for profile-bound rung "
+            "qualification or activate-profile"
+        ),
+    )
     parser.add_argument(
         "--evidence-file",
         type=Path,
@@ -10838,7 +12617,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--canary-arg",
         action="append",
-        default=[],
         help="one argument forwarded by canary-exec; repeat as needed",
     )
     parser.add_argument(
@@ -10847,7 +12625,9 @@ def _parser() -> argparse.ArgumentParser:
         help="installer-owned fixed qualification step for canary-exec",
     )
     action = parser.add_mutually_exclusive_group()
-    action.add_argument("--apply", action="store_true", help="perform install or rollback")
+    action.add_argument(
+        "--apply", action="store_true", help="perform the requested state change"
+    )
     action.add_argument("--dry-run", action="store_true", help="explicitly request a read-only preview")
     parser.add_argument(
         "--fault-at",
@@ -10856,8 +12636,253 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _reject_duplicate_explicit_options(argv: list[str]) -> None:
+    repeatable = {"--canary-arg"}
+    seen: set[str] = set()
+    for token in argv:
+        if not token.startswith("--"):
+            continue
+        option = token.split("=", 1)[0]
+        if option in repeatable:
+            continue
+        if option in seen:
+            raise ReleaseError(f"duplicate explicit option is rejected: {option}")
+        seen.add(option)
+
+
+def _installed_release_from_executable(executable: str) -> str | None:
+    prefix = "/usr/local/libexec/grok-proxy/releases/"
+    if not executable.startswith(prefix):
+        return None
+    relative = executable[len(prefix):]
+    parts = relative.split("/")
+    if len(parts) != 2 or parts[1] != INSTALLER_RUNTIME:
+        return None
+    if RELEASE_ID_RE.fullmatch(parts[0]) is None:
+        return None
+    return parts[0]
+
+
+def _consume_bootstrap_authority() -> None:
+    raw_descriptor = os.environ.pop(_BOOTSTRAP_AUTHORITY_FD_ENV, None)
+    if (
+        raw_descriptor is None
+        or len(raw_descriptor) > 10
+        or not raw_descriptor.isascii()
+        or not raw_descriptor.isdigit()
+    ):
+        raise ReleaseError("bootstrap lane requires native bootstrap authority")
+    descriptor = int(raw_descriptor)
+    if (
+        raw_descriptor != str(descriptor)
+        or descriptor < 3
+        or descriptor > 2_147_483_647
+    ):
+        raise ReleaseError("bootstrap lane requires native bootstrap authority")
+    try:
+        information = os.fstat(descriptor)
+        descriptor_flags = fcntl.fcntl(descriptor, fcntl.F_GETFD)
+        get_seals = getattr(fcntl, "F_GET_SEALS", None)
+        seal_write = getattr(fcntl, "F_SEAL_WRITE", None)
+        seal_grow = getattr(fcntl, "F_SEAL_GROW", None)
+        seal_shrink = getattr(fcntl, "F_SEAL_SHRINK", None)
+        seal_seal = getattr(fcntl, "F_SEAL_SEAL", None)
+        if None in (get_seals, seal_write, seal_grow, seal_shrink, seal_seal):
+            raise ReleaseError("native bootstrap authority is unsupported")
+        seals = fcntl.fcntl(descriptor, get_seals)
+        target = os.readlink(f"/proc/self/fd/{descriptor}")
+    except (OSError, OverflowError, ValueError) as exc:
+        raise ReleaseError("native bootstrap authority is invalid") from exc
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    expected_seals = seal_write | seal_grow | seal_shrink | seal_seal
+    if (
+        os.geteuid() != 0
+        or not stat.S_ISREG(information.st_mode)
+        or stat.S_IMODE(information.st_mode) != 0o600
+        or information.st_uid != 0
+        or information.st_nlink != 0
+        or information.st_size <= 0
+        or information.st_size > 128 * 1024 * 1024
+        or descriptor_flags & fcntl.FD_CLOEXEC
+        or seals & expected_seals != expected_seals
+        or target.lstrip("/") != "memfd:grok-dispatcher (deleted)"
+    ):
+        raise ReleaseError("native bootstrap authority is invalid")
+
+
+def _close_invocation(
+    args: argparse.Namespace,
+    argv: list[str],
+) -> InvocationContext:
+    _reject_duplicate_explicit_options(argv)
+    raw_executable = os.fspath(__file__)
+    installed_release = _installed_release_from_executable(raw_executable)
+    if (
+        installed_release is None
+        and (
+            raw_executable == "/usr/local/libexec/grok-proxy"
+            or raw_executable.startswith("/usr/local/libexec/grok-proxy/")
+        )
+    ):
+        raise ReleaseError(
+            "installed invocation requires a lexically concrete release path"
+        )
+    executable = Path(raw_executable)
+    explicit = frozenset(set(vars(args)) - {"command"})
+    bootstrap_authority_present = (
+        os.environ.get(_BOOTSTRAP_AUTHORITY_FD_ENV) is not None
+    )
+    if os.environ.get(_PREFIX_PROC_FD_ENV) is not None and "prefix" not in explicit:
+        raise ReleaseError("internal proc fixture authority is prefix-test only")
+    if installed_release is not None:
+        if bootstrap_authority_present:
+            raise ReleaseError("native bootstrap authority is bootstrap only")
+        lane = "installed"
+        commands = _INSTALLED_COMMANDS
+        lane_options = frozenset()
+    elif bootstrap_authority_present:
+        _consume_bootstrap_authority()
+        lane = "bootstrap"
+        commands = _BOOTSTRAP_COMMANDS
+        lane_options = frozenset()
+    elif "prefix" in explicit:
+        lane = "prefix-test"
+        commands = _PREFIX_COMMANDS
+        lane_options = frozenset({"source", "prefix", "home"})
+    else:
+        _consume_bootstrap_authority()
+        lane = "bootstrap"
+        commands = _BOOTSTRAP_COMMANDS
+        lane_options = frozenset()
+    command = str(args.command)
+    if command not in commands:
+        raise ReleaseError(f"{lane} lane does not permit command {command}")
+    allowed = _INVOCATION_COMMAND_OPTIONS[command] | lane_options
+    if lane == "prefix-test" and command in {"install", "rollback"}:
+        allowed |= {"test_openvpn_binary"}
+    if lane == "prefix-test" and command in {
+        "install",
+        "rollback",
+        "abort",
+        "promote-rung",
+        "canary-exec",
+    }:
+        allowed |= {"fault_at"}
+    rejected = sorted(explicit - allowed)
+    if rejected:
+        raise ReleaseError(
+            f"{lane} {command} rejects explicit option(s): {','.join(rejected)}"
+        )
+    if command == "rollback" and not getattr(args, "release_id", None):
+        raise ReleaseError("rollback requires --release-id")
+    if command == "begin-release-qualification" and not getattr(
+        args, "release_id", None
+    ):
+        raise ReleaseError("begin-release-qualification requires --release-id")
+    if command == "begin-rung-canary":
+        if not getattr(args, "release_id", None) or not getattr(args, "rung", None):
+            raise ReleaseError(
+                "begin-rung-canary requires --release-id and --rung"
+            )
+        if getattr(args, "profile_sha256", None) is None and not all(
+            getattr(args, name, None)
+            for name in (
+                "route_profile",
+                "contract_sha256",
+                "grok_release_id",
+                "model_id",
+            )
+        ):
+            raise ReleaseError(
+                "begin-rung-canary without --profile-sha256 also requires "
+                "--route-profile, --contract-sha256, --grok-release-id, and --model-id"
+            )
+    if command == "activate-profile" and not getattr(args, "profile_sha256", None):
+        raise ReleaseError("activate-profile requires --profile-sha256")
+    if os.environ.get(_PREFIX_PROC_FD_ENV) is not None and lane != "prefix-test":
+        raise ReleaseError("internal proc fixture authority is prefix-test only")
+    return InvocationContext(lane, executable, installed_release, explicit)
+
+
+def _apply_argument_defaults(
+    args: argparse.Namespace,
+    invocation: InvocationContext,
+) -> None:
+    defaults: dict[str, object] = {
+        "source": (
+            invocation.executable.parent
+            if invocation.lane == "installed"
+            else Path(__file__).resolve().parent
+        ),
+        "prefix": None,
+        "home": None,
+        "test_openvpn_binary": None,
+        "release_id": None,
+        "restore_from": None,
+        "rung": None,
+        "route_profile": None,
+        "contract_sha256": None,
+        "grok_release_id": None,
+        "model_id": None,
+        "profile_sha256": None,
+        "evidence_file": None,
+        "canary_arg": [],
+        "qualification_step": None,
+        "apply": False,
+        "dry_run": False,
+        "fault_at": None,
+    }
+    for name, value in defaults.items():
+        if not hasattr(args, name):
+            setattr(args, name, value)
+
+
+def _prefix_proc_authority(layout: Layout, prefix: Path) -> ProcAuthority:
+    raw_descriptor = os.environ.get(_PREFIX_PROC_FD_ENV)
+    if raw_descriptor is None or not raw_descriptor.isdecimal():
+        raise ReleaseError("prefix-test requires an inherited proc fixture authority")
+    descriptor = int(raw_descriptor)
+    if descriptor < 3:
+        raise ReleaseError("prefix-test proc fixture descriptor is invalid")
+    expected = prefix / "proc-fixture"
+    try:
+        expected_info = expected.lstat()
+        opened_info = os.fstat(descriptor)
+        descriptor_target = os.readlink(f"/proc/self/fd/{descriptor}")
+    except OSError as exc:
+        raise ReleaseError("cannot verify inherited proc fixture authority") from exc
+    if (
+        expected.is_symlink()
+        or not stat.S_ISDIR(expected_info.st_mode)
+        or (expected_info.st_dev, expected_info.st_ino)
+        != (opened_info.st_dev, opened_info.st_ino)
+        or (expected_info.st_uid, expected_info.st_gid)
+        != (layout.root_uid, layout.root_gid)
+        or Path(descriptor_target) != expected
+    ):
+        raise ReleaseError("inherited proc fixture authority is not the fixed prefix path")
+    return ProcAuthority.from_fd(descriptor, display=expected, fixture=True)
+
+
+def _assert_installed_release_authority(
+    installer: ReleaseInstaller,
+    release_id: str,
+) -> None:
+    installer.validate_target_release_pair(release_id)
+    if installer.root_active_release_id() != release_id:
+        raise ReleaseError("installed installer is not the concrete root-selected release")
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = _parser().parse_args(raw_argv)
+    invocation = _close_invocation(args, raw_argv)
+    _load_runtime_dependencies()
+    _apply_argument_defaults(args, invocation)
     if args.command in ("plan", "status") and (args.apply or args.dry_run or args.fault_at):
         raise ReleaseError(f"{args.command} does not accept action or fault flags")
     if args.fault_at and not args.apply:
@@ -10870,16 +12895,43 @@ def main(argv: list[str] | None = None) -> int:
         home=args.home,
         test_openvpn_binary=args.test_openvpn_binary,
     )
-    runtime_files = _default_runtime_files(args.source)
-    installer = ReleaseInstaller(
-        layout,
-        runtime_files=runtime_files,
-        root_files=_default_root_files(runtime_files),
+    proc_authority = (
+        _prefix_proc_authority(layout, args.prefix)
+        if invocation.lane == "prefix-test"
+        else ProcAuthority.production()
     )
+    try:
+        runtime_files = _default_runtime_files(args.source)
+        installer = ReleaseInstaller(
+            layout,
+            runtime_files=runtime_files,
+            root_files=_default_root_files(runtime_files),
+            proc_authority=proc_authority,
+            installed_release_id=invocation.installed_release_id,
+        )
+        if (
+            invocation.installed_release_id is not None
+            and args.command != "status"
+        ):
+            _assert_installed_release_authority(
+                installer,
+                invocation.installed_release_id,
+            )
+        return _dispatch_main(args, installer, layout, invocation)
+    finally:
+        proc_authority.close()
+
+
+def _dispatch_main(
+    args: argparse.Namespace,
+    installer: ReleaseInstaller,
+    layout: Layout,
+    invocation: InvocationContext,
+) -> int:
     mutating = {
         "resume", "abort", "revalidate", "begin-release-qualification",
         "begin-rung-canary",
-        "canary-exec", "promote-rung",
+        "canary-exec", "promote-rung", "activate-profile",
     }
     if args.command in mutating and not args.apply:
         raise ReleaseError(f"{args.command} requires --apply")
@@ -10905,7 +12957,10 @@ def main(argv: list[str] | None = None) -> int:
             "target_home": str(layout.user_root.parents[2]),
         }
     elif args.command == "status":
-        output = installer.status()
+        output = installer.status(
+            installed=invocation.lane == "installed",
+            installed_release_id=invocation.installed_release_id,
+        )
     elif args.command == "install":
         if not args.apply:
             output = installer.preview_install()
@@ -10918,6 +12973,7 @@ def main(argv: list[str] | None = None) -> int:
                 "changed": result.changed,
                 "operation": result.operation,
                 "applied": True,
+                "profile_transition": installer.profile_transition,
             }
     elif args.command == "rollback":
         if not args.release_id:
@@ -10933,24 +12989,31 @@ def main(argv: list[str] | None = None) -> int:
                 "changed": result.changed,
                 "operation": result.operation,
                 "applied": True,
+                "profile_transition": installer.profile_transition,
             }
     elif args.command == "resume":
-        result = installer.resume()
+        result = installer.resume(canary_only=invocation.lane == "installed")
         output = {
             "schema_version": SCHEMA_VERSION,
             "release_id": result.release_id,
             "changed": result.changed,
             "operation": result.operation,
             "applied": True,
+            "profile_transition": installer.profile_transition,
         }
     elif args.command == "abort":
-        result = installer.abort_restore(args.restore_from, fault_at=args.fault_at)
+        result = installer.abort_restore(
+            args.restore_from,
+            fault_at=args.fault_at,
+            canary_only=invocation.lane == "installed",
+        )
         output = {
             "schema_version": SCHEMA_VERSION,
             "release_id": result.release_id,
             "changed": result.changed,
             "operation": result.operation,
             "applied": True,
+            "profile_transition": installer.profile_transition,
         }
     elif args.command == "revalidate":
         result = installer.revalidate_boot()
@@ -10978,10 +13041,12 @@ def main(argv: list[str] | None = None) -> int:
             ),
         }
     elif args.command == "begin-rung-canary":
-        if not all(
+        if not args.release_id or not args.rung:
+            raise ReleaseError(
+                "begin-rung-canary requires --release-id and --rung"
+            )
+        if args.profile_sha256 is None and not all(
             (
-                args.release_id,
-                args.rung,
                 args.route_profile,
                 args.contract_sha256,
                 args.grok_release_id,
@@ -10989,7 +13054,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         ):
             raise ReleaseError(
-                "begin-rung-canary requires --release-id, --rung, "
+                "begin-rung-canary without --profile-sha256 also requires "
                 "--route-profile, --contract-sha256, --grok-release-id, and --model-id"
             )
         result = installer.begin_rung_canary(
@@ -10999,6 +13064,7 @@ def main(argv: list[str] | None = None) -> int:
             contract_sha256=args.contract_sha256,
             grok_release_id=args.grok_release_id,
             model_id=args.model_id,
+            profile_sha256=args.profile_sha256,
         )
         output = {
             "schema_version": SCHEMA_VERSION,
@@ -11047,7 +13113,7 @@ def main(argv: list[str] | None = None) -> int:
                 "applied": True,
             }
             exit_code = result.returncode
-    else:
+    elif args.command == "promote-rung":
         result = installer.promote_rung(
             args.evidence_file,
             fault_at=args.fault_at,
@@ -11058,6 +13124,19 @@ def main(argv: list[str] | None = None) -> int:
             "changed": result.changed,
             "operation": result.operation,
             "applied": True,
+        }
+    else:
+        if not args.profile_sha256:
+            raise ReleaseError("activate-profile requires --profile-sha256")
+        result = installer.activate_profile(args.profile_sha256)
+        output = {
+            "schema_version": SCHEMA_VERSION,
+            "release_id": result.release_id,
+            "profile_sha256": args.profile_sha256,
+            "changed": result.changed,
+            "operation": result.operation,
+            "applied": True,
+            "profile_transition": installer.profile_transition,
         }
     print(json.dumps(output, sort_keys=True, separators=(",", ":")))
     return exit_code

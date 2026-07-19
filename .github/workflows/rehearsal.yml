@@ -31,11 +31,70 @@ jobs:
         with:
           fetch-depth: 0          # full history for leak-scan-history
       - name: Install minimal deps
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml bubblewrap build-essential dbus-user-session iproute2 libssl-dev openssl pkg-config
+      - name: Prepare delegated user manager for isolated coding verification
+        run: |
+          uid="$(id -u)"
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@${uid}.service"
+          test -S "/run/user/${uid}/bus"
+          results_dir="${RUNNER_TEMP:?}/grok-verification-results"
+          test ! -e "$results_dir"
+          install -d -m 0700 "$results_dir"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/${uid}"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus"
+            echo "GROK_TEST_OUTPUT_DIR=$results_dir"
+          } >> "$GITHUB_ENV"
       - name: No-secrets rehearsal (make ci)
         run: |
           set -o pipefail
           make ci 2>&1 | tee ci.log
+          grep -Fqx 'verification-ledger: selftest passed' ci.log
+          /usr/bin/python3 -I -B - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+
+          root = Path(os.environ["GROK_TEST_OUTPUT_DIR"])
+          passed = root / "passed"
+          ledger = passed / "grok-test-results.jsonl"
+          summary_path = passed / "grok-test-summary.json"
+          for path, mode, kind in (
+              (root, 0o700, "directory"),
+              (passed, 0o700, "directory"),
+              (ledger, 0o600, "file"),
+              (summary_path, 0o600, "file"),
+          ):
+              info = path.lstat()
+              if (
+                  path.is_symlink()
+                  or info.st_uid != os.geteuid()
+                  or info.st_gid != os.getegid()
+                  or stat.S_IMODE(info.st_mode) != mode
+                  or (kind == "directory" and not stat.S_ISDIR(info.st_mode))
+                  or (kind == "file" and not stat.S_ISREG(info.st_mode))
+                  or (kind == "file" and info.st_nlink != 1)
+                  or (path == root and info.st_nlink != 3)
+                  or (path == passed and info.st_nlink != 2)
+              ):
+                  raise SystemExit(f"unsafe published Grok result artifact: {path}")
+          raw = ledger.read_bytes()
+          summary = json.loads(summary_path.read_bytes())
+          if (
+              summary.get("schema_version") != 1
+              or summary.get("status") != "passed"
+              or summary.get("complete") is not True
+              or summary.get("run_returncode") != 0
+              or summary.get("ledger_path") != str(ledger)
+              or summary.get("ledger_bytes") != len(raw)
+              or summary.get("ledger_sha256") != hashlib.sha256(raw).hexdigest()
+          ):
+              raise SystemExit("published Grok result summary is incoherent")
+          print("published Grok ledger and hash-bound summary OK")
+          PY
       - name: Summary
         if: always()
         run: |
@@ -47,7 +106,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: rehearsal-core-log, path: ci.log }
+        with:
+          name: rehearsal-core-log
+          path: |
+            ci.log
+            ${{ runner.temp }}/grok-verification-results
 
   # -------------------------------------------- live-test keys from repo secrets
   verify-keys:
@@ -97,9 +160,9 @@ jobs:
   # Runs the whole `make install` in DEGRADED mode on a fresh runner: real
   # software install, config render, python env rebuild, systemd unit render,
   # verify. The zip is NEVER used. Heavy -> manual dispatch + weekly only.
-  # Components (private openclaw-bot / ai-agents-skills) clone only if a
-  # COMPONENTS_TOKEN secret (PAT with repo:read) is set; otherwise those phases
-  # are skipped with a notice. Gateway start / channels are NOT verifiable here
+  # Private components clone only if a COMPONENTS_TOKEN secret (PAT with
+  # repo:read) is set. The public ai-agents-skills checkout remains a required,
+  # exact-pinned phase-8 gate. Gateway start / channels are NOT verifiable here
   # (need the full encrypted archive + a real systemd session) — that's the VM rehearsal.
   install-degraded:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
@@ -112,7 +175,246 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           df -h / | tail -1
       - name: Bootstrap deps
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml build-essential libssl-dev openssl pkg-config
+      - name: Provision ephemeral signed Grok bootstrap trust fixture
+        run: |
+          set -euo pipefail
+          umask 077
+          bootstrap_tmp="$(mktemp -d "${RUNNER_TEMP:?}/grok-bootstrap-ci.XXXXXX")"
+          cleanup() {
+            if [[ -n "${bootstrap_tmp:-}" \
+                && "$bootstrap_tmp" == "$RUNNER_TEMP"/grok-bootstrap-ci.* \
+                && -d "$bootstrap_tmp" \
+                && ! -L "$bootstrap_tmp" ]]; then
+              chmod -R u+w -- "$bootstrap_tmp" 2>/dev/null || true
+              rm -rf -- "$bootstrap_tmp"
+            fi
+          }
+          trap cleanup EXIT
+
+          key_id='ci-ephemeral-2026'
+          signing_key="$bootstrap_tmp/ed25519-private.pem"
+          public_der="$bootstrap_tmp/ed25519-public.der"
+          staged="$bootstrap_tmp/closed-dispatcher"
+          signed_root="$bootstrap_tmp/signed-releases"
+          native_build="$bootstrap_tmp/native-build"
+          mkdir -m 0700 "$signed_root"
+          /usr/bin/openssl genpkey -algorithm ED25519 -out "$signing_key" \
+            >/dev/null 2>&1
+          chmod 0600 "$signing_key"
+          /usr/bin/openssl pkey -in "$signing_key" -pubout -outform DER \
+            -out "$public_der" >/dev/null 2>&1
+          public_key_hex="$(python3 - "$public_der" <<'PY'
+          from pathlib import Path
+          import sys
+
+          prefix = bytes.fromhex("302a300506032b6570032100")
+          raw = Path(sys.argv[1]).read_bytes()
+          if len(raw) != len(prefix) + 32 or not raw.startswith(prefix):
+              raise SystemExit("ephemeral Ed25519 public key DER is invalid")
+          print(raw[len(prefix):].hex())
+          PY
+          )"
+          [[ "$public_key_hex" =~ ^[0-9a-f]{64}$ ]]
+
+          /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            /usr/bin/python3 -B \
+            system/grok-proxy/bootstrap/stage_dispatcher.py \
+            --source-root system/grok-proxy \
+            --output "$staged"
+          release_source="$(/usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            /usr/bin/python3 -B \
+            system/grok-proxy/bootstrap/build_bundle.py \
+            --source "$staged" \
+            --output "$signed_root" \
+            --key-id "$key_id" \
+            --signing-key "$signing_key")"
+          release_id="${release_source##*/}"
+          [[ "$release_source" == "$signed_root/$release_id" \
+              && "$release_id" =~ ^[0-9a-f]{64}$ \
+              && -d "$release_source" \
+              && ! -L "$release_source" ]]
+
+          make -C system/grok-proxy/bootstrap \
+            BUILD_DIR="$native_build" \
+            KEY_ID="$key_id" \
+            PUBLIC_KEY_HEX="$public_key_hex" \
+            all
+
+          bootstrap_root=/usr/local/libexec/grok-proxy/bootstrap
+          release_root=/usr/local/libexec/grok-proxy/bootstrap-releases
+          sudo test ! -e "$bootstrap_root"
+          sudo test ! -e "$release_root"
+          sudo install -d -o root -g root -m 0755 "$bootstrap_root" "$release_root"
+          sudo install -o root -g root -m 0555 \
+            "$native_build/grok-bootstrap" "$bootstrap_root/grok-bootstrap"
+          sudo install -o root -g root -m 0600 /dev/null \
+            "$bootstrap_root/update.lock"
+          sudo install -d -o root -g root -m 0555 "$release_root/$release_id"
+          for artifact in dispatcher.pyz release-manifest.sig release-manifest.txt; do
+            sudo install -o root -g root -m 0444 \
+              "$release_source/$artifact" "$release_root/$release_id/$artifact"
+          done
+          printf '%s\n' "$release_id" > "$bootstrap_tmp/selected-release"
+          sudo install -o root -g root -m 0444 \
+            "$bootstrap_tmp/selected-release" "$bootstrap_root/selected-release"
+
+          /usr/bin/python3 - <<'PY' | tee bootstrap-preflight.log
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import stat
+          import subprocess
+          import tempfile
+
+          class PreflightError(RuntimeError):
+              pass
+
+          OUTPUT_LIMIT = 1024 * 1024
+
+          def capture_metadata(stream):
+              stream.flush()
+              size = os.fstat(stream.fileno()).st_size
+              stream.seek(0)
+              digest = hashlib.sha256()
+              while True:
+                  chunk = stream.read(64 * 1024)
+                  if not chunk:
+                      break
+                  digest.update(chunk)
+              stream.seek(0)
+              return size, digest.hexdigest()
+
+          def require_directory(path: Path, mode: int) -> None:
+              info = path.lstat()
+              if (
+                  path.is_symlink()
+                  or not stat.S_ISDIR(info.st_mode)
+                  or (info.st_uid, info.st_gid) != (0, 0)
+                  or stat.S_IMODE(info.st_mode) != mode
+              ):
+                  raise PreflightError(f"unsafe bootstrap directory: {path}")
+
+          root = Path("/usr/local/libexec/grok-proxy/bootstrap")
+          store = Path("/usr/local/libexec/grok-proxy/bootstrap-releases")
+          require_directory(root, 0o755)
+          require_directory(store, 0o755)
+          binary = root / "grok-bootstrap"
+          binary_info = binary.lstat()
+          if (
+              binary.is_symlink()
+              or not stat.S_ISREG(binary_info.st_mode)
+              or (binary_info.st_uid, binary_info.st_gid) != (0, 0)
+              or stat.S_IMODE(binary_info.st_mode) != 0o555
+              or binary_info.st_nlink != 1
+          ):
+              raise PreflightError("unsafe native bootstrap executable")
+          update_lock = root / "update.lock"
+          lock_info = update_lock.lstat()
+          if (
+              update_lock.is_symlink()
+              or not stat.S_ISREG(lock_info.st_mode)
+              or (lock_info.st_uid, lock_info.st_gid) != (0, 0)
+              or stat.S_IMODE(lock_info.st_mode) != 0o600
+              or lock_info.st_nlink != 1
+              or lock_info.st_size != 0
+          ):
+              raise PreflightError("unsafe bootstrap update lock")
+          selector = root / "selected-release"
+          selector_info = selector.lstat()
+          selector_raw = selector.read_bytes()
+          if (
+              selector.is_symlink()
+              or not stat.S_ISREG(selector_info.st_mode)
+              or (selector_info.st_uid, selector_info.st_gid) != (0, 0)
+              or stat.S_IMODE(selector_info.st_mode) != 0o444
+              or selector_info.st_nlink != 1
+              or re.fullmatch(rb"[0-9a-f]{64}\n", selector_raw) is None
+          ):
+              raise PreflightError("unsafe bootstrap selector")
+          release_id = selector_raw[:-1].decode("ascii")
+          release = store / release_id
+          require_directory(release, 0o555)
+          expected = {"dispatcher.pyz", "release-manifest.sig", "release-manifest.txt"}
+          if {entry.name for entry in release.iterdir()} != expected:
+              raise PreflightError("signed bootstrap release shape is invalid")
+          for name in expected:
+              info = (release / name).lstat()
+              if (
+                  not stat.S_ISREG(info.st_mode)
+                  or (info.st_uid, info.st_gid) != (0, 0)
+                  or stat.S_IMODE(info.st_mode) != 0o444
+                  or info.st_nlink != 1
+              ):
+                  raise PreflightError(f"unsafe signed bootstrap artifact: {name}")
+
+          with tempfile.TemporaryFile(mode="w+b") as stdout_stream, tempfile.TemporaryFile(
+              mode="w+b"
+          ) as stderr_stream:
+              try:
+                  result = subprocess.run(
+                      [
+                          "/usr/bin/sudo", "-n", "--", str(binary),
+                          "--release-dir", str(release), "--", "status",
+                      ],
+                      stdin=subprocess.DEVNULL,
+                      stdout=stdout_stream,
+                      stderr=stderr_stream,
+                      timeout=120,
+                      check=False,
+                      env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                  )
+              except subprocess.TimeoutExpired as exc:
+                  stdout_size, stdout_sha256 = capture_metadata(stdout_stream)
+                  stderr_size, stderr_sha256 = capture_metadata(stderr_stream)
+                  raise PreflightError(
+                      "signed bootstrap execution timed out; "
+                      f"stdout_bytes={stdout_size} stdout_sha256={stdout_sha256} "
+                      f"stderr_bytes={stderr_size} stderr_sha256={stderr_sha256}"
+                  ) from exc
+              except OSError as exc:
+                  error_number = "unknown" if exc.errno is None else str(exc.errno)
+                  raise PreflightError(
+                      "signed bootstrap execution could not start; "
+                      f"error={type(exc).__name__} errno={error_number}"
+                  ) from exc
+              stdout_size, stdout_sha256 = capture_metadata(stdout_stream)
+              stderr_size, stderr_sha256 = capture_metadata(stderr_stream)
+              if (
+                  result.returncode != 0
+                  or stdout_size > OUTPUT_LIMIT
+                  or stderr_size > OUTPUT_LIMIT
+              ):
+                  raise PreflightError(
+                      "signed bootstrap execution failed; "
+                      f"returncode={result.returncode} "
+                      f"stdout_bytes={stdout_size} stdout_sha256={stdout_sha256} "
+                      f"stderr_bytes={stderr_size} stderr_sha256={stderr_sha256}"
+                  )
+              stdout_stream.seek(0)
+              try:
+                  status = json.loads(stdout_stream.read(OUTPUT_LIMIT + 1))
+              except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                  raise PreflightError("signed bootstrap status is not JSON") from exc
+          if not isinstance(status, dict) or status.get("schema_version") != 2:
+              raise PreflightError("signed bootstrap status schema is invalid")
+          print("CSR_GATE_JSON " + json.dumps({
+              "capture_backend": "temporary-files",
+              "bootstrap_release_id": release_id,
+              "case_id": "install.bootstrap.preflight",
+              "mutable_source_used": False,
+              "native_binary_valid": True,
+              "output_limit_bytes": OUTPUT_LIMIT,
+              "schema_version": 1,
+              "signed_application_valid": True,
+              "signed_dispatcher_status_valid": True,
+              "status": "passed",
+          }, sort_keys=True, separators=(",", ":")))
+          PY
       - name: Allow private component clones (only if token provided)
         env:
           COMPONENTS_TOKEN: ${{ secrets.COMPONENTS_TOKEN }}
@@ -121,30 +423,315 @@ jobs:
             git config --global url."https://x-access-token:${COMPONENTS_TOKEN}@github.com/".insteadOf "https://github.com/"
             echo "private component cloning enabled"
           else
-            echo "no COMPONENTS_TOKEN — OpenClaw/skills component phases will be skipped (degraded)"
+            echo "no COMPONENTS_TOKEN — private components may be unavailable; pinned public skills remain required"
           fi
       - name: make install (DEGRADED, no secrets/zip; texlive+images skipped to fit runner)
         env:
           SKIP_LATEX: '1'
           SKIP_DOCKER_IMAGES: '1'
+          # Phase 8 must ignore both values and use its fixed closed environment.
+          AAS_PYTHON: /bin/false
+          PYTHONPATH: /tmp/csr-hostile-aas-pythonpath
         run: |
           set -o pipefail
-          bash bin/install.sh 2>&1 | tee install.log || true
+          set +e
+          /usr/bin/cat bootstrap-preflight.log > install.log
+          bash bin/install.sh 2>&1 | tee -a install.log
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          installer_rc="${pipeline_status[0]:-125}"
+          tee_rc="${pipeline_status[1]:-125}"
+          printf '%s\n' "$installer_rc" > install.exit
+          if [ "$installer_rc" -ne 0 ]; then
+            exit "$installer_rc"
+          fi
+          exit "$tee_rc"
       - name: Assert key phases succeeded
+        if: always()
         run: |
-          ok=1
-          grep -q "PHASE 2"  install.log || { echo "::error::prepare phase missing"; ok=0; }
-          grep -q "render-install:" install.log || { echo "::error::render-install did not run"; ok=0; }
-          grep -q "PHASE 9"  install.log || { echo "::error::python env phase missing"; ok=0; }
-          grep -q "PHASE 12" install.log || { echo "::error::verify phase missing"; ok=0; }
-          # no unresolved placeholders should remain in rendered files
-          ! grep -q "unresolved placeholder" install.log || { echo "::error::unresolved placeholders"; ok=0; }
-          [ $ok -eq 1 ] && echo "full-install machinery (degraded) OK"
-          exit $((1-ok))
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import stat
+          import subprocess
+          import sys
+
+          errors = []
+          log_path = Path("install.log")
+          exit_path = Path("install.exit")
+          text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+          if not exit_path.is_file():
+              errors.append("installer exit ledger is missing")
+          else:
+              try:
+                  installer_rc = int(exit_path.read_text(encoding="ascii").strip())
+              except (OSError, ValueError):
+                  errors.append("installer exit ledger is invalid")
+              else:
+                  if installer_rc != 0:
+                      errors.append(f"installer returned {installer_rc}")
+
+          records = {}
+          for line_number, line in enumerate(text.splitlines(), 1):
+              if not line.startswith("CSR_GATE_JSON "):
+                  continue
+              try:
+                  value = json.loads(line.removeprefix("CSR_GATE_JSON "))
+              except json.JSONDecodeError:
+                  errors.append(f"invalid structured gate JSON at line {line_number}")
+                  continue
+              case_id = value.get("case_id") if isinstance(value, dict) else None
+              if not isinstance(case_id, str) or case_id in records:
+                  errors.append(f"invalid or duplicate structured gate at line {line_number}")
+                  continue
+              records[case_id] = value
+
+          expected = {
+              "install.bootstrap.preflight",
+              "install.phase6.grok-bootstrap-status",
+              "install.phase6.grok-install",
+              "install.phase6.grok-status",
+              "install.phase8.aas-pin",
+              "install.phase8.aas-install",
+              "install.phase8.aas-verify",
+          }
+          missing = sorted(expected - set(records))
+          extra = sorted(set(records) - expected)
+          if missing:
+              errors.append("missing structured gates: " + ", ".join(missing))
+          if extra:
+              errors.append("unexpected structured gates: " + ", ".join(extra))
+          for case_id in sorted(expected & set(records)):
+              value = records[case_id]
+              if value.get("schema_version") != 1 or value.get("status") != "passed":
+                  errors.append(f"structured gate did not pass: {case_id}")
+
+          install = records.get("install.phase6.grok-install", {})
+          release_id = install.get("release_id")
+          if install.get("install_result_valid") is not True or not (
+              isinstance(release_id, str) and re.fullmatch(r"[0-9a-f]{64}", release_id)
+          ):
+              errors.append("structured Grok install result is invalid")
+          status = records.get("install.phase6.grok-status", {})
+          if release_id is not None:
+              expected_status = {
+                  "active_release_id": release_id,
+                  "active_release_valid": True,
+                  "active_root_release_id": release_id,
+                  "active_user_release_id": release_id,
+                  "exposed_user_releases": [release_id],
+                  "release_access_policy_valid": True,
+                  "rollback_denied": False,
+                  "rollback_eligibility_complete": True,
+              }
+              if any(status.get(name) != value for name, value in expected_status.items()):
+                  errors.append("structured Grok status result is incoherent")
+              eligible = status.get("rollback_eligible_releases")
+              if not isinstance(eligible, list) or release_id not in eligible:
+                  errors.append("structured Grok rollback eligibility is incomplete")
+          preflight = records.get("install.bootstrap.preflight", {})
+          bootstrap_release_id = preflight.get("bootstrap_release_id")
+          if not (
+              isinstance(bootstrap_release_id, str)
+              and re.fullmatch(r"[0-9a-f]{64}", bootstrap_release_id)
+              and preflight.get("capture_backend") == "temporary-files"
+              and preflight.get("native_binary_valid") is True
+              and preflight.get("output_limit_bytes") == 1024 * 1024
+              and preflight.get("signed_application_valid") is True
+              and preflight.get("signed_dispatcher_status_valid") is True
+              and preflight.get("mutable_source_used") is False
+          ):
+              errors.append("structured signed-bootstrap preflight is invalid")
+          workflow_source = Path(".github/workflows/rehearsal.yml").read_text(
+              encoding="utf-8"
+          )
+          if re.search(r"capture_output\s*=\s*True", workflow_source):
+              errors.append("workflow contains unbounded in-memory subprocess capture")
+          bootstrap_status = records.get("install.phase6.grok-bootstrap-status", {})
+          if not (
+              bootstrap_status.get("bootstrap_release_id") == bootstrap_release_id
+              and bootstrap_status.get("active_release_id") == release_id
+              and bootstrap_status.get("signed_dispatcher_status_valid") is True
+              and isinstance(bootstrap_status.get("rollback_eligible_releases"), list)
+              and release_id in bootstrap_status.get("rollback_eligible_releases", [])
+          ):
+              errors.append("structured signed-bootstrap phase-6 status is incoherent")
+          lock_matches = re.findall(
+              r"^ai-agents-skills=.*@([0-9a-f]{40})$",
+              Path("components.lock").read_text(encoding="ascii"),
+              re.MULTILINE,
+          )
+          expected_pin = lock_matches[0] if len(lock_matches) == 1 else None
+          pin_record = records.get("install.phase8.aas-pin", {})
+          pin = pin_record.get("commit")
+          source_root = pin_record.get("source_root")
+          expected_source_root = (
+              f"/usr/local/libexec/coding-system/components/ai-agents-skills/{expected_pin}"
+              if expected_pin is not None
+              else None
+          )
+          if not (
+              pin == expected_pin
+              and isinstance(pin, str)
+              and re.fullmatch(r"[0-9a-f]{40}", pin) is not None
+              and pin_record.get("closed_environment") is True
+              and pin_record.get("execution_source") == "root-owned-pinned-object"
+              and source_root == expected_source_root
+          ):
+              errors.append("structured ai-agents-skills pin result is invalid")
+          elif expected_pin is not None:
+              aas_repo = Path.home() / "ai-agents-skills"
+              try:
+                  expected_tree = subprocess.check_output(
+                      [
+                          "/usr/bin/git", "--no-replace-objects", "-C", str(aas_repo),
+                          "rev-parse", f"{expected_pin}^{{tree}}",
+                      ],
+                      text=True,
+                      timeout=30,
+                  ).strip()
+                  inventory = subprocess.check_output(
+                      [
+                          "/usr/bin/git", "--no-replace-objects", "-C", str(aas_repo),
+                          "ls-tree", "-rz", "--full-tree", expected_pin,
+                      ],
+                      timeout=30,
+                  )
+              except (OSError, subprocess.SubprocessError) as exc:
+                  errors.append(f"cannot inspect pinned ai-agents-skills tree: {exc}")
+              else:
+                  if pin_record.get("tree") != expected_tree:
+                      errors.append("structured ai-agents-skills tree is not exact")
+                  materialized = Path(expected_source_root)
+                  expected_files = {}
+                  for row in inventory.rstrip(b"\0").split(b"\0"):
+                      match = re.fullmatch(
+                          rb"(100644|100755) blob ([0-9a-f]{40})\t([^\0]+)", row
+                      )
+                      if match is None:
+                          errors.append("pinned ai-agents-skills tree has an unsafe entry")
+                          break
+                      expected_files[match.group(3).decode("utf-8")] = (
+                          0o555 if match.group(1) == b"100755" else 0o444,
+                          match.group(2).decode("ascii"),
+                      )
+                  actual_files = {}
+                  try:
+                      root_info = materialized.lstat()
+                      if (
+                          materialized.is_symlink()
+                          or not stat.S_ISDIR(root_info.st_mode)
+                          or (root_info.st_uid, root_info.st_gid) != (0, 0)
+                          or stat.S_IMODE(root_info.st_mode) != 0o555
+                      ):
+                          raise ValueError("immutable root authority is invalid")
+                      for directory, dirnames, filenames in os.walk(
+                          materialized, followlinks=False
+                      ):
+                          parent = Path(directory)
+                          for name in dirnames:
+                              child = parent / name
+                              info = child.lstat()
+                              if (
+                                  child.is_symlink()
+                                  or not stat.S_ISDIR(info.st_mode)
+                                  or (info.st_uid, info.st_gid) != (0, 0)
+                                  or stat.S_IMODE(info.st_mode) != 0o555
+                              ):
+                                  raise ValueError(f"unsafe immutable directory: {child}")
+                          for name in filenames:
+                              child = parent / name
+                              info = child.lstat()
+                              if (
+                                  child.is_symlink()
+                                  or not stat.S_ISREG(info.st_mode)
+                                  or (info.st_uid, info.st_gid) != (0, 0)
+                                  or info.st_nlink != 1
+                                  or stat.S_IMODE(info.st_mode) not in {0o444, 0o555}
+                              ):
+                                  raise ValueError(f"unsafe immutable file: {child}")
+                              data = child.read_bytes()
+                              oid = hashlib.sha1(
+                                  b"blob " + str(len(data)).encode("ascii") + b"\0" + data
+                              ).hexdigest()
+                              actual_files[child.relative_to(materialized).as_posix()] = (
+                                  stat.S_IMODE(info.st_mode), oid
+                              )
+                  except (OSError, UnicodeError, ValueError) as exc:
+                      errors.append(f"immutable ai-agents-skills tree is invalid: {exc}")
+                  else:
+                      if actual_files != expected_files:
+                          errors.append("immutable ai-agents-skills files differ from Git")
+                  claude_skill = Path.home() / ".claude/skills/modal-research-compute/SKILL.md"
+                  codex_skill = Path.home() / ".codex/skills/modal-research-compute/SKILL.md"
+                  try:
+                      if not (
+                          claude_skill.is_symlink()
+                          and claude_skill.resolve(strict=True).is_relative_to(materialized)
+                      ):
+                          errors.append("Claude skill is not bound to immutable AAS source")
+                      if (
+                          codex_skill.is_symlink()
+                          or not codex_skill.is_file()
+                          or str(materialized) not in codex_skill.read_text(encoding="utf-8")
+                      ):
+                          errors.append("Codex skill is not bound to immutable AAS source")
+                      state = json.loads(
+                          (Path.home() / ".ai-agents-skills/state.json").read_text(
+                              encoding="utf-8"
+                          )
+                      )
+                      mutable_source = str(Path.home() / "ai-agents-skills")
+                      if any(
+                          isinstance(item, dict)
+                          and isinstance(item.get("source_path"), str)
+                          and item["source_path"].startswith(mutable_source + "/")
+                          for item in state.get("artifacts", [])
+                      ):
+                          errors.append("AAS state retained a mutable checkout source path")
+                  except (OSError, ValueError, json.JSONDecodeError) as exc:
+                      errors.append(f"cannot verify immutable AAS install references: {exc}")
+
+          for marker in ("PHASE 2", "PHASE 9", "PHASE 12"):
+              if marker not in text:
+                  errors.append(f"required install marker is missing: {marker}")
+          if "unresolved placeholder" in text:
+              errors.append("install reported unresolved placeholders")
+
+          if errors:
+              for error in errors:
+                  print(f"::error::{error}")
+              raise SystemExit(1)
+          print("full-install machinery (degraded) and structured gates OK")
+          PY
       - name: Summary
         if: always()
         run: |
-          { echo "## install-degraded — ${{ job.status }}"; echo '```'; tail -n 50 install.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "## install-degraded — ${{ job.status }}"; echo '```'; tail -n 50 install.log 2>/dev/null || echo '(no log)'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: install-degraded-log, path: install.log }
+        with:
+          name: install-degraded-log
+          path: |
+            install.log
+            install.exit
+            bootstrap-preflight.log
+      - name: Remove disposable signed-bootstrap trust fixture
+        if: always()
+        run: |
+          set -euo pipefail
+          for path in \
+            /usr/local/libexec/grok-proxy/bootstrap \
+            /usr/local/libexec/grok-proxy/bootstrap-releases
+          do
+            if sudo test -L "$path"; then
+              echo "refusing to remove linked disposable bootstrap path: $path" >&2
+              exit 2
+            fi
+            if sudo test -e "$path"; then
+              sudo rm -rf -- "$path"
+            fi
+          done

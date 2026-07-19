@@ -4,10 +4,46 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+export GROK_TESTING=1
+export GROK_TEST_CONTROL_DIR="$tmp/control"
+mkdir -p "$GROK_TEST_CONTROL_DIR"
+chmod 700 "$GROK_TEST_CONTROL_DIR"
 mkdir -p "$tmp/target"
 cp "$ROOT/egress.sh" "$tmp/target/egress.sh"
+mkdir -p "$tmp/target/grok_ms"
+cp "$ROOT/grok_ms/ios_registry.py" "$tmp/target/grok_ms/ios_registry.py"
 cp "$ROOT/grok-remote" "$tmp/target/grok-remote"
 printf '%s\n' 'pc 100.64.0.2 user 22' > "$tmp/target/hosts.conf"
+
+register_test_ios(){
+  local directory="$1"
+  mkdir -p "$directory"
+  chmod 700 "$directory"
+  printf '%s\n' '{"devices":[{"key":"iphone","stable_node_id":"n-test-phone"}],"schema_version":1}' \
+    > "$directory/devices.json"
+  chmod 600 "$directory/devices.json"
+}
+
+# Compatibility routing gives one device at most ten seconds and clips that
+# attempt to the shared iOS-family deadline.
+(
+  export GROK_IPHONE_STATE_DIR="$tmp/ios-deadline-phone"
+  . "$tmp/target/egress.sh"
+  SECONDS=100
+  IOS_FAMILY_DEADLINE_SECONDS=0
+  ios_attempt_begin
+  first_remaining="$(ios_attempt_remaining)"
+  (( first_remaining > 0 && first_remaining <= 10 ))
+  ios_attempt_end
+  IOS_FAMILY_DEADLINE_SECONDS=$((SECONDS + 3))
+  ios_attempt_begin
+  family_remaining="$(ios_attempt_remaining)"
+  (( family_remaining > 0 && family_remaining <= 3 ))
+  IOS_ATTEMPT_DEADLINE_SECONDS="$SECONDS"
+  ! ios_attempt_check
+  IOS_FAMILY_DEADLINE_SECONDS="$SECONDS"
+  ! ios_attempt_begin
+)
 
 (
   export GROK_IPHONE_STATE_DIR="$tmp/no-phone"
@@ -22,12 +58,14 @@ printf '%s\n' 'pc 100.64.0.2 user 22' > "$tmp/target/hosts.conf"
   export GROK_IPHONE_STATE_DIR="$tmp/phone"
   export GROK_IPHONE_EXIT_NODE="100.64.0.99"
   mkdir -p "$GROK_IPHONE_STATE_DIR"
+  chmod 700 "$GROK_IPHONE_STATE_DIR"
   printf '%s\n' n-test-phone > "$GROK_IPHONE_STATE_DIR/exit-node"
   printf '%s\n' n-test-phone > "$GROK_IPHONE_STATE_DIR/ready"
+  chmod 600 "$GROK_IPHONE_STATE_DIR/exit-node" "$GROK_IPHONE_STATE_DIR/ready"
   . "$tmp/target/egress.sh"
   rm -f "$RECOVERY_MARKER"
   build_ladder
-  [[ "${LADDER[*]}" == 'local:pc iphone vpn' ]]
+  [[ "${LADDER[*]}" == 'local:pc ios:iphone vpn' ]]
 
   # A phone is re-probed even without an explicit model pin because its public
   # egress can change while the Tailscale peer remains online.
@@ -35,11 +73,11 @@ printf '%s\n' 'pc 100.64.0.2 user 22' > "$tmp/target/hosts.conf"
   confirm_log="$tmp/confirm"
   rung_probe_available(){ printf '%s\n' "$1" > "$confirm_log"; }
   rung_alive(){ return 1; }
-  rung_confirm iphone
-  [[ "$(cat "$confirm_log")" == iphone ]]
+  rung_confirm ios:iphone
+  [[ "$(cat "$confirm_log")" == ios:iphone ]]
 
   # Demotion resumes after the phone, at VPN, and forbids a direct fallback.
-  set_active iphone 100.64.0.99
+  set_active ios:iphone n-test-phone
   rung_down(){ :; }
   select_egress(){ printf '%s %s\n' "$1" "$2" > "$tmp/demote"; }
   demote
@@ -448,6 +486,7 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
 # healthy requested route look unavailable.
 (
   export GROK_IPHONE_STATE_DIR="$tmp/forced-equal-phone"
+  register_test_ios "$GROK_IPHONE_STATE_DIR"
   . "$tmp/target/grok-remote"
   rm -f "$RECOVERY_MARKER"
   begin_clean_route_transition(){ begin_recovery_transition; }
@@ -459,14 +498,14 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
   active_rung(){ state_value RUNG 2>/dev/null || true; }
   learn_baseline(){ printf '%s\n' grok-4.5 > "$BASELINE"; }
   rung_alive(){ return 1; }
-  rung_up(){ [[ "$1" == iphone ]] && set_active iphone; }
+  rung_up(){ [[ "$1" == ios:iphone ]] && set_active ios:iphone n-test-phone; }
   rung_down(){ clear_active; }
   egress_country(){ printf '%s' VN; }
   models_via(){ printf '%s\n' grok-4.5; }
   launch(){
-    [[ "$(active_rung)" == iphone ]]
+    [[ "$(active_rung)" == ios:iphone ]]
     local -a selected=()
-    mapfile -t selected < <(model_args iphone "$@")
+    mapfile -t selected < <(model_args ios:iphone "$@")
     [[ "${selected[*]}" == '-m grok-4.5' ]]
     printf '%s\n' accepted > "$tmp/forced-equal-launched"
   }
@@ -724,6 +763,7 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
 # retain it instead of tearing it down and walking the automatic ladder.
 (
   export GROK_IPHONE_STATE_DIR="$tmp/forced-reuse-phone"
+  register_test_ios "$GROK_IPHONE_STATE_DIR"
   . "$tmp/target/grok-remote"
   rm -f "$RECOVERY_MARKER"
   begin_clean_route_transition(){ begin_recovery_transition; }
@@ -731,7 +771,7 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
   rm -f "$RECOVERY_MARKER"
   printf '%s\n' grok-4.5 > "$CHOICE"
   printf '%s\n' grok-4.5 > "$BASELINE"
-  set_active iphone
+  set_active ios:iphone n-test-phone
   acquire_session_lock(){ :; }
   rung_alive(){ :; }
   egress_country(){ printf '%s' VN; }
@@ -740,7 +780,7 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
   rung_up(){ : > "$tmp/forced-reuse-up"; return 1; }
   select_egress(){ : > "$tmp/forced-reuse-select"; return 1; }
   launch(){
-    [[ "$(active_rung)" == iphone ]]
+    [[ "$(active_rung)" == ios:iphone ]]
     printf '%s\n' retained > "$tmp/forced-reuse-launched"
   }
   main --iphone
@@ -753,6 +793,7 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
 # choice for forced-route admission and the final Grok argv.
 (
   export GROK_IPHONE_STATE_DIR="$tmp/forced-explicit-phone"
+  register_test_ios "$GROK_IPHONE_STATE_DIR"
   export GROK_REQUIRE_MODEL=grok-env
   . "$tmp/target/grok-remote"
   rm -f "$RECOVERY_MARKER"
@@ -765,7 +806,7 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
   active_rung(){ state_value RUNG 2>/dev/null || true; }
   learn_baseline(){ :; }
   rung_alive(){ return 1; }
-  rung_up(){ [[ "$1" == iphone ]] && set_active iphone; }
+  rung_up(){ [[ "$1" == ios:iphone ]] && set_active ios:iphone n-test-phone; }
   rung_down(){ clear_active; }
   egress_country(){ printf '%s' VN; }
   models_via(){ printf '%s\n' grok-explicit; }
@@ -781,6 +822,7 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
 # remembered choice and stays aligned across admission, Grok argv, and repair.
 (
   export GROK_IPHONE_STATE_DIR="$tmp/forced-env-phone"
+  register_test_ios "$GROK_IPHONE_STATE_DIR"
   export GROK_REQUIRE_MODEL=grok-env
   . "$tmp/target/grok-remote"
   rm -f "$RECOVERY_MARKER"
@@ -794,13 +836,13 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
   active_rung(){ state_value RUNG 2>/dev/null || true; }
   learn_baseline(){ :; }
   rung_alive(){ return 1; }
-  rung_up(){ [[ "$1" == iphone ]] && set_active iphone; }
+  rung_up(){ [[ "$1" == ios:iphone ]] && set_active ios:iphone n-test-phone; }
   rung_down(){ clear_active; }
   egress_country(){ printf '%s' VN; }
   models_via(){ printf '%s\n' grok-choice grok-env; }
   launch(){
     local -a selected=()
-    mapfile -t selected < <(model_args iphone "$@")
+    mapfile -t selected < <(model_args ios:iphone "$@")
     [[ "${selected[*]}" == '-m grok-env' ]]
     [[ "$REQUIRE_MODEL" == grok-env && "$(cat "$CHOICE")" == grok-env ]]
   }
@@ -812,6 +854,7 @@ rm -f "$tmp/target/.egress.state" "$tmp/target/.egress.recovery-required"
 set +e
 (
   export GROK_IPHONE_STATE_DIR="$tmp/forced-missing-phone"
+  register_test_ios "$GROK_IPHONE_STATE_DIR"
   . "$tmp/target/grok-remote"
   rm -f "$RECOVERY_MARKER"
   begin_clean_route_transition(){ begin_recovery_transition; }
@@ -822,7 +865,7 @@ set +e
   active_rung(){ state_value RUNG 2>/dev/null || true; }
   learn_baseline(){ :; }
   rung_alive(){ return 1; }
-  rung_up(){ [[ "$1" == iphone ]] && set_active iphone; }
+  rung_up(){ [[ "$1" == ios:iphone ]] && set_active ios:iphone n-test-phone; }
   rung_down(){ printf '%s\n' cleaned > "$tmp/forced-missing-cleaned"; clear_active; }
   egress_country(){ printf '%s' VN; }
   models_via(){ printf '%s\n' grok-build; }
@@ -839,6 +882,7 @@ set -e
 # phone catalog even when it equals direct; only the selected choice is saved.
 (
   export GROK_IPHONE_STATE_DIR="$tmp/forced-picker-phone"
+  register_test_ios "$GROK_IPHONE_STATE_DIR"
   unset GROK_REQUIRE_MODEL
   . "$tmp/target/grok-remote"
   rm -f "$RECOVERY_MARKER"
@@ -851,7 +895,7 @@ set -e
   active_rung(){ state_value RUNG 2>/dev/null || true; }
   learn_baseline(){ :; }
   rung_alive(){ return 1; }
-  rung_up(){ [[ "$1" == iphone ]] && set_active iphone; }
+  rung_up(){ [[ "$1" == ios:iphone ]] && set_active ios:iphone n-test-phone; }
   rung_down(){ clear_active; }
   egress_country(){ printf '%s' VN; }
   models_via(){ printf '%s\n' grok-4.5 grok-build grok-new; }
@@ -862,7 +906,7 @@ set -e
   }
   launch(){
     local -a selected=()
-    mapfile -t selected < <(model_args iphone "$@")
+    mapfile -t selected < <(model_args ios:iphone "$@")
     [[ "${selected[*]}" == '-m grok-new' ]]
   }
   main --iphone --pick-model
@@ -874,6 +918,7 @@ set -e
 # pin exists: it accepts any valid nonempty phone catalog and injects no model.
 (
   export GROK_IPHONE_STATE_DIR="$tmp/forced-models-phone"
+  register_test_ios "$GROK_IPHONE_STATE_DIR"
   unset GROK_REQUIRE_MODEL
   . "$tmp/target/grok-remote"
   rm -f "$RECOVERY_MARKER"
@@ -886,14 +931,14 @@ set -e
   active_rung(){ state_value RUNG 2>/dev/null || true; }
   learn_baseline(){ :; }
   rung_alive(){ return 1; }
-  rung_up(){ [[ "$1" == iphone ]] && set_active iphone; }
+  rung_up(){ [[ "$1" == ios:iphone ]] && set_active ios:iphone n-test-phone; }
   rung_down(){ clear_active; }
   egress_country(){ printf '%s' VN; }
   models_via(){ printf '%s\n' grok-4.5; }
   launch(){
     [[ "$*" == models ]]
     local -a selected=()
-    mapfile -t selected < <(model_args iphone "$@")
+    mapfile -t selected < <(model_args ios:iphone "$@")
     (( ${#selected[@]} == 0 ))
     [[ ! -s "$CHOICE" ]]
   }
@@ -904,6 +949,7 @@ set -e
 # complete forced catalog was already seen; it is not replaced by a default.
 (
   export GROK_IPHONE_STATE_DIR="$tmp/forced-empty-choice-phone"
+  register_test_ios "$GROK_IPHONE_STATE_DIR"
   unset GROK_REQUIRE_MODEL
   . "$tmp/target/grok-remote"
   rm -f "$RECOVERY_MARKER"
@@ -917,13 +963,13 @@ set -e
   active_rung(){ state_value RUNG 2>/dev/null || true; }
   learn_baseline(){ :; }
   rung_alive(){ return 1; }
-  rung_up(){ [[ "$1" == iphone ]] && set_active iphone; }
+  rung_up(){ [[ "$1" == ios:iphone ]] && set_active ios:iphone n-test-phone; }
   rung_down(){ clear_active; }
   egress_country(){ printf '%s' VN; }
   models_via(){ printf '%s\n' grok-4.5 grok-build; }
   launch(){
     local -a selected=()
-    mapfile -t selected < <(model_args iphone "$@")
+    mapfile -t selected < <(model_args ios:iphone "$@")
     (( ${#selected[@]} == 0 ))
     [[ ! -s "$CHOICE" ]]
   }
@@ -1894,6 +1940,28 @@ PY
   compatibility_handoff_locked
   [[ "$(cat "$tmp/handoff-pending-recovery-log")" == \
      $'broker:migrate-legacy\nlocal\nvpn\niphone\nlocal\nvpn\niphone\nclear\nbroker:migrate-legacy\nbroker:recover\nbroker:status\nclear' ]]
+  [[ ! -e "$STATE" && ! -e "$RECOVERY_MARKER" ]]
+)
+
+# A typed compatibility iOS owner is a valid warm-handoff input.  The handoff
+# consumes its exact state only after the same empty process/listener proof.
+(
+  export GROK_IPHONE_STATE_DIR="$tmp/handoff-typed-ios-phone"
+  . "$tmp/target/egress.sh"
+  rm -f "$RECOVERY_MARKER"
+  set_active ios:iphone n-test-phone
+  legacy_session_lock_check(){ :; }
+  vpn_broker_call(){
+    if [[ "$1" == status ]]; then
+      printf '%s\n' '{"ok":true,"active":false,"namespace_alive":false,"tun_alive":false,"host_tun_alive":false,"vpn_alive":false,"relay_alive":false,"relay_pid":null,"root_artifact_residue":false,"ledger":null}'
+    fi
+  }
+  local_down(){ :; }
+  iphone_down(){ :; }
+  pid_from_file(){ return 1; }
+  port_owner_pid(){ return 0; }
+  port_listening(){ return 1; }
+  compatibility_handoff_locked
   [[ ! -e "$STATE" && ! -e "$RECOVERY_MARKER" ]]
 )
 

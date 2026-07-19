@@ -6,7 +6,7 @@ catalog, then holds it up for as long as grok runs and fails over underneath the
 dies.
 
 ```
-  home PC over Tailscale  >  iPhone exit node  >  VPN Gate servers ...  [direct = selection fallback]
+  home PC over Tailscale  >  registered iPhone/iPad exit nodes  >  VPN Gate servers ...  [direct = selection fallback]
            |                        |                    |
       ssh -D binds          userspace tailscaled   socks-netns.py binds
      127.0.0.1:1080          binds the same port    (egress in netns 'grokvpn')
@@ -21,10 +21,11 @@ then resumes the in-flight turn. Any swap that lands inside that window never re
 session — measured: a home PC killed mid-generation was replaced in ~5s, grok froze for ~25s and
 then finished the same turn, exit 0, with no error shown to the user.
 
-The opt-in multi-session lane keeps a committed public listener bound and swaps
+The managed multi-session lane keeps a committed public listener bound and swaps
 only its private backend generation; it revokes old streams during cutover so
 clients retry through the newly qualified generation rather than seeing
-probationary traffic.
+probationary traffic. Once an installer-attested default profile is active,
+bare `grok-remote` uses this lane without caller environment or route injection.
 
 **"Works" means the preferred route can actually serve the session — no model name is hardcoded.**
 grok-remote measures what this VM is offered with *no* tunnel (the **baseline**) for diagnostics
@@ -53,6 +54,11 @@ asked twice:
 [egress] egress: local:arch  (grok.com will see 203.0.113.7)
 [egress] model: grok-4.5 (remembered — --pick-model to change)
 ```
+
+The remembered-menu behavior below describes the compatibility lane.  An
+active managed profile instead freezes one model: omitting `-m` uses that
+model, the same explicit `-m` is accepted, and changing models requires a new
+candidate, qualification, and activation.
 
 - **One model unlocked** → it is used. Nothing to ask.
 - **Several unlocked, first time** → you get a menu once; your pick is saved to `.model.choice`.
@@ -94,12 +100,15 @@ break a plain `grok` run outside the tunnel, where the unlocked model does not e
 | `hosts.conf` | this VM | home egress PCs, tried top to bottom |
 | `id_grokproxy[.pub]` | this VM | dedicated SSH key (public key is baked into the setup scripts) |
 | `~/.local/state/grok-proxy/iphone/` | this VM | private identity and LocalAPI state for the isolated iPhone sidecar |
+| `~/.local/state/grok-proxy/profiles/` | this VM | owner-only, content-addressed managed multi-session profiles |
+| `/var/lib/grok-proxy/release-control/active-profile.json` | this VM | root-owned public activation binding for the default profile |
+| `/var/lib/grok-proxy/release-control/{qualified-rungs,profile-activations}/` | this VM | root-owned per-release rollback catalogs, revalidated before restoration |
 | `dist/setup-grok-proxy-windows.bat` | Windows PC | enable OpenSSH server + authorize this VM's key |
 | `dist/setup-grok-proxy-arch.sh` | Arch PC | enable sshd + authorize this VM's key |
 
 ## Source, backup, and runtime ownership
 
-The Grok implementation has three deliberately separate roles:
+The Grok implementation has four deliberately separate roles:
 
 1. `~/grok-proxy` is the canonical editable authoring and backup-capture source.
    It also contains private configuration and generated runtime state that are
@@ -113,15 +122,22 @@ The Grok implementation has three deliberately separate roles:
    selected immutable payload independently self-admits against the coherent
    user/root selection. Exactly that user release is readable (`0555`); retained
    inactive user releases are archived root-only (`0500`).
+4. The separately packaged native bootstrap, production public key, signed
+   dispatcher store, and administrative selector form the pre-import update
+   authority. Candidate source and ordinary release installation cannot create,
+   rotate, or replace this trust anchor.
 
 Run `grok-remote` through the installed command. Direct execution of
 `~/grok-proxy/grok-remote`, a repository checkout, or a standalone editable
 `egress.sh` is refused for normal production use. A fresh restore populates only
 missing allowlisted public source paths. If any existing managed path differs,
 restore stops without overwriting it; merge authoring changes explicitly first.
-The install workflow stages runtime bytes from the reconciled canonical
-`~/grok-proxy` tree. The repository copy is the sanitized restore/backup source,
-not a second live implementation.
+The administrative signing workflow stages a closed dispatcher from the
+reviewed public closure, and the native root-owned verifier executes only the
+signed application selected by the root-owned bootstrap selector. The normal
+install workflow reconciles `~/grok-proxy` for capture/restore parity but never
+executes that editable tree as root. The repository copy is the sanitized
+restore/backup source, not a second live implementation.
 
 Private files such as `hosts.conf`, `known_hosts`, and `id_grokproxy`, plus
 model choices, sidecar state, locks, sockets, and tunnel state, never enter the
@@ -143,28 +159,31 @@ Each script prints a ready-made `hosts.conf` line, e.g. `windows  100.x.y.z  You
 `~/grok-proxy/hosts.conf` and the separately printed SSH host-key line(s) into
 `~/grok-proxy/known_hosts` (`chmod 600` both files). Verify the key text over a
 channel independent of the first SSH connection. If `known_hosts` is absent,
-both compatibility and opt-in home routing fall back to `accept-new`
+both compatibility and managed home routing fall back to `accept-new`
 trust-on-first-use; that is a convenience fallback, not protection from
 interception of the first connection.
 
-## One-time setup: iPhone exit node
+## One-time setup per iPhone or iPad
 
-The phone rung uses a **second, userspace-only Tailscale identity** on this VM. It has its own
+The iOS rungs use a **second, userspace-only Tailscale identity** on this VM. It has its own
 state, LocalAPI socket, and loopback SOCKS listener. It does not select an exit node on the VM's
 primary Tailscale daemon and does not change the VM's default route.
 
-1. In the Tailscale app on the iPhone, enable **Run as Exit Node**. Keep Tailscale current; iOS
+1. In the Tailscale app on each iPhone or iPad, enable **Run as Exit Node**. Keep Tailscale current; iOS
    exit-node support requires a recent app. See Tailscale's official
    [iOS exit-node instructions](https://tailscale.com/docs/features/exit-nodes?tab=ios).
-2. In the Tailscale admin console, approve the phone's advertised exit route. If this tailnet has
+2. In the Tailscale admin console, approve each device's advertised exit route. If this tailnet has
    custom grants or ACLs, also permit this VM's sidecar identity to use exit nodes.
-3. Stop any active Grok egress, then enroll the sidecar and pin the phone:
+3. Stop any active Grok egress, then register each device once while it is available:
 
 ```bash
 grok-remote stop
 grok-remote iphone-setup                 # auto-detects when exactly one iOS peer exists
 # or, if detection is ambiguous:
-grok-remote iphone-setup 100.x.y.z       # phone's Tailscale IP, DNS name, or stable node ID
+grok-remote iphone-setup iphone-xr        # IP, DNS name, or stable node ID
+grok-remote iphone-setup ipad-pro --label ipad-pro
+grok-remote iphone-list                   # priority, availability, and qualification
+grok-remote iphone-reorder ipad-pro iphone-xr
 ```
 
 The setup command opens Tailscale's normal interactive login. For unattended enrollment, put a
@@ -172,42 +191,61 @@ Tailscale auth key in a mode-`600` file and set `GROK_IPHONE_AUTHKEY_FILE` to th
 passed using Tailscale's `file:` form and never placed in the process arguments. Normal
 `grok-remote` runs never attempt login and will skip a sidecar that has not completed setup.
 
-Setup writes its readiness marker only after the selected phone is online as an approved exit
-node, then replaces the setup selector with Tailscale's exact stable node ID. Normal routing uses
-only that pinned ID. If setup reports that enrollment succeeded but the phone is not usable,
-finish steps 1–2 and rerun `grok-remote iphone-setup`.
+Setup commits only after the selected device is online as an approved exit node and exact sidecar
+teardown succeeds. The private registry stores its Tailscale stable node ID, so ordinary runs do
+not need `iphone-setup` again. Repeating setup for the same device is an order-preserving no-op;
+the single legacy `iphone` key is upgraded to its DNS-derived key on the next successful setup.
+Use `--label KEY` when Tailscale does not expose a unique DNS name. `iphone-remove KEY` forgets
+one device; it does not modify that device's Tailscale configuration.
 
 ## Daily use
 
 ```bash
-grok-remote                  # compatibility mode: one session owns the egress
+grok-remote                  # managed when valid; compatibility if absent/stale; invalid current state blocks
+grok-remote doctor --json    # read-only managed-profile readiness
 grok-remote status           # active rung, the IP grok.com sees, and the remembered model
 grok-remote ip               # just that IP
 grok-remote --host arch      # force one home PC when it offers your selected model
-grok-remote --iphone         # force the configured phone when it offers your selected model
+grok-remote --iphone         # try only registered iOS devices, in priority order
+grok-remote --ios ipad-pro   # force one exact device; never substitute another
 grok-remote --vpn            # skip direct and the home PCs, start on VPN Gate
 grok-remote --no-direct      # never use direct, even if it would work
-grok-remote --pick-model     # re-open the model menu even if nothing has changed
-grok-remote -m grok-5        # use this model, and remember it from now on
+GROK_MULTI_SESSION=0 grok-remote --pick-model  # compatibility: reopen its model menu
+GROK_MULTI_SESSION=0 grok-remote -m grok-5     # compatibility: change remembered model
+grok-remote recover          # reconcile a dead managed epoch exactly
 grok-remote stop             # tear the egress down
 ```
 
-The default compatibility mode remains a verified singleton: one mutating
+With an active managed profile, `--pick-model` is intentionally rejected and
+an explicit `-m` must equal the frozen model.  To change that model
+permanently, create, qualify, and activate a new profile as described below.
+
+With no active managed profile, or with the explicit
+`GROK_MULTI_SESSION=0` escape, compatibility mode remains a verified singleton:
+one mutating
 `grok-remote` command owns the legacy proxy/state at a time. A second launch,
 `ip`, setup, or `stop` command fails fast while that lock is held; `status`
 remains read-only.
 
+The exact one-argument `recover` command is a reserved crash-cleanup interface,
+not a Grok prompt. It remains reachable when the variable is absent or exactly
+`0`/`1`, including while an installer deny is active. Other present values
+(including empty, `true`, `01`, and `2`) remain literal legacy compatibility
+and receive no managed-recovery or deny-bypass authority.
+
 Automatic discovery and explicit selection share the same route-usability
-checks. Automatic mode walks the configured home-PC, phone, and VPN priority
+checks. Automatic mode walks the configured home-PC, ordered iOS-device, and VPN priority
 and takes the first healthy route with a usable catalog, even when direct has
-the same models. `--host LABEL` and `--iphone` additionally bind the session to
-the requested exact route. They require the explicit, environment-pinned, or
+the same models. `--host LABEL` and `--ios KEY` bind the session to one exact
+route; `--iphone` is the iOS family and may move to the next registered device.
+They require the explicit, environment-pinned, or
 nonempty remembered model when one exists. With no concrete preference, a
 forced model picker or routed `models` command receives the route's complete
 valid catalog. An intentionally empty remembered choice continues to mean “let
 Grok decide.” The exact-route watchdog repairs or reacquires only the named
-host or configured phone and never silently demotes an explicit session to
-another home PC, iPhone, VPN, or direct. If exact teardown cannot
+host or exact iOS device and never silently demotes an exact session to
+another home PC, iOS device, VPN, or direct. The iOS family spends at most 30
+seconds on one device and 120 seconds total before the automatic ladder can continue. If exact teardown cannot
 prove that the old control master/listener stopped, the ownership record is
 retained and no replacement is raised over it. Home-host startup records the
 validated cleanup destination before OpenSSH starts, so publication failure is
@@ -232,16 +270,111 @@ recovery. Warm multi-session handoff completes any pending compatibility
 recovery before it proceeds, unless the authenticated broker fences a live
 legacy VPN ledger.
 
-Set the opt-in flag on every participating launch to share one qualified
-route between simultaneous Grok processes:
+### One-time managed-profile activation
+
+Remove any persistent `export GROK_MULTI_SESSION=1` left from the opt-in era.
+The managed activation is now the default authority; keeping that export would
+continue to force the release-sensitive migration path whenever no activation
+for the selected release is available.  Use `GROK_MULTI_SESSION=0` only on an
+individual command that must use compatibility mode.
+
+Create a private candidate after installing the release. The command prints
+only public identifiers and readiness; the frozen endpoints remain in the
+mode-0600 content-addressed profile:
 
 ```bash
-GROK_MULTI_SESSION=1 grok-remote -m grok-build --single "first task"
-GROK_MULTI_SESSION=1 grok-remote -m grok-build --single "second task"
-GROK_MULTI_SESSION=1 grok-remote status
+grok-remote profile-create --json
 ```
 
-The opt-in supervisor accepts concurrent leases only when their concrete model
+Record the printed `<release_id>`, `<profile_sha256>`, and `missing_rungs`.
+Qualify a newly installed release once with the two fixed release gates:
+
+```bash
+RELEASE_ID='<release_id>'
+[[ $RELEASE_ID =~ ^[0-9a-f]{64}$ ]] || exit 2
+GROK_INSTALLER="/usr/local/libexec/grok-proxy/releases/$RELEASE_ID/install-release.py"
+sudo -- /usr/bin/python3 -I -B \
+  "$GROK_INSTALLER" begin-release-qualification \
+  --release-id "$RELEASE_ID" \
+  --apply
+sudo -- /usr/bin/python3 -I -B \
+  "$GROK_INSTALLER" canary-exec \
+  --qualification-step load32 \
+  --apply
+sudo -- /usr/bin/python3 -I -B \
+  "$GROK_INSTALLER" canary-exec \
+  --qualification-step fault-recovery \
+  --apply
+```
+
+Then run this profile-bound sequence once for each concrete desired
+`<missing_rung>` (only one rung canary may be active at a time):
+
+```bash
+RELEASE_ID='<release_id>'
+[[ $RELEASE_ID =~ ^[0-9a-f]{64}$ ]] || exit 2
+GROK_INSTALLER="/usr/local/libexec/grok-proxy/releases/$RELEASE_ID/install-release.py"
+sudo -- /usr/bin/python3 -I -B \
+  "$GROK_INSTALLER" begin-rung-canary \
+  --release-id "$RELEASE_ID" \
+  --rung '<missing_rung>' \
+  --profile-sha256 '<profile_sha256>' \
+  --apply
+sudo -- /usr/bin/python3 -I -B \
+  "$GROK_INSTALLER" canary-exec \
+  --qualification-step real-pair \
+  --apply
+sudo -- /usr/bin/python3 -I -B \
+  "$GROK_INSTALLER" promote-rung \
+  --apply
+```
+
+The profile digest makes the installer derive the route, full contract,
+projected contract, Grok, and model bindings; do not reconstruct those values
+from ambient configuration. Promotion writes schema-9 terminal evidence that
+binds both the original full-contract digest and the conservative per-rung
+qualification digest. The same projected rung may be reusable across automatic
+and forced selection, but not across a relevant endpoint, policy, helper,
+proxy-release, model, or Grok-binary change.
+
+After at least the candidate's readiness minimum is promoted, activate the
+printed profile digest and verify it:
+
+```bash
+RELEASE_ID='<release_id>'
+[[ $RELEASE_ID =~ ^[0-9a-f]{64}$ ]] || exit 2
+GROK_INSTALLER="/usr/local/libexec/grok-proxy/releases/$RELEASE_ID/install-release.py"
+sudo -- /usr/bin/python3 -I -B \
+  "$GROK_INSTALLER" activate-profile \
+  --profile-sha256 '<profile_sha256>' \
+  --apply
+grok-remote doctor --json
+```
+
+The activation JSON includes `profile_transition`. `activated` is the normal
+result. `activated-history-degraded` means the live pointer committed but its
+rollback archive could not be refreshed. `activated-durability-uncertain`
+means the pointer rename committed but its parent-directory fsync failed; this
+is reported separately from a pre-commit failure. No later release switch is
+allowed to proceed unless it first re-snapshots that exact active binding.
+`ready` means
+every frozen rung is promoted. `degraded` means the minimum is
+met and bare multi-session use is safe, but the listed optional rungs are not
+eligible. `blocked` and `unconfigured` return exit 2 and never start egress.
+An update is staged by creating and qualifying a new candidate before the root
+activation pointer is replaced, so interruption leaves the prior activation
+bytes intact. Old evidence is not silently converted when the qualification
+schema changes.
+
+After activation, simultaneous calls need no feature flag:
+
+```bash
+grok-remote --single "first task"
+grok-remote --single "second task"
+grok-remote status
+```
+
+The supervisor accepts concurrent leases only when their concrete model
 and full typed routing contract match. They share one committed loopback SOCKS
 frontend and one provider generation, while each Grok child receives a distinct
 leader socket and session identity. A different model, route mode, home-host
@@ -249,9 +382,9 @@ snapshot, phone identity, helper release, timeout, port, or resource limit is
 rejected before it can mutate the active route. Once the last lease exits, the
 supervisor proves exact cleanup and releases the compatibility fence. Setup,
 stop, install, rollback, and other mutating maintenance remain interlocked with
-the active generation. An explicit `-m`/`--model` is atomically remembered in
-the compatibility choice file (release qualification never changes it); with no
-saved choice, the opt-in lane reads Grok's `[models].default` setting.
+the active generation. In the managed lane, an explicit `-m`/`--model` must
+equal the frozen profile model and does not become new authority. Only the
+explicit compatibility lane maintains the legacy remembered-model choice.
 
 Release recovery is ledger-driven. Once an immutable target user/root release
 pair has been published, `install-release.py resume --apply` can finish without
@@ -265,6 +398,16 @@ mount state fails closed. Keep an independent root-only archive until the new
 release, rollback, and reinstall have all been verified.
 The later public warm-handoff step never deletes root artifacts; it only proves
 the installer left them absent before clearing user-side legacy state.
+Release switching snapshots the exact selected schema-9 rung records and
+active profile into per-release catalogs. Upgrade or rollback restores them
+only after revalidating host identity, terminal evidence, the private profile,
+pinned Grok bytes, and readiness. A missing or invalid catalog degrades to the
+remaining valid rungs or compatibility instead of silently authorizing stale
+state. If the still-current root pointer is an exact dormant binding for the
+rollback target, the installer revalidates it and rebuilds missing history;
+`resume` and `abort` report the same `profile_transition` field as install and
+rollback. Invoking the immutable release payload directly applies the same managed
+activation and current-boot-inventory decisions as the installed entrypoint.
 Fixed qualification records bind the exact generated user and broker gate
 digests. A changed gate generator therefore cannot reuse stale load/fault
 results even if runtime files produce the same release ID. Version 1 has no
@@ -281,15 +424,15 @@ pid), and every 6th cycle proves real egress with one HTTP GET — a tunnel can 
 end blackholes. On failure it repairs the *same* rung twice, and only then demotes:
 
 ```
-home PC dies  ->  rebuild (x2)  ->  still dead?  ->  iPhone
-iPhone dies   ->  restart (x2)  ->  still dead?  ->  VPN Gate server #1
+home PC dies  ->  rebuild (x2)  ->  still dead?  ->  first registered iOS device
+iOS A dies    ->  restart A (x2)  ->  still dead?  ->  iOS B  ->  VPN Gate server #1
 VPN #1 dies   ->  one grace cycle  ->  VPN Gate server #2  ->  #3 ...
 ```
 
-The compatibility watchdog model-reprobes the iPhone rung during repair and
-periodic deep checks. The opt-in v1 supervisor model-qualifies every candidate
+The compatibility watchdog model-reprobes the active iOS rung during repair and
+periodic deep checks. The managed supervisor model-qualifies every candidate
 at admission and repair, while its periodic watchdog checks exact process and
-exit identity. Thus an opt-in phone whose egress changes is repaired and
+exit identity. Thus a managed phone whose egress changes is repaired and
 requalified, but a model-catalog change behind an unchanged exit IP is not
 proactively detected until traffic fails and triggers repair.
 
@@ -320,7 +463,7 @@ deleted, requests through the proxy fail rather than leaking out of the host.
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `GROK_MULTI_SESSION` | *(unset)* | exact value `1` enables the same-contract multi-session supervisor; every other value uses compatibility mode |
+| `GROK_MULTI_SESSION` | managed default | absent selects a current managed profile; `0` explicitly selects compatibility; `1` remains a qualification/migration input; any other present value retains literal legacy compatibility behavior |
 | `GROK_REQUIRE_MODEL` | *(unset)* | pin one model instead of the baseline rule, e.g. `grok-5`. Unset = accept any rung that unlocks something |
 | `GROK_PROXY_PORT` | `1080` | the shared loopback SOCKS frontend used by the active generation |
 | `GROK_RUNG_RETRIES` | `2` | repairs of the same rung before demoting |
@@ -338,12 +481,12 @@ deleted, requests through the proxy fail rather than leaking out of the host.
 
 State kept in this directory: `.model.choice` (your model), `.model.seen` (the menu you were last
 offered), `.baseline.models`, `.unlocked.models` (the selected route's eligible models: normally
-the automatic baseline delta, or the exact/full catalog admitted for a forced host or phone),
+the automatic baseline delta, or the exact/full catalog admitted for a forced host or iOS device),
 `.egress.state`. During a compatibility transition,
 `.egress.recovery-required` is a generated crash-recovery marker and is removed
 only after exact cleanup publishes empty state. The iPhone's Tailscale identity
 is deliberately outside the project tree at `~/.local/state/grok-proxy/iphone`; treat
-`tailscaled.state` as a credential and do not publish it.
+`tailscaled.state` and `devices.json` as private credentials/topology and do not publish them.
 
 Compatibility mode applies a private creation mask to every Grok model probe
 and to the interactive launch.  This keeps Grok's regenerated shared model
@@ -354,7 +497,7 @@ multi-session verification can safely consume it.
 ## Caveats
 
 - Keep the chosen home PC **awake**. A sleeping PC is a dead rung; you will land on VPN Gate.
-- Keep Tailscale active on the iPhone. iOS suspension, loss of coverage, Low Power Mode, roaming,
+- Keep Tailscale active on the selected iPhone or iPad. iOS suspension, loss of coverage, Low Power Mode, roaming,
   or switching between Wi-Fi and cellular can interrupt or change its public egress. The watchdog
   repairs or demotes; it never treats peer-online status alone as proof that the model still works.
 - Traffic is `socks5h`, so DNS resolves at the egress. There is no DNS leak on any rung.
@@ -397,16 +540,16 @@ same-rung repair path re-probes and rejects it too — tears down to fail closed
 grok at a wrong-region exit, leaves no phantom rung in its state, and auto-recovers the instant a
 VPN exit that serves the model appears.
 
-The iPhone addition is verified with a mocked userspace `tailscaled` and LocalAPI: separate state
-and socket arguments, exact exit-node selection, exact listener ownership, setup gating, ladder
-placement, lock-FD isolation, wrong-node rejection, and fail-closed forced selection all pass.
+The iOS implementation is verified with a mocked userspace `tailscaled` and LocalAPI: separate state
+and socket arguments, exact stable-ID selection, ordered multi-device registry, exact listener ownership,
+setup gating, typed ladder placement, lock-FD isolation, wrong-node rejection, and fail-closed exact selection all pass.
 VPN Gate metadata validation, proxy-environment clearing, compatibility locking,
-and opt-in same-contract admission have dedicated regressions too.
+and managed same-contract admission have dedicated regressions too.
 
-**Not yet exercised against a real iPhone data plane:** advertising and admin approval of this
-phone, the sidecar's live tailnet login, cellular public egress, locked-screen longevity, and a real
-model list/invocation through the phone still require the one-time setup above. A mocked sidecar
-proves the wrapper contract; it does not prove iOS availability or carrier behavior.
+**A live device must still be available for its production canary:** advertising and admin approval,
+the sidecar's live tailnet login, cellular public egress, locked-screen longevity, and a real
+model list/invocation cannot be inferred from deterministic tests. A mocked sidecar proves the
+wrapper contract; it does not prove iOS availability or carrier behavior.
 
 Because nothing is pinned to a model name, there is no longer anything to update when xAI ships a
 new flagship — the first run through a working tunnel will simply report what it unlocked.

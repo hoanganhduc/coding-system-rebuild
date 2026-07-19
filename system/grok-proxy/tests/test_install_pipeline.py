@@ -36,6 +36,18 @@ render_install = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(render_install)
 
 RELEASE_ID = "a" * 64
+BOOTSTRAP_APP_ID = "b" * 64
+TEST_BOOTSTRAP_PREFIX = [
+    "/usr/bin/sudo",
+    "-n",
+    "--",
+    render_install.GROK_BOOTSTRAP_DIRECTORY
+    + "/"
+    + render_install.GROK_BOOTSTRAP_BINARY,
+    "--release-dir",
+    render_install.GROK_BOOTSTRAP_RELEASE_ROOT + "/" + BOOTSTRAP_APP_ID,
+    "--",
+]
 
 
 def completed(
@@ -75,13 +87,163 @@ class InstallPipelineTests(unittest.TestCase):
   - id: grokproxy-scripts
     root: grok-proxy
     match: [grok-remote, install-release.py, grok_ms]
-    exclude: [\"**/__pycache__/**\", \"**/*.pyc\"]
+    exclude: [\"**/__pycache__\", \"**/__pycache__/**\", \"**/*.pyc\"]
     class: public-copy
     dest_dir: system/grok-proxy
+  - id: grokproxy-private
+    root: grok-proxy
+    match: [hosts.conf, id_grokproxy]
+    class: private-archive
+  - id: grokproxy-exclude
+    root: grok-proxy
+    match: [.model.choice, "**/__pycache__", "**/__pycache__/**", "**/*.pyc"]
+    class: exclude-generated
 """,
             encoding="utf-8",
         )
         return repo, home
+
+    def test_source_classification_rejects_unclassified_and_duplicate_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "grok-proxy"
+            root.mkdir()
+            (root / "unknown").write_text("unexpected\n", encoding="utf-8")
+            public = {
+                "id": "grokproxy-scripts",
+                "root": "grok-proxy",
+                "match": ["grok-remote"],
+                "class": "public-copy",
+            }
+            with self.assertRaisesRegex(
+                render_install.GrokSourceRestoreError, "unclassified"
+            ):
+                render_install.validate_grok_source_classification(
+                    str(Path(td)), [public]
+                )
+
+            duplicate = dict(public, id="grokproxy-duplicate", match=["unknown"])
+            public = dict(public, match=["unknown"])
+            with self.assertRaisesRegex(
+                render_install.GrokSourceRestoreError, "multiply classified"
+            ):
+                render_install.validate_grok_source_classification(
+                    str(Path(td)), [public, duplicate]
+                )
+
+    def test_bootstrap_default_build_output_is_generated_not_public(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            source = base / "home/grok-proxy/bootstrap"
+            source.mkdir(parents=True)
+            (source / "Makefile").write_text("all:\n\t@true\n", encoding="utf-8")
+            (source / "bootstrap.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            build = source / "build"
+            build.mkdir()
+            (build / "grok-bootstrap").write_bytes(b"\x7fELFgenerated")
+
+            public = {
+                "id": "grokproxy-scripts",
+                "root": "grok-proxy",
+                "match": ["bootstrap"],
+                "exclude": ["bootstrap/build", "bootstrap/build/**"],
+                "class": "public-copy",
+                "dest_dir": "system/grok-proxy",
+            }
+            generated = {
+                "id": "grokproxy-exclude",
+                "root": "grok-proxy",
+                "match": ["bootstrap/build", "bootstrap/build/**"],
+                "class": "exclude-generated",
+            }
+            render_install.validate_grok_source_classification(
+                str(base / "home"), [public, generated]
+            )
+
+            backup = base / "repo/system/grok-proxy/bootstrap"
+            backup.mkdir(parents=True)
+            (backup / "Makefile").write_bytes((source / "Makefile").read_bytes())
+            (backup / "bootstrap.c").write_bytes((source / "bootstrap.c").read_bytes())
+            backup_build = backup / "build"
+            backup_build.mkdir()
+            (backup_build / "grok-bootstrap").write_bytes(b"\x7fELFgenerated")
+            _root, files, directories = render_install._grok_expected_tree(
+                str(base / "repo"), str(base / "home"), public
+            )
+            self.assertEqual(
+                set(files), {"bootstrap/Makefile", "bootstrap/bootstrap.c"}
+            )
+            self.assertNotIn("bootstrap/build", directories)
+
+    def test_source_classification_fails_closed_on_walk_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "grok-proxy"
+            root.mkdir()
+            entries = [
+                {
+                    "id": "grokproxy-scripts",
+                    "root": "grok-proxy",
+                    "match": ["grok-remote"],
+                    "class": "public-copy",
+                }
+            ]
+
+            def denied_walk(*_args: object, **kwargs: object):
+                def iterator():
+                    kwargs["onerror"](
+                        PermissionError(13, "permission denied", str(root / "denied"))
+                    )
+                    return
+                    yield
+
+                return iterator()
+
+            with (
+                mock.patch.object(render_install.os, "walk", denied_walk),
+                self.assertRaisesRegex(
+                    render_install.GrokSourceRestoreError,
+                    "cannot inspect Grok source tree",
+                ),
+            ):
+                render_install.validate_grok_source_classification(td, entries)
+
+    def test_restore_stage_fsync_fails_closed_on_walk_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "grok-proxy"
+            target.mkdir()
+            entry = {
+                "id": "grokproxy-scripts",
+                "root": "grok-proxy",
+                "match": ["grok-remote"],
+                "class": "public-copy",
+            }
+
+            def denied_walk(*_args: object, **kwargs: object):
+                def iterator():
+                    kwargs["onerror"](
+                        PermissionError(
+                            13,
+                            "permission denied",
+                            str(target / "denied"),
+                        )
+                    )
+                    return
+                    yield
+
+                return iterator()
+
+            with (
+                mock.patch.object(render_install.os, "walk", denied_walk),
+                self.assertRaisesRegex(
+                    render_install.GrokSourceRestoreError,
+                    "cannot inspect Grok source tree",
+                ),
+            ):
+                render_install._populate_grok_source(
+                    str(target),
+                    {"grok-remote": (b"#!/bin/sh\nexit 0\n", True)},
+                    set(),
+                    entry,
+                )
 
     def invoke(self, repo: Path, home: Path, *, render_only: bool) -> int:
         argv = [
@@ -93,8 +255,98 @@ class InstallPipelineTests(unittest.TestCase):
         ]
         if render_only:
             argv.append("--render-only")
-        with mock.patch.object(sys, "argv", argv):
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                render_install,
+                "_trusted_bootstrap_prefix",
+                return_value=TEST_BOOTSTRAP_PREFIX,
+            ),
+        ):
             return render_install.main()
+
+    def test_trusted_bootstrap_metadata_and_selector_are_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            bootstrap = Path(td) / "bootstrap"
+            bootstrap.mkdir(mode=0o755)
+            selector = bootstrap / render_install.GROK_BOOTSTRAP_SELECTOR
+            update_lock = bootstrap / render_install.GROK_BOOTSTRAP_UPDATE_LOCK
+            executable = bootstrap / render_install.GROK_BOOTSTRAP_BINARY
+            selector.write_bytes((BOOTSTRAP_APP_ID + "\n").encode("ascii"))
+            selector.chmod(0o444)
+            executable.write_bytes(b"trusted-native-bootstrap\n")
+            executable.chmod(0o555)
+            update_lock.touch(mode=0o600)
+            update_lock.chmod(0o600)
+            descriptor = os.open(
+                bootstrap,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                self.assertEqual(
+                    render_install._read_trusted_selector(
+                        descriptor,
+                        trusted_uid=os.geteuid(),
+                        trusted_gid=os.getegid(),
+                    ),
+                    BOOTSTRAP_APP_ID,
+                )
+                render_install._verify_trusted_bootstrap_binary(
+                    descriptor,
+                    trusted_uid=os.geteuid(),
+                    trusted_gid=os.getegid(),
+                )
+                render_install._verify_trusted_bootstrap_lock(
+                    descriptor,
+                    trusted_uid=os.geteuid(),
+                    trusted_gid=os.getegid(),
+                )
+
+                selector.chmod(0o644)
+                with self.assertRaisesRegex(
+                    render_install.GrokReleaseInstallError, "selector is unsafe"
+                ):
+                    render_install._read_trusted_selector(
+                        descriptor,
+                        trusted_uid=os.geteuid(),
+                        trusted_gid=os.getegid(),
+                    )
+                selector.chmod(0o644)
+                selector.write_bytes(b"A" * 64 + b"\n")
+                selector.chmod(0o444)
+                with self.assertRaisesRegex(
+                    render_install.GrokReleaseInstallError, "selector is invalid"
+                ):
+                    render_install._read_trusted_selector(
+                        descriptor,
+                        trusted_uid=os.geteuid(),
+                        trusted_gid=os.getegid(),
+                    )
+                selector.chmod(0o644)
+                selector.write_bytes((BOOTSTRAP_APP_ID + "\n").encode("ascii"))
+                selector.chmod(0o444)
+                executable.chmod(0o755)
+                with self.assertRaisesRegex(
+                    render_install.GrokReleaseInstallError, "executable is unsafe"
+                ):
+                    render_install._verify_trusted_bootstrap_binary(
+                        descriptor,
+                        trusted_uid=os.geteuid(),
+                        trusted_gid=os.getegid(),
+                    )
+                executable.chmod(0o555)
+                update_lock.chmod(0o644)
+                with self.assertRaisesRegex(
+                    render_install.GrokReleaseInstallError,
+                    "update lock is unsafe",
+                ):
+                    render_install._verify_trusted_bootstrap_lock(
+                        descriptor,
+                        trusted_uid=os.geteuid(),
+                        trusted_gid=os.getegid(),
+                    )
+            finally:
+                os.close(descriptor)
 
     def test_render_only_keeps_roundtrip_copy_and_never_invokes_sudo(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -168,23 +420,24 @@ class InstallPipelineTests(unittest.TestCase):
             )
             self.assertFalse((private / ".planning").exists())
             self.assertEqual(run.call_count, 2)
-            source = str(home / "grok-proxy")
-            prefix = [
+            installed_prefix = [
                 "/usr/bin/sudo",
                 "-n",
                 "--",
                 "/usr/bin/python3",
                 "-I",
                 "-B",
-                str(repo / "system/grok-proxy/install-release.py"),
+                "/usr/local/libexec/grok-proxy/releases/"
+                + RELEASE_ID
+                + "/install-release.py",
             ]
             self.assertEqual(
                 run.call_args_list[0].args[0],
-                [*prefix, "install", "--source", source, "--home", str(home), "--apply"],
+                [*TEST_BOOTSTRAP_PREFIX, "install", "--apply"],
             )
             self.assertEqual(
                 run.call_args_list[1].args[0],
-                [*prefix, "status", "--source", source, "--home", str(home)],
+                [*installed_prefix, "status"],
             )
 
     def test_hard_crash_prefix_resumes_without_overwriting_private_state(self) -> None:

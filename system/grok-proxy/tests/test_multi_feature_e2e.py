@@ -32,6 +32,7 @@ from grok_ms.grok_exec import grok_release_id  # noqa: E402
 from test_release_installer import (  # noqa: E402
     fixed_qualification_smoke,
     release_installer,
+    write_proc_fixture,
 )
 
 
@@ -71,12 +72,43 @@ def _installer_base(
         str(prefix),
         "--home",
         str(logical_home),
-        "--test-openvpn-binary",
-        str(FAKE_CURL),
     ]
 
 
-def _installed_release_installer(prefix: Path, logical_home: Path) -> object:
+def _installer_command(
+    installer_base: list[str],
+    command: str,
+    *arguments: str,
+) -> list[str]:
+    result = [*installer_base[:2], command, *installer_base[2:]]
+    if command in {"install", "rollback"}:
+        result.extend(("--test-openvpn-binary", str(FAKE_CURL)))
+    result.extend(arguments)
+    return result
+
+
+def _installer_subprocess_options(
+    proc_fd: int,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    child_environment = dict(os.environ if environment is None else environment)
+    child_environment[release_installer._PREFIX_PROC_FD_ENV] = str(proc_fd)
+    return {"env": child_environment, "pass_fds": (proc_fd,)}
+
+
+def _open_proc_fixture(prefix: Path) -> int:
+    fixture, _boot_id, _pid = write_proc_fixture(prefix)
+    return os.open(
+        fixture,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+
+
+def _installed_release_installer(
+    prefix: Path,
+    logical_home: Path,
+    proc_fd: int,
+) -> object:
     layout = release_installer.Layout.defaults(
         ROOT,
         prefix=prefix,
@@ -84,10 +116,16 @@ def _installed_release_installer(prefix: Path, logical_home: Path) -> object:
         test_openvpn_binary=FAKE_CURL,
     )
     runtime_files = release_installer._default_runtime_files(ROOT)
+    proc_authority = release_installer.ProcAuthority.from_fd(
+        proc_fd,
+        display=prefix / "proc-fixture",
+        fixture=True,
+    )
     return release_installer.ReleaseInstaller(
         layout,
         runtime_files=runtime_files,
         root_files=release_installer._default_root_files(runtime_files),
+        proc_authority=proc_authority,
     )
 
 
@@ -95,9 +133,12 @@ def _canary_command(
     installer_base: list[str],
     argv: list[str],
 ) -> list[str]:
-    command = [*installer_base[:2], "canary-exec", *installer_base[2:], "--apply"]
-    command.extend(f"--canary-arg={argument}" for argument in argv)
-    return command
+    return _installer_command(
+        installer_base,
+        "canary-exec",
+        "--apply",
+        *(f"--canary-arg={argument}" for argument in argv),
+    )
 
 
 def _json_objects(output: str) -> list[dict[str, object]]:
@@ -171,6 +212,8 @@ class InstalledFeatureOnTests(unittest.TestCase):
             prefix = base / "prefix"
             logical_home = Path("/home/grok-e2e")
             installer_base = _installer_base(prefix, logical_home)
+            proc_fd = _open_proc_fixture(prefix)
+            self.addCleanup(os.close, proc_fd)
             legacy = prefix / "var/lib/grok-vpngate"
             legacy.mkdir(parents=True, mode=0o700)
             # Model the production /var/lib trust boundary even on developer
@@ -187,27 +230,29 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 path.write_bytes(content)
                 path.chmod(mode)
             interrupted = subprocess.run(
-                [
-                    *installer_base[:2],
+                _installer_command(
+                    installer_base,
                     "install",
-                    *installer_base[2:],
                     "--apply",
                     "--fault-at",
                     "after-canary-selection",
-                ],
+                ),
                 text=True,
                 capture_output=True,
                 timeout=30,
                 check=False,
+                **_installer_subprocess_options(proc_fd),
             )
             self.assertEqual(interrupted.returncode, 2)
+            self.assertIn("after-canary-selection", interrupted.stderr)
             self.assertTrue(legacy.exists())
             install = subprocess.run(
-                [*installer_base[:2], "resume", *installer_base[2:], "--apply"],
+                _installer_command(installer_base, "resume", "--apply"),
                 text=True,
                 capture_output=True,
                 timeout=30,
                 check=False,
+                **_installer_subprocess_options(proc_fd),
             )
             self.assertEqual(install.returncode, 0, install.stderr)
             self.assertFalse(legacy.exists())
@@ -222,7 +267,18 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 / ".local/lib/grok-proxy/releases"
                 / release_id
             )
-            installed_release = _installed_release_installer(prefix, logical_home)
+            installed_release = _installed_release_installer(
+                prefix, logical_home, proc_fd
+            )
+            self.addCleanup(installed_release.proc_authority.close)
+            pinned_grok = base / "grok-e2e-v1"
+            pinned_grok.write_text(
+                "#!/usr/bin/python3\n"
+                "import runpy\n"
+                f"runpy.run_path({str(FAKE_GROK)!r}, run_name='__main__')\n",
+                encoding="ascii",
+            )
+            pinned_grok.chmod(0o700)
 
             ports: list[int] = []
             while len(ports) < 3:
@@ -237,7 +293,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 "GROK_TEST_ROOT_RELEASE_CONTROL": str(root_control),
                 "GROK_TEST_CURL_BIN": str(FAKE_CURL),
                 "GROK_TEST_SKIP_WARM_HANDOFF": "1",
-                "GROK_BIN": str(FAKE_GROK),
+                "GROK_BIN": str(pinned_grok),
                 "GROK_HOME": str(base / "grok-home"),
                 "HOME": str(installed_home),
                 "XDG_STATE_HOME": str(user_state),
@@ -250,11 +306,16 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 "GROK_STABILITY_INTERVAL_MS": "0",
                 "GROK_CONNECT_TIMEOUT_MS": "3000",
                 "GROK_PROBE_TIMEOUT_MS": "5000",
-                "GROK_TRANSITION_TIMEOUT_MS": "15000",
+                "GROK_TRANSITION_TIMEOUT_MS": "750000",
                 "GROK_STOP_TIMEOUT_MS": "5000",
                 "GROK_WATCHDOG_INTERVAL_MS": "60000",
             }
             (base / "grok-home").mkdir(mode=0o700)
+            (base / "grok-home/config.toml").write_text(
+                '[models]\ndefault = "grok-4.5"\n',
+                encoding="ascii",
+            )
+            managed_environment = environment
             echo = _EchoServer()
             echo.start()
             crash_canaries: list[subprocess.Popen[str]] = []
@@ -272,12 +333,12 @@ class InstalledFeatureOnTests(unittest.TestCase):
                     "--fake-hold",
                     "8",
                 ]
-                grok_identity = grok_release_id(FAKE_GROK)
+                grok_identity = grok_release_id(pinned_grok)
                 contract = build_contract(
                     classify(canary_arguments),
                     "grok-4.5",
                     release_dir=release_dir,
-                    grok_bin=FAKE_GROK,
+                    grok_bin=pinned_grok,
                     env=environment,
                     grok_release_id=grok_identity,
                 )
@@ -306,10 +367,9 @@ class InstalledFeatureOnTests(unittest.TestCase):
                     )
 
                 begun = subprocess.run(
-                    [
-                        *installer_base[:2],
+                    _installer_command(
+                        installer_base,
                         "begin-rung-canary",
-                        *installer_base[2:],
                         "--release-id",
                         release_id,
                         "--rung",
@@ -323,12 +383,12 @@ class InstalledFeatureOnTests(unittest.TestCase):
                         "--model-id",
                         "grok-4.5",
                         "--apply",
-                    ],
+                    ),
                     text=True,
                     capture_output=True,
                     timeout=30,
                     check=False,
-                    env=environment,
+                    **_installer_subprocess_options(proc_fd, environment),
                 )
                 self.assertEqual(begun.returncode, 0, begun.stderr)
                 begun_records = _json_objects(begun.stdout)
@@ -360,7 +420,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                             text=True,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
-                            env=environment,
+                            **_installer_subprocess_options(proc_fd, environment),
                         )
                     )
 
@@ -372,8 +432,8 @@ class InstalledFeatureOnTests(unittest.TestCase):
                         text=True,
                         capture_output=True,
                         timeout=5,
-                        env=environment,
                         check=False,
+                        **_installer_subprocess_options(proc_fd, environment),
                     )
                     for candidate in _json_objects(status.stdout):
                         if candidate.get("live_leases") == 2:
@@ -480,19 +540,18 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 self.assertFalse((control / "recovery.fence").exists())
 
                 aborted = subprocess.run(
-                    [*installer_base[:2], "abort", *installer_base[2:], "--apply"],
+                    _installer_command(installer_base, "abort", "--apply"),
                     text=True,
                     capture_output=True,
                     timeout=30,
-                    env=environment,
                     check=False,
+                    **_installer_subprocess_options(proc_fd, environment),
                 )
                 self.assertEqual(aborted.returncode, 0, aborted.stderr)
                 begun = subprocess.run(
-                    [
-                        *installer_base[:2],
+                    _installer_command(
+                        installer_base,
                         "begin-rung-canary",
-                        *installer_base[2:],
                         "--release-id",
                         release_id,
                         "--rung",
@@ -506,12 +565,12 @@ class InstalledFeatureOnTests(unittest.TestCase):
                         "--model-id",
                         "grok-4.5",
                         "--apply",
-                    ],
+                    ),
                     text=True,
                     capture_output=True,
                     timeout=30,
                     check=False,
-                    env=environment,
+                    **_installer_subprocess_options(proc_fd, environment),
                 )
                 self.assertEqual(begun.returncode, 0, begun.stderr)
 
@@ -526,7 +585,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                             text=True,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
-                            env=environment,
+                            **_installer_subprocess_options(proc_fd, environment),
                         )
                     )
 
@@ -539,8 +598,8 @@ class InstalledFeatureOnTests(unittest.TestCase):
                         text=True,
                         capture_output=True,
                         timeout=5,
-                        env=environment,
                         check=False,
+                        **_installer_subprocess_options(proc_fd, environment),
                     )
                     last_canary_status = (
                         status.returncode,
@@ -608,7 +667,11 @@ class InstalledFeatureOnTests(unittest.TestCase):
                     installed_release,
                     "_run_qualification_verifier",
                     side_effect=lambda **kw: fixed_qualification_smoke(
-                        installed_release, str(kw["step"])
+                        installed_release,
+                        str(kw["step"]),
+                        rung_qualification_sha256=(
+                            contract.rung_qualification_digest("direct")
+                        ),
                     ),
                 ):
                     self.assertEqual(
@@ -616,17 +679,12 @@ class InstalledFeatureOnTests(unittest.TestCase):
                         "passed",
                     )
                 promoted = subprocess.run(
-                    [
-                        *installer_base[:2],
-                        "promote-rung",
-                        *installer_base[2:],
-                        "--apply",
-                    ],
+                    _installer_command(installer_base, "promote-rung", "--apply"),
                     text=True,
                     capture_output=True,
                     timeout=30,
                     check=False,
-                    env=environment,
+                    **_installer_subprocess_options(proc_fd, environment),
                 )
                 self.assertEqual(promoted.returncode, 0, promoted.stderr)
                 selected = json.loads(
@@ -639,14 +697,187 @@ class InstalledFeatureOnTests(unittest.TestCase):
                     ["direct"],
                 )
 
+                candidate_result = subprocess.run(
+                    [str(entrypoint), "profile-create", "--json"],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                    env=environment,
+                )
+                self.assertEqual(
+                    candidate_result.returncode,
+                    0,
+                    candidate_result.stderr,
+                )
+                candidate = json.loads(candidate_result.stdout)
+                self.assertTrue(candidate["activation_ready"])
+                self.assertEqual(candidate["eligible_rungs"], ["direct"])
+                self.assertEqual(candidate["model_id"], "grok-4.5")
+                activated = installed_release.activate_profile(
+                    str(candidate["profile_sha256"])
+                )
+                self.assertEqual(activated.operation, "activate-profile")
+
+                ambient_grok = base / "grok-ambient-decoy"
+                ambient_grok.write_text(
+                    "#!/usr/bin/env sh\nprintf 'AMBIENT_GROK_RAN\\n'\nexit 93\n",
+                    encoding="ascii",
+                )
+                ambient_grok.chmod(0o700)
+                (base / "grok-home/config.toml").write_text(
+                    '[models]\ndefault = "ambient/model"\n',
+                    encoding="ascii",
+                )
+                managed_environment = dict(environment)
+                managed_environment.pop("GROK_MULTI_SESSION", None)
+                managed_environment["GROK_BIN"] = str(ambient_grok)
+                managed_environment["GROK_MAX_LEASES"] = "1"
+                direct_payload = release_dir / "grok-remote"
+
+                rung_evidence = (
+                    root_control
+                    / "rung-evidence"
+                    / release_id
+                    / f"{selected['qualified_rungs'][0]['evidence_sha256']}.json"
+                )
+                held_rung_evidence = rung_evidence.with_suffix(".json.held")
+                rung_evidence.rename(held_rung_evidence)
+                blocked_doctor = subprocess.run(
+                    [str(direct_payload), "doctor", "--json"],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                    env=managed_environment,
+                )
+                held_rung_evidence.rename(rung_evidence)
+                self.assertEqual(blocked_doctor.returncode, 2, blocked_doctor.stderr)
+                blocked_status = json.loads(blocked_doctor.stdout)
+                self.assertEqual(
+                    blocked_status["reason_code"],
+                    "minimum_eligible_rungs_not_met",
+                )
+                self.assertEqual(blocked_status["eligible_rungs"], [])
+                self.assertIn("direct", blocked_status["missing_rungs"])
+                self.assertEqual(
+                    blocked_status["profile_sha256"],
+                    candidate["profile_sha256"],
+                )
+
+                doctor = subprocess.run(
+                    [str(entrypoint), "doctor", "--json"],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                    env=managed_environment,
+                )
+                self.assertEqual(doctor.returncode, 0, doctor.stderr)
+                doctor_status = json.loads(doctor.stdout)
+                self.assertEqual(doctor_status["status"], "degraded")
+                self.assertEqual(
+                    doctor_status["profile_sha256"],
+                    candidate["profile_sha256"],
+                )
+                self.assertEqual(doctor_status["model_id"], "grok-4.5")
+                direct_doctor = subprocess.run(
+                    [str(direct_payload), "doctor", "--json"],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                    env=managed_environment,
+                )
+                self.assertEqual(direct_doctor.returncode, 0, direct_doctor.stderr)
+                self.assertEqual(json.loads(direct_doctor.stdout), doctor_status)
+
+                release_evidence = installed_release.layout.evidence_path(release_id)
+                held_release_evidence = release_evidence.with_suffix(".json.held")
+                release_evidence.rename(held_release_evidence)
+                try:
+                    blocked_release_doctor = subprocess.run(
+                        [str(direct_payload), "doctor", "--json"],
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                        env=managed_environment,
+                    )
+                finally:
+                    held_release_evidence.rename(release_evidence)
+                self.assertEqual(
+                    blocked_release_doctor.returncode,
+                    2,
+                    blocked_release_doctor.stderr,
+                )
+                self.assertEqual(
+                    json.loads(blocked_release_doctor.stdout)["reason_code"],
+                    "release_evidence_invalid",
+                )
+
+                boot_inventory = installed_release.layout.boot_inventory_path(
+                    release_id
+                )
+                boot_inventory_bytes = boot_inventory.read_bytes()
+                held_boot_inventory = boot_inventory.with_suffix(".json.held")
+                boot_inventory.rename(held_boot_inventory)
+                try:
+                    missing_boot = subprocess.run(
+                        [str(direct_payload), "inspect"],
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                        env=managed_environment,
+                    )
+                finally:
+                    held_boot_inventory.rename(boot_inventory)
+                self.assertEqual(missing_boot.returncode, 2, missing_boot.stderr)
+                self.assertNotIn(
+                    "AMBIENT_GROK_RAN",
+                    missing_boot.stdout + missing_boot.stderr,
+                )
+
+                stale_inventory = json.loads(boot_inventory_bytes)
+                stale_inventory["host_id"] = "0" * 64
+                boot_inventory.chmod(0o600)
+                boot_inventory.write_bytes(
+                    release_installer._canonical_json(stale_inventory) + b"\n"
+                )
+                boot_inventory.chmod(0o444)
+                try:
+                    stale_boot = subprocess.run(
+                        [
+                            str(direct_payload),
+                            "--fake-connect",
+                            f"127.0.0.1:{echo.port}",
+                            "--fake-payload",
+                            "stale-boot-must-not-run",
+                        ],
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                        env=managed_environment,
+                    )
+                finally:
+                    boot_inventory.chmod(0o600)
+                    boot_inventory.write_bytes(boot_inventory_bytes)
+                    boot_inventory.chmod(0o444)
+                self.assertEqual(stale_boot.returncode, 2, stale_boot.stderr)
+                self.assertIn("current-boot inventory is stale", stale_boot.stderr)
+                self.assertNotIn(
+                    "AMBIENT_GROK_RAN",
+                    stale_boot.stdout + stale_boot.stderr,
+                )
+
                 for index in range(2):
+                    invocation = direct_payload if index == 0 else entrypoint
                     wrappers.append(
                         subprocess.Popen(
                             [
-                                str(entrypoint),
-                                "--direct",
-                                "-m",
-                                "grok-4.5",
+                                str(invocation),
                                 "--fake-connect",
                                 f"127.0.0.1:{echo.port}",
                                 "--fake-payload",
@@ -657,7 +888,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                             text=True,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
-                            env=environment,
+                            env=managed_environment,
                         )
                     )
 
@@ -669,7 +900,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                         text=True,
                         capture_output=True,
                         timeout=5,
-                        env=environment,
+                        env=managed_environment,
                         check=False,
                     )
                     if status.returncode == 0 and status.stdout.strip().startswith("{"):
@@ -687,6 +918,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 assert isinstance(resources, dict)
                 self.assertEqual(resources["provider_processes"], 1)
                 self.assertEqual(resources["leases"], 2)
+                self.assertEqual(resources["max_leases"], 4)
                 self.assertIsNotNone(resources["frontend"])
 
                 leaders = control / "leaders"
@@ -707,6 +939,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 for process, (stdout, stderr) in zip(wrappers, outputs, strict=True):
                     self.assertEqual(process.returncode, 0, stderr)
                     self.assertIn("FAKE_GROK_OK", stdout)
+                    self.assertNotIn("AMBIENT_GROK_RAN", stdout + stderr)
                 reported_leaders = {
                     line.split("leader=", 1)[1].strip()
                     for stdout, _stderr in outputs
@@ -794,7 +1027,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         timeout=10,
-                        env=environment,
+                        env=managed_environment,
                         check=False,
                     )
 
@@ -811,12 +1044,15 @@ class InstalledFeatureOnTests(unittest.TestCase):
             prefix = base / "prefix"
             logical_home = Path("/home/grok-upgrade-e2e")
             installer_base = _installer_base(prefix, logical_home, source)
+            proc_fd = _open_proc_fixture(prefix)
+            self.addCleanup(os.close, proc_fd)
             first = subprocess.run(
-                [*installer_base[:2], "install", *installer_base[2:], "--apply"],
+                _installer_command(installer_base, "install", "--apply"),
                 text=True,
                 capture_output=True,
                 timeout=30,
                 check=False,
+                **_installer_subprocess_options(proc_fd),
             )
             self.assertEqual(first.returncode, 0, first.stderr)
             first_release = json.loads(first.stdout)["release_id"]
@@ -835,11 +1071,12 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 path.write_bytes(content)
                 path.chmod(mode)
             same_release = subprocess.run(
-                [*installer_base[:2], "install", *installer_base[2:], "--apply"],
+                _installer_command(installer_base, "install", "--apply"),
                 text=True,
                 capture_output=True,
                 timeout=30,
                 check=False,
+                **_installer_subprocess_options(proc_fd),
             )
             self.assertEqual(same_release.returncode, 2)
             self.assertTrue(legacy.exists())
@@ -851,20 +1088,21 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 encoding="utf-8",
             )
             interrupted = subprocess.run(
-                [
-                    *installer_base[:2],
+                _installer_command(
+                    installer_base,
                     "install",
-                    *installer_base[2:],
                     "--apply",
                     "--fault-at",
                     "after-canary-selection",
-                ],
+                ),
                 text=True,
                 capture_output=True,
                 timeout=30,
                 check=False,
+                **_installer_subprocess_options(proc_fd),
             )
             self.assertEqual(interrupted.returncode, 2)
+            self.assertIn("after-canary-selection", interrupted.stderr)
 
             legacy.mkdir(parents=True, mode=0o700)
             legacy.parent.chmod(0o755)
@@ -880,11 +1118,12 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 path.chmod(mode)
 
             resumed = subprocess.run(
-                [*installer_base[:2], "resume", *installer_base[2:], "--apply"],
+                _installer_command(installer_base, "resume", "--apply"),
                 text=True,
                 capture_output=True,
                 timeout=30,
                 check=False,
+                **_installer_subprocess_options(proc_fd),
             )
             self.assertEqual(resumed.returncode, 0, resumed.stderr)
             second_release = json.loads(resumed.stdout)["release_id"]

@@ -35,10 +35,10 @@ Phases (each gated; resume after a failure with `PHASE=<n> bin/install.sh`):
 | 1 | doctor + dirs | doctor exit 0 |
 | 2 | prepare: apt, xtradeb PPA (chromium/calibre), texlive-full, tailscale, NodeSource node 22, npm prefix, npm globals (pinned), pipx, rustup, bun, elan, modal, docker, images | binaries respond |
 | 3 | restore secrets + chmod fixups (+ `tailscale up --authkey` if provided) | required entries present |
-| 5 | components: clone openclaw-bot → `external/`, ai-agents-skills → `~/ai-agents-skills` (single source of truth), at locked SHAs | HEAD == lock |
+| 5 | components: clone openclaw-bot → `external/`; ensure the pinned ai-agents-skills object exists in the compatibility/development repository at `~/ai-agents-skills` without changing an existing worktree | exact pinned object is locally available |
 | 6 | render configs/scripts/symlinks into $HOME; atomically install the immutable grok-proxy user/root release | no unresolved `{{ HOME }}`; one coherent admitted Grok release |
 | 7 | OpenClaw slice via openclaw-bot (`--skip-docker --skip-services`); npm install channel plugins | secrets untouched; no dangling refs |
-| 8 | `research_compute` broker installed from `~/ai-agents-skills` (`install --apply --real-system --backup-replace --skills modal-research-compute`) + `verify` | broker runs via the `_run.sh` shim |
+| 8 | bind the materializer by its recorded SHA-256 into a root-owned no-replace helper, materialize the exact pinned ai-agents-skills Git blobs at `/usr/local/libexec/coding-system/components/ai-agents-skills/<sha>`, then install `research_compute` from that stable tree under a closed environment + `verify` | helper digest/authority, blob/mode parity, immutable ownership, idempotent no-replace publication, and `_run.sh` broker smoke |
 | 8b| re-overlay zip secrets; `_run.sh` sha check | verify-secrets OK |
 | 9 | python envs from pip freezes (workspace-local target dir, ~/.venvs, docling-venv, lean-explore) | import smokes |
 | 10| docker images re-check (arch-conditional) | images present |
@@ -53,54 +53,72 @@ exists, the complete managed tree must match byte-for-byte (including executable
 bits) or the install fails before writing source files or invoking sudo. This
 prevents restore from overwriting local authoring work or creating a hybrid tree.
 
-The editable tree is never the production execution authority. After proving
-that the repository backup and canonical authoring tree match, the trusted
-repository installer stages runtime bytes from `~/grok-proxy` under paired
-root-owned immutable user/root release directories. Selection is atomic; the
-immutable payload self-admits and `~/.local/bin/grok-remote` is a convenience
-selector. Direct execution from either editable checkout refuses normal
-production use. `bin/render-install.sh
---render-only` performs the same allowlisted source reconciliation but does not
-invoke sudo or change live release selectors.
+The editable tree is never the production execution authority. Before phase 6,
+an administrative package transaction must install the native, production-keyed
+`/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap`, one signed closed
+dispatcher under `bootstrap-releases/`, and the root-owned `selected-release`
+file. Candidate source cannot create or replace those trust-anchor artifacts.
+After proving that the repository backup and canonical authoring tree match,
+the renderer invokes only that native verifier and its administratively selected
+signed dispatcher. The signed dispatcher stages paired root-owned immutable
+user/root releases; `~/.local/bin/grok-remote` then selects the admitted user
+release. Direct execution from either editable checkout refuses production use.
+The native verifier independently opens the fixed root-owned selector, requires
+the requested signed application ID to match, and rechecks the selector at its
+final execution boundary; renderer validation is defense in depth.
+`bin/render-install.sh --render-only` performs the source reconciliation but
+does not invoke the verifier or change live release selectors.
 
 To inspect the selected release from the repository checkout:
 
 ```bash
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py status \
-  --source "$HOME/grok-proxy" \
-  --home "$HOME"
+GROK_RELEASE_PATH=$(readlink -f -- /usr/local/libexec/grok-proxy/current)
+GROK_RELEASE_ID=${GROK_RELEASE_PATH##*/}
+[[ $GROK_RELEASE_ID =~ ^[0-9a-f]{64}$ ]] || exit 2
+GROK_INSTALLER="/usr/local/libexec/grok-proxy/releases/$GROK_RELEASE_ID/install-release.py"
+sudo -n -- /usr/bin/python3 -I -B "$GROK_INSTALLER" status
 ```
+
+The installer path must name a concrete 64-hex release directory. The mutable
+`current/install-release.py` path is rejected; if selection changes after the
+path is derived, the concrete installer rechecks under the operation lock and
+fails closed.
 
 To stage and atomically select the current checkout without rerunning the
 machine-wide package phases:
 
 ```bash
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py install \
-  --source "$HOME/grok-proxy" \
-  --home "$HOME" \
-  --apply
+bash bin/render-install.sh
 ```
+
+This installs the signed application named by the administrative selector; it
+never executes `system/grok-proxy/install-release.py` or
+`~/grok-proxy/install-release.py` as root. A missing, malformed, incorrectly
+owned, or unsigned bootstrap artifact is a hard failure.
 
 The opt-in multi-session lane remains fail-closed until the selected release
 passes its fixed `load32` and `fault-recovery` qualification and each intended
 route/model tuple passes the fixed real-pair canary. The installer interface is:
 
 ```bash
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py begin-release-qualification \
-  --source "$HOME/grok-proxy" --home "$HOME" --release-id RELEASE_ID --apply
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py canary-exec \
-  --source "$HOME/grok-proxy" --home "$HOME" --qualification-step load32 --apply
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py canary-exec \
-  --source "$HOME/grok-proxy" --home "$HOME" --qualification-step fault-recovery --apply
+RELEASE_ID='replace-with-the-64-lowercase-hex-release-id'
+[[ $RELEASE_ID =~ ^[0-9a-f]{64}$ ]] || exit 2
+GROK_INSTALLER="/usr/local/libexec/grok-proxy/releases/$RELEASE_ID/install-release.py"
+sudo -n -- /usr/bin/python3 -I -B "$GROK_INSTALLER" \
+  begin-release-qualification --release-id "$RELEASE_ID" --apply
+sudo -n -- /usr/bin/python3 -I -B "$GROK_INSTALLER" \
+  canary-exec --qualification-step load32 --apply
+sudo -n -- /usr/bin/python3 -I -B "$GROK_INSTALLER" \
+  canary-exec --qualification-step fault-recovery --apply
 
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py begin-rung-canary \
-  --source "$HOME/grok-proxy" --home "$HOME" --release-id RELEASE_ID \
-  --rung RUNG --route-profile PROFILE --contract-sha256 CONTRACT_SHA256 \
-  --grok-release-id GROK_RELEASE_ID --model-id MODEL_ID --apply
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py canary-exec \
-  --source "$HOME/grok-proxy" --home "$HOME" --qualification-step real-pair --apply
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py promote-rung \
-  --source "$HOME/grok-proxy" --home "$HOME" --apply
+sudo -n -- /usr/bin/python3 -I -B "$GROK_INSTALLER" begin-rung-canary \
+  --release-id "$RELEASE_ID" \
+  --rung '<rung>' --route-profile '<profile>' \
+  --contract-sha256 '<contract_sha256>' \
+  --grok-release-id '<grok_release_id>' --model-id '<model_id>' --apply
+sudo -n -- /usr/bin/python3 -I -B "$GROK_INSTALLER" \
+  canary-exec --qualification-step real-pair --apply
+sudo -n -- /usr/bin/python3 -I -B "$GROK_INSTALLER" promote-rung --apply
 ```
 
 `PROFILE` is one of `direct`, `iphone`, `vpn`, `home:<label>`, `auto`, or
@@ -118,33 +136,35 @@ installer bytes; do not delete qualification state by hand.
 Use `status` as the preliminary check before retrying phase 6:
 
 ```bash
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py status \
-  --source "$HOME/grok-proxy" \
-  --home "$HOME"
+GROK_RELEASE_PATH=$(readlink -f -- /usr/local/libexec/grok-proxy/current)
+GROK_RELEASE_ID=${GROK_RELEASE_PATH##*/}
+[[ $GROK_RELEASE_ID =~ ^[0-9a-f]{64}$ ]] || exit 2
+GROK_INSTALLER="/usr/local/libexec/grok-proxy/releases/$GROK_RELEASE_ID/install-release.py"
+sudo -n -- /usr/bin/python3 -I -B "$GROK_INSTALLER" status
 ```
 
 For an interrupted release operation, an authorized recovery operator must also
 inspect the root-owned deny record and both root/user selection records. `status`
 does not expose the full deny ledger or selection phase. Once the immutable
 target user/root pair has been published, resume the target named by the deny
-ledger. Recovery uses that immutable target rather than rebuilding it from the
-current source bytes, but the current installer checkout is still required to
-provide this CLI:
+ledger. Recovery uses immutable signed code rather than rebuilding from current
+source bytes. `SIGNED_RELEASE_DIR` below must be the exact directory named by
+the root-owned bootstrap selector after its ownership, mode, and closed content
+have been independently validated:
 
 ```bash
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py resume \
-  --source "$HOME/grok-proxy" \
-  --home "$HOME" \
-  --apply
+GROK_BOOTSTRAP=/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap
+sudo -n -- "$GROK_BOOTSTRAP" --release-dir "$SIGNED_RELEASE_DIR" -- \
+  resume --apply
 ```
 
-Before pair publication, retry `install` from the exact frozen source bytes or
-abort to the release recorded in `from_release`:
+Before pair publication, retry phase 6 through `bash bin/render-install.sh` or
+abort to the release recorded in `from_release` through the same signed
+bootstrap lane:
 
 ```bash
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py abort \
-  --source "$HOME/grok-proxy" \
-  --home "$HOME" \
+GROK_BOOTSTRAP=/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap
+sudo -n -- "$GROK_BOOTSTRAP" --release-dir "$SIGNED_RELEASE_DIR" -- abort \
   --restore-from PRIOR_RELEASE_ID \
   --apply
 ```
@@ -180,10 +200,11 @@ differ from the exact self-admission contract and cannot be selected. Archived
 user releases remain mode `0500` until this validation succeeds. Then run:
 
 ```bash
-sudo -n -- /usr/bin/python3 -I -B system/grok-proxy/install-release.py rollback \
-  --source "$HOME/grok-proxy" \
-  --home "$HOME" \
-  --release-id RELEASE_ID \
+GROK_BOOTSTRAP=/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap
+ROLLBACK_RELEASE_ID='replace-with-an-eligible-64-lowercase-hex-release-id'
+[[ $ROLLBACK_RELEASE_ID =~ ^[0-9a-f]{64}$ ]] || exit 2
+sudo -n -- "$GROK_BOOTSTRAP" --release-dir "$SIGNED_RELEASE_DIR" -- rollback \
+  --release-id "$ROLLBACK_RELEASE_ID" \
   --apply
 ```
 
@@ -217,9 +238,14 @@ Example minimal try-out: `SKIP_LATEX=1 SKIP_DOCKER_IMAGES=1 make install`
 - **Ollama** is intentionally NOT installed (verified unused on the source
   system). The OpenClaw provider entries for it are inert unless Ollama is
   deliberately installed later.
-- **GHA compute broker**: `~/ai-agents-skills` is the single source for skills;
-  phase 8 installs the `research_compute` broker (the local→Modal→GitHub Actions
-  compute router) from there to the runtime root, and the documented
+- **GHA compute broker**: `~/ai-agents-skills` is the fetch/object and legacy
+  compatibility repository; its HEAD, index, ignored files, and working-tree
+  edits are not executable installer input. Phase 8 validates the pinned Git
+  closure, transports raw blobs without checkout filters, publishes a stable
+  root-owned SHA tree, and installs the `research_compute` broker (the
+  local→Modal→GitHub Actions compute router) from that tree to the runtime root.
+  Old SHA trees are retained because reference-mode adapters and symlink-mode
+  skills bind to their exact source path. The documented
   `~/.claude/skills/_run.sh skills/modal-research-compute/…` call is forwarded to
   it. One-time per machine, run the broker's `bootstrap` (generates config,
   authenticates `gh`, runs `doctor`); the per-install `[gha]` config rides the

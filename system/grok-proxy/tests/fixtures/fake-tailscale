@@ -9,7 +9,7 @@ for arg in "$@"; do
     status)
       status_json="${FAKE_TAILSCALE_STATUS_JSON:-}"
       [[ -n "$status_json" ]] \
-        || status_json='{"BackendState":"Running","ExitNodeStatus":{"ID":"n-test-phone","Online":true,"TailscaleIPs":["100.64.0.99"]},"Peer":{}}'
+        || status_json='{"BackendState":"Running","ExitNodeStatus":{"ID":"n-test-phone","Online":true,"TailscaleIPs":["100.64.0.99"]},"Peer":{"100.64.0.99":{"ID":"n-test-phone","HostName":"iphone-xr","DNSName":"iphone-xr.example.ts.net.","TailscaleIPs":["100.64.0.99"]}}}'
       printf '%s\n' "$status_json"
       exit 0
       ;;

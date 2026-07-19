@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 import fcntl
 import errno
 import hashlib
+import io
 from importlib.machinery import SourceFileLoader
 import importlib.util
 import json
@@ -30,6 +32,26 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from grok_ms import qualification_verifier, release_admission
+from grok_ms.contract import (
+    CONTRACT_SCHEMA_VERSION,
+    PROTOCOL_VERSION,
+    Endpoint,
+    ResourceLimits,
+    RouteContract,
+    RouteMode,
+    StabilityPolicy,
+    TimeoutPolicy,
+    VpnPolicy,
+)
+from grok_ms.grok_exec import grok_release_id
+from grok_ms.managed_profile import (
+    ActivationCommitUncertain,
+    ActivationRecord,
+    ManagedProfile,
+    ReadinessPolicy,
+    load_activation_record,
+    write_content_addressed_profile,
+)
 
 MODULE_PATH = ROOT / "install-release.py"
 SPEC = importlib.util.spec_from_file_location("grok_release_installer", MODULE_PATH)
@@ -48,6 +70,7 @@ BROKER_SPEC.loader.exec_module(broker_module)
 
 
 RUNTIME_FILES = (
+    "install-release.py",
     "grok-remote",
     "egress.sh",
     "vpn-broker",
@@ -55,7 +78,9 @@ RUNTIME_FILES = (
     "socks-netns.py",
     "sanitize.awk",
     "grok_ms/__init__.py",
+    "grok_ms/managed_profile.py",
     "grok_ms/release_admission.py",
+    "grok_ms/rung_admission.py",
     "grok_ms/core.py",
     "grok_ms/supervisor.py",
     "grok_ms/nested/worker.py",
@@ -91,6 +116,10 @@ def write_source(
     for name in RUNTIME_FILES:
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
+        if name == "install-release.py":
+            shutil.copyfile(MODULE_PATH, path)
+            path.chmod(0o644)
+            continue
         if name == "grok-remote":
             text = (
                 "#!/bin/bash\n"
@@ -243,7 +272,11 @@ def write_canary_sensitive_source(
     target.chmod(0o755)
 
 
-def make_installer(base: Path) -> tuple[object, object, Path]:
+def make_installer(
+    base: Path,
+    *,
+    proc_authority: object | None = None,
+) -> tuple[object, object, Path]:
     source = base / "source"
     write_source(source, "v1")
     home = base / "home"
@@ -254,13 +287,123 @@ def make_installer(base: Path) -> tuple[object, object, Path]:
         root_state_root=base / "root/var/lib/grok-proxy/release-control",
         state_root=home / ".local/state/grok-proxy/release-control",
         entrypoint=home / ".local/bin/grok-remote",
+        test_install=True,
     )
     installer = release_installer.ReleaseInstaller(
         layout,
         runtime_files=RUNTIME_FILES,
         root_files=ROOT_FILES,
+        proc_authority=proc_authority,
     )
     return installer, layout, source
+
+
+def write_proc_fixture(prefix: Path) -> tuple[Path, str, int]:
+    """Project the bounded proc records used by prefix-trust tests."""
+
+    root = prefix / "proc-fixture"
+    pid = os.getpid()
+    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+        encoding="ascii"
+    ).strip()
+    for directory in (
+        root / "sys/kernel/random",
+        root / "self/net",
+        root / str(pid),
+    ):
+        directory.mkdir(parents=True, mode=0o755, exist_ok=True)
+    (root / "sys/kernel/random/boot_id").write_text(
+        boot_id + "\n", encoding="ascii"
+    )
+    (root / "self/cgroup").write_text("0::/\n", encoding="ascii")
+    socket_header = (
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when "
+        "retrnsmt   uid  timeout inode\n"
+    )
+    for name in ("tcp", "tcp6"):
+        (root / "self/net" / name).write_text(socket_header, encoding="ascii")
+    process = root / str(pid)
+    for name in ("stat", "status", "cmdline"):
+        (process / name).write_bytes((Path("/proc") / str(pid) / name).read_bytes())
+    for name in ("cwd", "exe"):
+        (process / name).symlink_to(os.readlink(f"/proc/{pid}/{name}"))
+    return root, boot_id, pid
+
+
+def cgroup_proc_authority(root: Path, membership: str) -> object:
+    fixture = root / "proc-fixture"
+    (fixture / "self").mkdir(parents=True, mode=0o755)
+    (fixture / "self/cgroup").write_text(membership, encoding="ascii")
+    descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        return release_installer.ProcAuthority.from_fd(
+            descriptor, display=fixture, fixture=True
+        )
+    finally:
+        os.close(descriptor)
+
+
+def make_activation_profile(
+    base: Path,
+    release_id: str,
+) -> tuple[ManagedProfile, Path]:
+    grok = base / "grok-0.2.103-linux-aarch64"
+    grok.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="ascii")
+    grok.chmod(0o700)
+    contract = RouteContract(
+        schema_version=CONTRACT_SCHEMA_VERSION,
+        protocol_version=PROTOCOL_VERSION,
+        release_id=release_id,
+        model_id="vendor/model-1",
+        route_mode=RouteMode.AUTO,
+        forced_host=None,
+        home_endpoints=(),
+        ios_endpoints=(),
+        forced_ios_key=None,
+        allow_direct=True,
+        ladder=("direct",),
+        routing_config_digest="a" * 64,
+        probe_policy_version="probe-v1",
+        timeout_policy=TimeoutPolicy(
+            connect_ms=8_000,
+            probe_ms=90_000,
+            transition_ms=900_000,
+            stop_ms=10_000,
+        ),
+        stability_policy=StabilityPolicy(
+            version="same-exit-v1",
+            sample_count=3,
+            sample_interval_ms=1_000,
+            require_same_exit=True,
+        ),
+        vpn_policy=VpnPolicy(
+            namespace="grokvpn",
+            max_tries=6,
+            ranking_version="vpn-rank-v1",
+            countries=("VN",),
+            blocked_countries=("CN",),
+        ),
+        helper_release_ids=(("relay", "relay-v1"),),
+        grok_release_id=grok_release_id(grok),
+        public_endpoint=Endpoint("127.0.0.1", 1080),
+        private_ports=(11880, 11881),
+        limits=ResourceLimits(
+            max_leases=32,
+            max_control_connections=64,
+            max_frontend_streams=256,
+            max_packet_bytes=65_536,
+            per_stream_buffer_bytes=262_144,
+            total_buffer_bytes=67_108_864,
+        ),
+    )
+    return (
+        ManagedProfile.create(
+            contract,
+            grok,
+            ReadinessPolicy(1, ("direct",)),
+        ),
+        grok,
+    )
 
 
 def write_attested_rung_evidence(
@@ -297,6 +440,7 @@ def write_attested_rung_evidence(
         "rung": rung,
         "route_profile": canary["route_profile"],
         "contract_sha256": contract_sha256,
+        "rung_qualification_sha256": "b" * 64,
         "grok_release_id": grok_release_id,
         "canary_nonce": canary["canary_nonce"],
         "transcript_sha256s": transcript_sha256s,
@@ -324,6 +468,7 @@ def fixed_qualification_smoke(
     step: str,
     *,
     status: str = "passed",
+    rung_qualification_sha256: str = "b" * 64,
 ) -> object:
     canary = installer._read_rung_canary()
     resource_contract = release_installer._qualification_resource_contract(step)
@@ -365,6 +510,7 @@ def fixed_qualification_smoke(
         "contract_sha256": canary["contract_sha256"] or "c" * 64,
         "grok_release_id": canary["grok_release_id"],
         "model_id": canary["model_id"],
+        "profile_sha256": canary.get("profile_sha256"),
         "status": status,
         "started_unix_ns": time.time_ns(),
         "completed_unix_ns": time.time_ns() + 1,
@@ -417,6 +563,7 @@ def fixed_qualification_smoke(
             "sessions_requested": 2,
             "sessions_completed": 2,
             "active_rung": canary["rung"],
+            "rung_qualification_sha256": rung_qualification_sha256,
             "model_id": canary["model_id"],
             "shared_owner_epoch": True,
             "shared_generation": True,
@@ -557,6 +704,40 @@ def complete_release_qualification(installer: object, release_id: str) -> None:
         installer.qualification_exec("fault-recovery")
 
 
+def prepare_activatable_profile(
+    base: Path,
+    installer: object,
+    layout: object,
+    release_id: str,
+) -> tuple[ManagedProfile, Path]:
+    profile, grok = make_activation_profile(base, release_id)
+    write_content_addressed_profile(
+        layout.profile_root,
+        profile,
+        owner_uid=layout.target_uid,
+        owner_gid=layout.target_gid,
+    )
+    complete_release_qualification(installer, release_id)
+    installer.begin_rung_canary(
+        release_id=release_id,
+        rung="direct",
+        profile_sha256=profile.digest(),
+    )
+    projection = profile.contract.rung_qualification_digest("direct")
+    with mock.patch.object(
+        installer,
+        "_run_qualification_verifier",
+        side_effect=lambda **kw: fixed_qualification_smoke(
+            installer,
+            str(kw["step"]),
+            rung_qualification_sha256=projection,
+        ),
+    ):
+        installer.qualification_exec("real-pair")
+    installer.promote_rung()
+    return profile, grok
+
+
 def prepare_promotable_rung(
     installer: object,
     release_id: str,
@@ -585,6 +766,665 @@ def prepare_promotable_rung(
 
 
 class ReleaseInstallerTests(unittest.TestCase):
+    def test_invocation_lane_rejects_commands_and_explicit_options_before_discovery(
+        self,
+    ) -> None:
+        installed = (
+            Path("/usr/local/libexec/grok-proxy/releases")
+            / ("a" * 64)
+            / "install-release.py"
+        )
+        cases = (
+            (installed, ["install"], "installed"),
+            (
+                installed,
+                ["status", "--source", str(installed.parent)],
+                "explicit",
+            ),
+            (
+                Path("/usr/local/libexec/grok-proxy/current/install-release.py"),
+                ["status"],
+                "lexically concrete release path",
+            ),
+            (
+                Path("/usr/local/libexec/grok-proxy/releases")
+                / ("a" * 64)
+                / ".."
+                / ("a" * 64)
+                / "install-release.py",
+                ["status"],
+                "lexically concrete release path",
+            ),
+            (
+                MODULE_PATH,
+                ["begin-release-qualification", "--release-id", "a" * 64, "--apply"],
+                "native bootstrap authority",
+            ),
+            (MODULE_PATH, ["install", "--apply"], "native bootstrap authority"),
+            (
+                Path.home()
+                / ".local/lib/grok-proxy/releases"
+                / ("a" * 64)
+                / "install-release.py",
+                ["rollback", "--release-id", "a" * 64, "--apply"],
+                "native bootstrap authority",
+            ),
+            (MODULE_PATH, ["plan", "--release-id", "a" * 64], "authority"),
+        )
+        for executable, argv, message in cases:
+            with (
+                self.subTest(executable=executable, argv=argv),
+                mock.patch.object(release_installer, "__file__", str(executable)),
+                mock.patch.object(
+                    release_installer,
+                    "_default_runtime_files",
+                    side_effect=AssertionError("source discovery ran"),
+                ),
+                self.assertRaisesRegex(release_installer.ReleaseError, message),
+            ):
+                release_installer.main(list(argv))
+
+    def test_rejected_editable_script_does_not_import_mutable_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            editable = Path(td) / "editable"
+            package = editable / "grok_ms"
+            package.mkdir(parents=True)
+            shutil.copy2(MODULE_PATH, editable / "install-release.py")
+            (package / "__init__.py").write_text("", encoding="ascii")
+            marker = editable / "mutable-sibling-imported"
+            payload = (
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('imported', encoding='ascii')\n"
+                "raise RuntimeError('mutable sibling imported')\n"
+            )
+            (package / "managed_profile.py").write_text(payload, encoding="ascii")
+            (package / "rung_admission.py").write_text(payload, encoding="ascii")
+            environment = os.environ.copy()
+            environment.pop(release_installer._BOOTSTRAP_AUTHORITY_FD_ENV, None)
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    os.fspath(editable / "install-release.py"),
+                    "install",
+                    "--apply",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn(b"native bootstrap authority", completed.stderr)
+            self.assertFalse(marker.exists())
+
+    def test_bootstrap_lane_consumes_root_owned_sealed_native_authority(self) -> None:
+        if not hasattr(os, "memfd_create"):
+            self.skipTest("memfd_create is required")
+        memfd_flags = getattr(os, "MFD_ALLOW_SEALING", 0)
+        try:
+            descriptor = os.memfd_create(
+                "grok-dispatcher", memfd_flags | 0x0008
+            )
+            extra_exec_seal = True
+        except OSError as exc:
+            if exc.errno != errno.EINVAL:
+                raise
+            descriptor = os.memfd_create("grok-dispatcher", memfd_flags)
+            extra_exec_seal = False
+        os.write(descriptor, b"signed dispatcher fixture")
+        os.fchmod(descriptor, 0o600)
+        expected_seals = (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_SEAL
+        )
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, expected_seals)
+        if extra_exec_seal:
+            self.assertEqual(
+                fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & 0x0020,
+                0x0020,
+            )
+        actual = os.fstat(descriptor)
+        fields = list(actual)
+        fields[4] = 0
+        root_owned = os.stat_result(fields)
+        real_fstat = os.fstat
+
+        def root_fstat(candidate: int) -> os.stat_result:
+            if candidate == descriptor:
+                return root_owned
+            return real_fstat(candidate)
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {release_installer._BOOTSTRAP_AUTHORITY_FD_ENV: str(descriptor)},
+            ),
+            mock.patch.object(release_installer.os, "geteuid", return_value=0),
+            mock.patch.object(release_installer.os, "fstat", side_effect=root_fstat),
+        ):
+            release_installer._consume_bootstrap_authority()
+            self.assertNotIn(
+                release_installer._BOOTSTRAP_AUTHORITY_FD_ENV,
+                os.environ,
+            )
+        with self.assertRaises(OSError):
+            real_fstat(descriptor)
+
+    def test_bootstrap_lane_rejects_oversized_descriptor_without_syscall(self) -> None:
+        with (
+            mock.patch.dict(
+                os.environ,
+                {release_installer._BOOTSTRAP_AUTHORITY_FD_ENV: "9999999999"},
+            ),
+            mock.patch.object(
+                release_installer.os,
+                "fstat",
+                side_effect=AssertionError("oversized descriptor reached fstat"),
+            ),
+            self.assertRaisesRegex(
+                release_installer.ReleaseError,
+                "native bootstrap authority",
+            ),
+        ):
+            release_installer._consume_bootstrap_authority()
+
+    def test_authenticated_bootstrap_rejects_caller_source_before_discovery(self) -> None:
+        extracted = Path("/run/.grok-bootstrap-fixture/install-release.py")
+        with (
+            mock.patch.object(release_installer, "__file__", str(extracted)),
+            mock.patch.object(release_installer, "_consume_bootstrap_authority"),
+            mock.patch.object(
+                release_installer,
+                "_default_runtime_files",
+                side_effect=AssertionError("caller source discovery ran"),
+            ),
+            self.assertRaisesRegex(release_installer.ReleaseError, "explicit"),
+        ):
+            release_installer.main(
+                ["install", "--source", "/tmp/caller-controlled", "--apply"]
+            )
+
+    def test_authenticated_bootstrap_cannot_downgrade_to_prefix_lane(self) -> None:
+        extracted = Path("/run/.grok-bootstrap-fixture/install-release.py")
+        authority = release_installer._BOOTSTRAP_AUTHORITY_FD_ENV
+        with (
+            mock.patch.object(release_installer, "__file__", str(extracted)),
+            mock.patch.dict(os.environ, {authority: "17"}),
+            mock.patch.object(
+                release_installer, "_consume_bootstrap_authority"
+            ) as consume,
+            mock.patch.object(
+                release_installer,
+                "_default_runtime_files",
+                side_effect=AssertionError("caller source discovery ran"),
+            ),
+            self.assertRaisesRegex(release_installer.ReleaseError, "explicit"),
+        ):
+            release_installer.main(
+                [
+                    "install",
+                    "--prefix",
+                    "/tmp/caller-prefix",
+                    "--source",
+                    "/tmp/caller-source",
+                    "--apply",
+                ]
+            )
+        consume.assert_called_once_with()
+
+    def test_installed_status_uses_shared_existing_locks_without_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            fixture, _boot_id, _pid = write_proc_fixture(base / "fixture-prefix")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            installer, layout, _source = make_installer(
+                base / "install", proc_authority=authority
+            )
+            release_id = installer.install().release_id
+            flock_operations: list[int] = []
+            real_flock = release_installer.fcntl.flock
+
+            def tracked_flock(descriptor: int, operation: int) -> object:
+                flock_operations.append(operation)
+                return real_flock(descriptor, operation)
+
+            with (
+                mock.patch.object(
+                    installer,
+                    "_prepare_roots",
+                    side_effect=AssertionError("status repaired roots"),
+                ),
+                mock.patch.object(
+                    installer,
+                    "_ensure_selection_lock",
+                    side_effect=AssertionError("status repaired the selection lock"),
+                ),
+                mock.patch.object(release_installer.fcntl, "flock", tracked_flock),
+            ):
+                status = installer.status(installed=True)
+            self.assertEqual(status["active_release_id"], release_id)
+            self.assertIn(fcntl.LOCK_SH, flock_operations)
+
+            layout.operation_lock.chmod(0o644)
+            with self.assertRaisesRegex(release_installer.ReleaseError, "operation lock"):
+                installer.status(installed=True)
+            self.assertEqual(stat.S_IMODE(layout.operation_lock.stat().st_mode), 0o644)
+
+    def test_production_mutation_requires_package_provisioned_operation_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, layout, _source = make_installer(Path(td))
+            layout.test_install = False
+            with self.assertRaisesRegex(
+                release_installer.ReleaseError, "package-provisioned operation lock"
+            ):
+                with installer._locked():
+                    self.fail("missing production operation lock was accepted")
+            self.assertFalse(layout.operation_lock.exists())
+
+    def test_mutation_operation_lock_is_exact_preserved_and_rebound_checked(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, layout, _source = make_installer(Path(td))
+            with installer._locked():
+                pass
+            original = layout.operation_lock.stat()
+            with installer._locked():
+                pass
+            repeated = layout.operation_lock.stat()
+            self.assertEqual(
+                (repeated.st_dev, repeated.st_ino),
+                (original.st_dev, original.st_ino),
+            )
+
+            layout.operation_lock.chmod(0o644)
+            with self.assertRaisesRegex(release_installer.ReleaseError, "unsafe"):
+                with installer._locked():
+                    self.fail("wrong-mode operation lock was accepted")
+            self.assertEqual(stat.S_IMODE(layout.operation_lock.stat().st_mode), 0o644)
+            layout.operation_lock.chmod(0o600)
+            layout.operation_lock.write_bytes(b"x")
+            with self.assertRaisesRegex(release_installer.ReleaseError, "unsafe"):
+                with installer._locked():
+                    self.fail("nonempty operation lock was accepted")
+            self.assertEqual(layout.operation_lock.read_bytes(), b"x")
+            layout.operation_lock.write_bytes(b"")
+            alias = layout.operation_lock.with_name("operation-lock-alias")
+            os.link(layout.operation_lock, alias)
+            with self.assertRaisesRegex(release_installer.ReleaseError, "unsafe"):
+                with installer._locked():
+                    self.fail("multiply-linked operation lock was accepted")
+
+        with tempfile.TemporaryDirectory() as td:
+            installer, layout, _source = make_installer(Path(td))
+            with installer._locked():
+                pass
+            real_flock = release_installer.fcntl.flock
+            replaced = False
+
+            def replace_after_lock(descriptor: int, operation: int) -> object:
+                nonlocal replaced
+                result = real_flock(descriptor, operation)
+                if operation == fcntl.LOCK_EX and not replaced:
+                    replaced = True
+                    layout.operation_lock.unlink()
+                    layout.operation_lock.write_bytes(b"")
+                    layout.operation_lock.chmod(0o600)
+                return result
+
+            with (
+                mock.patch.object(
+                    release_installer.fcntl, "flock", replace_after_lock
+                ),
+                self.assertRaisesRegex(
+                    release_installer.ReleaseError, "changed while held"
+                ),
+            ):
+                with installer._locked():
+                    self.fail("rebound operation lock was accepted")
+
+    def test_installed_status_dispatch_is_bound_to_concrete_root_release(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            fixture, _boot_id, _pid = write_proc_fixture(base / "fixture-prefix")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            installer, layout, _source = make_installer(
+                base / "install", proc_authority=authority
+            )
+            release_id = installer.install().release_id
+            installed_path = (
+                Path("/usr/local/libexec/grok-proxy/releases")
+                / release_id
+                / release_installer.INSTALLER_RUNTIME
+            )
+            self.assertTrue(
+                (layout.root_releases / release_id / release_installer.INSTALLER_RUNTIME).is_file()
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(release_installer, "__file__", str(installed_path)),
+                mock.patch.object(
+                    release_installer.Layout, "defaults", return_value=layout
+                ),
+                mock.patch.object(
+                    release_installer, "_default_runtime_files", return_value=RUNTIME_FILES
+                ),
+                mock.patch.object(
+                    release_installer, "_default_root_files", return_value=ROOT_FILES
+                ),
+                mock.patch.object(
+                    release_installer, "ReleaseInstaller", return_value=installer
+                ),
+                mock.patch.object(
+                    release_installer.ProcAuthority,
+                    "production",
+                    return_value=authority,
+                ),
+                redirect_stdout(output),
+            ):
+                returncode = release_installer.main(["status"])
+            self.assertEqual(returncode, 0)
+            self.assertEqual(json.loads(output.getvalue())["active_release_id"], release_id)
+
+    def test_installed_mutation_rechecks_concrete_release_under_operation_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            fixture, _boot_id, _pid = write_proc_fixture(base / "fixture-prefix")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            installer, layout, source = make_installer(
+                base / "install", proc_authority=authority
+            )
+            old_release = installer.install().release_id
+            installed = release_installer.ReleaseInstaller(
+                layout,
+                runtime_files=RUNTIME_FILES,
+                root_files=ROOT_FILES,
+                proc_authority=authority,
+                installed_release_id=old_release,
+            )
+
+            write_source(source, "v2")
+            new_release = installer.install().release_id
+            self.assertNotEqual(new_release, old_release)
+            with self.assertRaisesRegex(
+                release_installer.ReleaseError,
+                "not the concrete root-selected release",
+            ):
+                installed.revalidate_boot()
+
+    def test_proc_authority_inventory_has_no_ambient_proc_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            fixture, boot_id, pid = write_proc_fixture(base / "prefix")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor,
+                display=fixture,
+                fixture=True,
+            )
+            os.close(descriptor)
+            scoped, _layout, _source = make_installer(
+                base / "install", proc_authority=authority
+            )
+            real_open = release_installer.os.open
+            real_read_text = Path.read_text
+
+            def guarded_open(path: object, *args: object, **kwargs: object) -> int:
+                if path == "/proc":
+                    raise AssertionError("ambient proc root reopened")
+                return real_open(path, *args, **kwargs)
+
+            def guarded_read_text(path: Path, *args: object, **kwargs: object) -> str:
+                if str(path).startswith("/proc/"):
+                    raise AssertionError(f"ambient proc leaf read: {path}")
+                return real_read_text(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(release_installer.os, "open", guarded_open),
+                mock.patch.object(Path, "read_text", guarded_read_text),
+            ):
+                self.assertEqual(scoped._boot_id(), boot_id)
+                start_ticks = scoped._proc_start_ticks(pid)
+                self.assertGreater(start_ticks, 0)
+                self.assertEqual(scoped._legacy_openvpn_process_inventory(), [])
+                self.assertEqual(scoped._release_bound_process_inventory(), [])
+                self.assertEqual(scoped._fixed_listener_inventory(), [])
+                self.assertTrue(
+                    scoped._runner_owner_can_execute(
+                        {
+                            "owner_pid": pid,
+                            "owner_start_ticks": start_ticks,
+                            "owner_boot_id": boot_id,
+                        }
+                    )
+                )
+
+    def test_prefix_proc_authority_is_fixed_inherited_and_not_a_public_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            source = base / "source"
+            prefix = base / "prefix"
+            fixture, _boot_id, _pid = write_proc_fixture(prefix)
+            write_default_source(source, "v1")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            environment = {
+                **os.environ,
+                release_installer._PREFIX_PROC_FD_ENV: str(descriptor),
+            }
+            command = [
+                sys.executable,
+                str(MODULE_PATH),
+                "plan",
+                "--source",
+                str(source),
+                "--prefix",
+                str(prefix),
+                "--home",
+                "/home/caller",
+            ]
+            try:
+                accepted = subprocess.run(
+                    command,
+                    env=environment,
+                    pass_fds=(descriptor,),
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(accepted.returncode, 0, accepted.stderr)
+                self.assertIn(
+                    release_installer.INSTALLER_RUNTIME,
+                    json.loads(accepted.stdout)["runtime_files"],
+                )
+
+                production = subprocess.run(
+                    [sys.executable, str(MODULE_PATH), "plan", "--source", str(source)],
+                    env=environment,
+                    pass_fds=(descriptor,),
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(production.returncode, 2, production.stderr)
+                self.assertIn("prefix-test only", production.stderr)
+
+                public_path = subprocess.run(
+                    [*command, "--test-proc-root", str(fixture)],
+                    env=environment,
+                    pass_fds=(descriptor,),
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(public_path.returncode, 2, public_path.stderr)
+                self.assertIn("unrecognized arguments", public_path.stderr)
+            finally:
+                os.close(descriptor)
+
+    def test_helper_only_legacy_restore_authority_is_durable_and_one_shot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            fixture, _boot_id, _pid = write_proc_fixture(base / "fixture-prefix")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            installer, layout, source = make_installer(
+                base / "install", proc_authority=authority
+            )
+            legacy_files = tuple(
+                path
+                for path in RUNTIME_FILES
+                if path
+                not in {
+                    release_installer.DIRECT_ADMISSION_RUNTIME,
+                    release_installer.INSTALLER_RUNTIME,
+                }
+            )
+            legacy_installer = release_installer.ReleaseInstaller(
+                layout,
+                runtime_files=legacy_files,
+                root_files=ROOT_FILES,
+                proc_authority=authority,
+            )
+            with mock.patch.object(
+                legacy_installer,
+                "validate_target_release_pair",
+                side_effect=legacy_installer.validate_release_pair,
+            ):
+                legacy_release = legacy_installer.install().release_id
+            write_source(source, "v2")
+            target_release = installer.plan_release().release_id
+
+            with self.assertRaises(release_installer.InjectedFault):
+                installer.install(fault_at=release_installer.AFTER_ROOT_PUBLISH)
+            authority = json.loads(
+                layout.legacy_migration_authority.read_text(encoding="ascii")
+            )
+            self.assertEqual(authority["state"], "AVAILABLE")
+            self.assertEqual(authority["legacy_release_id"], legacy_release)
+            self.assertEqual(authority["target_release_id"], target_release)
+            self.assertRegex(authority["attempt_id"], r"^[0-9a-f]{32}$")
+            self.assertRegex(authority["legacy_pair_sha256"], r"^[0-9a-f]{64}$")
+
+            restored = installer.abort_restore(legacy_release)
+            self.assertEqual(restored.release_id, legacy_release)
+            consumed = json.loads(
+                layout.legacy_migration_authority.read_text(encoding="ascii")
+            )
+            self.assertEqual(consumed["state"], "CONSUMED")
+            self.assertEqual(consumed["ready_release_id"], legacy_release)
+            with self.assertRaisesRegex(release_installer.ReleaseError, "one-shot"):
+                installer.install()
+
+    def test_ready_legacy_migration_consumption_recovers_without_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            fixture, _boot_id, _pid = write_proc_fixture(base / "fixture-prefix")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            installer, layout, source = make_installer(
+                base / "install", proc_authority=authority
+            )
+            legacy_files = tuple(
+                path
+                for path in RUNTIME_FILES
+                if path
+                not in {
+                    release_installer.DIRECT_ADMISSION_RUNTIME,
+                    release_installer.INSTALLER_RUNTIME,
+                }
+            )
+            legacy_installer = release_installer.ReleaseInstaller(
+                layout,
+                runtime_files=legacy_files,
+                root_files=ROOT_FILES,
+                proc_authority=authority,
+            )
+            with mock.patch.object(
+                legacy_installer,
+                "validate_target_release_pair",
+                side_effect=legacy_installer.validate_release_pair,
+            ):
+                legacy_release = legacy_installer.install().release_id
+            write_source(source, "v2")
+            target_release = installer.plan_release().release_id
+
+            with self.assertRaises(release_installer.InjectedFault):
+                installer.install(fault_at=release_installer.BEFORE_DENY_CLEAR)
+            authority = json.loads(
+                layout.legacy_migration_authority.read_text(encoding="ascii")
+            )
+            self.assertEqual(authority["state"], "CONSUMED")
+            self.assertEqual(authority["ready_release_id"], target_release)
+            self.assertTrue(layout.rollback_deny.exists())
+
+            # Model the adjacent crash window after READY publication but
+            # before the atomic AVAILABLE -> CONSUMED replacement.
+            available = dict(authority)
+            available["state"] = "AVAILABLE"
+            available["ready_release_id"] = None
+            available["consumed_unix_ns"] = None
+            release_installer._atomic_json(
+                layout.legacy_migration_authority,
+                available,
+                mode=0o444,
+                uid=layout.root_uid,
+                gid=layout.root_gid,
+                parent_mode=0o755,
+            )
+
+            resumed = installer.resume()
+            self.assertEqual(resumed.release_id, target_release)
+            self.assertFalse(layout.rollback_deny.exists())
+            self.assertEqual(
+                json.loads(
+                    layout.legacy_migration_authority.read_text(encoding="ascii")
+                )["state"],
+                "CONSUMED",
+            )
+
+            # A crash after consumption but before deny removal converges by
+            # clearing only that exact re-published terminal deny.
+            with installer._locked():
+                installer._publish_deny(
+                    "install", legacy_release, target_release
+                )
+            resumed_consumed = installer.resume()
+            self.assertEqual(resumed_consumed.release_id, target_release)
+            self.assertFalse(layout.rollback_deny.exists())
+
     def test_provider_public_recovery_requires_exact_dead_fence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "home"
@@ -943,15 +1783,14 @@ class ReleaseInstallerTests(unittest.TestCase):
             ):
                 for name, value in values.items():
                     (node / name).write_text(value + "\n", encoding="ascii")
-            proc_cgroup = root / "self.cgroup"
-            proc_cgroup.write_text(
+            proc_authority = cgroup_proc_authority(
+                root,
                 "0::/delegated.service/session.scope\n",
-                encoding="ascii",
             )
             placement = release_installer._runner_cgroup_parent(
                 os.getuid(),
                 os.getgid(),
-                proc_cgroup=proc_cgroup,
+                proc_authority=proc_authority,
                 mount=mount,
             )
             self.assertEqual(placement.parent, delegated)
@@ -983,7 +1822,7 @@ class ReleaseInstallerTests(unittest.TestCase):
                 release_installer._runner_cgroup_parent(
                     os.getuid(),
                     os.getgid(),
-                    proc_cgroup=proc_cgroup,
+                    proc_authority=proc_authority,
                     mount=mount,
                 )
             os.setxattr(delegated, "user.delegate", b"1")
@@ -994,7 +1833,7 @@ class ReleaseInstallerTests(unittest.TestCase):
                 release_installer._runner_cgroup_parent(
                     os.getuid() + 1,
                     os.getgid() + 1,
-                    proc_cgroup=proc_cgroup,
+                    proc_authority=proc_authority,
                     mount=mount,
                 )
 
@@ -1034,15 +1873,14 @@ class ReleaseInstallerTests(unittest.TestCase):
                 cpu_max="max 100000",
             )
             os.setxattr(user_service, "user.delegate", b"1")
-            proc_cgroup = root / "self.cgroup"
-            proc_cgroup.write_text(
+            proc_authority = cgroup_proc_authority(
+                root,
                 f"0::/user-{os.getuid()}.slice/session-2.scope\n",
-                encoding="ascii",
             )
             placement = release_installer._runner_cgroup_parent(
                 os.getuid(),
                 os.getgid(),
-                proc_cgroup=proc_cgroup,
+                proc_authority=proc_authority,
                 mount=mount,
             )
             self.assertEqual(placement.source, current)
@@ -1181,12 +2019,13 @@ class ReleaseInstallerTests(unittest.TestCase):
                     layout.runner_scope_root
                     / f".{nonce}.json.tmp-{'d' * 32}"
                 )
-                placement = release_installer._runner_cgroup_parent(
-                    layout.target_uid,
-                    layout.target_gid,
-                )
-                parent = placement.parent
-                parent_info = placement.parent_info
+                # This fixture exercises only recovery of the journal's
+                # atomic-create stages.  A PREPARED record with no scope is
+                # discarded before cgroup delegation is consulted, so bind it
+                # to the fixed cgroup-v2 mount instead of coupling the test to
+                # the caller's live delegated service hierarchy.
+                parent = Path("/sys/fs/cgroup")
+                parent_info = parent.lstat()
                 record = {
                     "schema_version": release_installer.SCHEMA_VERSION,
                     "record_version": release_installer.RUNNER_SCOPE_RECORD_VERSION,
@@ -3112,7 +3951,16 @@ os._exit(0)
 
     def test_release_pair_is_deterministic_immutable_and_executable_through_gates(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            installer, layout, _source = make_installer(Path(td))
+            base = Path(td)
+            fixture, _boot_id, _pid = write_proc_fixture(base / "fixture-prefix")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            installer, layout, _source = make_installer(
+                base / "install", proc_authority=authority
+            )
             plan = installer.plan_release()
             self.assertEqual(plan.release_id, installer.plan_release().release_id)
 
@@ -3126,11 +3974,21 @@ os._exit(0)
             root_manifest = json.loads((root_release / "release.json").read_text())
             self.assertEqual(
                 {entry["path"] for entry in root_manifest["files"]},
-                set(ROOT_FILES.values()),
+                set(RUNTIME_FILES),
             )
             self.assertEqual(
-                {entry["role"] for entry in root_manifest["files"]},
+                {
+                    entry["role"]
+                    for entry in root_manifest["files"]
+                    if "role" in entry
+                },
                 set(ROOT_FILES),
+            )
+            self.assertEqual(
+                stat.S_IMODE(
+                    (root_release / release_installer.INSTALLER_RUNTIME).stat().st_mode
+                ),
+                0o444,
             )
             for path in (user_release, root_release, user_release / "grok_ms"):
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o555)
@@ -3529,7 +4387,7 @@ os._exit(0)
     def test_apply_prerequisite_requires_safe_fixed_openvpn(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
-            installer, layout, _source = make_installer(base)
+            installer, layout, source = make_installer(base)
             fixture = base / "openvpn"
             fixture.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
             fixture.chmod(0o700)
@@ -3750,6 +4608,15 @@ os._exit(0)
                 check=False,
                 env=environment,
             )
+            nonliteral_recovery = subprocess.run(
+                [str(layout.entrypoint), "recover"],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+                env={**environment, "GROK_MULTI_SESSION": "true"},
+            )
+            fence_after_nonliteral_recovery = layout.recovery_fence.exists()
             recovered = subprocess.run(
                 [str(layout.entrypoint), "recover"],
                 text=True,
@@ -3761,6 +4628,12 @@ os._exit(0)
             self.assertEqual(ordinary.returncode, 78, ordinary.stderr)
             self.assertEqual(maintenance.returncode, 78, maintenance.stderr)
             self.assertEqual(wrong_arity.returncode, 78, wrong_arity.stderr)
+            self.assertEqual(
+                nonliteral_recovery.returncode,
+                78,
+                nonliteral_recovery.stderr,
+            )
+            self.assertTrue(fence_after_nonliteral_recovery)
             self.assertEqual(recovered.returncode, 0, recovered.stderr)
             self.assertTrue(json.loads(recovered.stdout)["recovered"])
             self.assertFalse(layout.recovery_fence.exists())
@@ -3886,7 +4759,7 @@ os._exit(0)
     def test_canary_authorization_fd_cannot_be_forged(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
-            installer, layout, _source = make_installer(base)
+            installer, layout, source = make_installer(base)
             release_id = installer.install().release_id
             with installer._locked():
                 installer._publish_deny("install", release_id, release_id)
@@ -4020,6 +4893,7 @@ os._exit(0)
                     "GROK_RELEASE_CANARY_KIND": "rung",
                     "GROK_RELEASE_CANARY_MODEL": "grok-model",
                     "GROK_RELEASE_CANARY_NONCE": "c" * 64,
+                    "GROK_RELEASE_CANARY_PROFILE_SHA256": "d" * 64,
                 }
                 self.assertEqual(
                     tuple(values), release_installer.CANARY_ENV_BINDINGS
@@ -4059,7 +4933,7 @@ os._exit(0)
             finally:
                 os.close(descriptor)
 
-    def test_route_profile_v4_is_exact_and_cli_requires_it(self) -> None:
+    def test_route_profile_v6_is_exact_and_cli_requires_it(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             installer, layout, source = make_installer(base)
@@ -4083,8 +4957,9 @@ os._exit(0)
 
             installer.begin_rung_canary(**common, route_profile="auto")
             record = installer._read_rung_canary()
-            self.assertEqual(record["schema_version"], 4)
+            self.assertEqual(record["schema_version"], 6)
             self.assertEqual(record["route_profile"], "auto")
+            self.assertIsNone(record["profile_sha256"])
             descriptor = os.open(layout.canary_auth, os.O_RDONLY)
             try:
                 environment = installer._canary_environment(descriptor, record)
@@ -4126,6 +5001,155 @@ os._exit(0)
                         "vendor/model-1",
                     ]
                 )
+
+    def test_begin_rung_canary_cli_accepts_profile_digest_as_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            installer, layout, source = make_installer(base)
+            profile_sha256 = "d" * 64
+            begin = mock.Mock(
+                return_value=release_installer.InstallResult(
+                    "a" * 64,
+                    True,
+                    "begin-rung-canary",
+                )
+            )
+            installer.begin_rung_canary = begin
+            installer._read_rung_canary = mock.Mock(
+                return_value={"canary_nonce": "e" * 64}
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(
+                    release_installer.Layout,
+                    "defaults",
+                    return_value=layout,
+                ),
+                mock.patch.object(
+                    release_installer,
+                    "ReleaseInstaller",
+                    return_value=installer,
+                ),
+                mock.patch.object(
+                    release_installer,
+                    "_default_runtime_files",
+                    return_value=RUNTIME_FILES,
+                ),
+                mock.patch.object(
+                    release_installer,
+                    "_default_root_files",
+                    return_value=ROOT_FILES,
+                ),
+                mock.patch.object(
+                    release_installer,
+                    "_prefix_proc_authority",
+                    return_value=installer.proc_authority,
+                ),
+                redirect_stdout(output),
+            ):
+                returncode = release_installer.main(
+                    [
+                        "begin-rung-canary",
+                        "--apply",
+                        "--source",
+                        str(source),
+                        "--prefix",
+                        str(base / "prefix"),
+                        "--release-id",
+                        "a" * 64,
+                        "--rung",
+                        "direct",
+                        "--profile-sha256",
+                        profile_sha256,
+                    ]
+                )
+            self.assertEqual(returncode, 0)
+            self.assertEqual(
+                json.loads(output.getvalue())["canary_nonce"],
+                "e" * 64,
+            )
+            begin.assert_called_once_with(
+                release_id="a" * 64,
+                rung="direct",
+                route_profile=None,
+                contract_sha256=None,
+                grok_release_id=None,
+                model_id=None,
+                profile_sha256=profile_sha256,
+            )
+
+    def test_release_recovery_cli_reports_profile_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            installer, layout, source = make_installer(base)
+            expected = {
+                "status": "blocked",
+                "release_id": "a" * 64,
+                "reason_code": "release_profile_history_invalid",
+            }
+            installer.profile_transition = expected
+            for command in ("resume", "abort"):
+                operation = mock.Mock(
+                    return_value=release_installer.InstallResult(
+                        "a" * 64,
+                        True,
+                        command,
+                    )
+                )
+                if command == "resume":
+                    installer.resume = operation
+                else:
+                    installer.abort_restore = operation
+                output = io.StringIO()
+                with (
+                    self.subTest(command=command),
+                    mock.patch.object(
+                        release_installer.Layout,
+                        "defaults",
+                        return_value=layout,
+                    ),
+                    mock.patch.object(
+                        release_installer,
+                        "ReleaseInstaller",
+                        return_value=installer,
+                    ),
+                    mock.patch.object(
+                        release_installer,
+                        "_default_runtime_files",
+                        return_value=RUNTIME_FILES,
+                    ),
+                    mock.patch.object(
+                        release_installer,
+                        "_default_root_files",
+                        return_value=ROOT_FILES,
+                    ),
+                    mock.patch.object(
+                        release_installer,
+                        "_prefix_proc_authority",
+                        return_value=installer.proc_authority,
+                    ),
+                    redirect_stdout(output),
+                ):
+                    arguments = [
+                        command,
+                        "--apply",
+                        "--source",
+                        str(source),
+                        "--prefix",
+                        str(base / "prefix"),
+                    ]
+                    returncode = release_installer.main(arguments)
+                self.assertEqual(returncode, 0)
+                self.assertEqual(
+                    json.loads(output.getvalue())["profile_transition"],
+                    expected,
+                )
+                if command == "resume":
+                    operation.assert_called_once_with(canary_only=False)
+                else:
+                    operation.assert_called_once_with(
+                        None, fault_at=None, canary_only=False
+                    )
 
     def test_qualification_resource_evidence_is_closed_and_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -4213,7 +5237,7 @@ os._exit(0)
             release_id = installer.install().release_id
             gate = installer._gate_source(release_id, "user").decode("utf-8")
             self.assertIn(
-                "QUALIFICATION_RESULT_SCHEMA=3\n",
+                "QUALIFICATION_RESULT_SCHEMA=5\n",
                 gate,
             )
             self.assertIn(
@@ -4453,10 +5477,47 @@ os._exit(0)
             self.assertTrue(layout.canary_terminal.exists())
             self.assertFalse(layout.rung_canary.exists())
             self.assertEqual(invoke(layout.entrypoint).returncode, 78)
-            installer.promote_rung()
+            converged = installer.abort_restore(release_id)
+            self.assertEqual(converged.operation, "rung-promoted")
             self.assertFalse(layout.rollback_deny.exists())
             self.assertFalse(layout.canary_terminal.exists())
             self.assertEqual(invoke(layout.entrypoint).returncode, 0)
+
+    def test_abort_restores_precanary_selection_after_promotion_commit_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, layout, _source = make_installer(Path(td))
+            release_id = installer.install().release_id
+            prepare_promotable_rung(installer, release_id)
+            with (
+                mock.patch.object(
+                    installer,
+                    "_prepare_canary_terminal",
+                    side_effect=release_installer.ReleaseError(
+                        "simulated crash before promotion commit terminal"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    release_installer.ReleaseError,
+                    "before promotion commit terminal",
+                ),
+            ):
+                installer.promote_rung()
+            selected = json.loads(layout.selected.read_text(encoding="ascii"))
+            self.assertEqual(len(selected["qualified_rungs"]), 1)
+            self.assertTrue(layout.rollback_deny.exists())
+            self.assertTrue(layout.rung_canary.exists())
+            self.assertFalse(layout.canary_terminal.exists())
+
+            aborted = installer.abort_restore(release_id)
+            self.assertEqual(aborted.operation, "abort")
+            restored = json.loads(layout.selected.read_text(encoding="ascii"))
+            self.assertEqual(restored["qualified_rungs"], [])
+            self.assertEqual(
+                installer._read_qualified_rung_catalog(release_id),
+                [],
+            )
+            self.assertFalse(layout.rollback_deny.exists())
+            self.assertFalse(layout.rung_canary.exists())
 
     def test_terminal_post_deny_clear_fault_converges_before_new_operations(self) -> None:
         def crash_after_deny_clear(installer: object, release_id: str) -> None:
@@ -4743,6 +5804,331 @@ os._exit(0)
                     os.kill(pid, signal.SIGKILL)
                     os.waitpid(pid, 0)
 
+    def test_activate_profile_requires_projected_evidence_and_live_pinned_grok(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            installer, layout, source = make_installer(base)
+            release_id = installer.install().release_id
+            profile, grok = make_activation_profile(base, release_id)
+            profile_path = write_content_addressed_profile(
+                layout.profile_root,
+                profile,
+                owner_uid=layout.target_uid,
+                owner_gid=layout.target_gid,
+            )
+            self.assertEqual(profile_path.name, profile.filename())
+
+            with self.assertRaisesRegex(
+                release_installer.ReleaseError,
+                "readiness policy is not satisfied; missing=direct",
+            ):
+                installer.activate_profile(profile.digest())
+            self.assertFalse(layout.active_profile.exists())
+
+            complete_release_qualification(installer, release_id)
+            with self.assertRaisesRegex(
+                release_installer.ReleaseError,
+                "profile-bound rung canary route_profile is mismatched",
+            ):
+                installer.begin_rung_canary(
+                    release_id=release_id,
+                    rung="direct",
+                    route_profile="direct",
+                    profile_sha256=profile.digest(),
+                )
+            installer.begin_rung_canary(
+                release_id=release_id,
+                rung="direct",
+                profile_sha256=profile.digest(),
+            )
+            canary = installer._read_rung_canary()
+            self.assertEqual(canary["route_profile"], "auto")
+            self.assertEqual(canary["contract_sha256"], profile.contract.digest())
+            self.assertEqual(canary["profile_sha256"], profile.digest())
+            held_profile = profile_path.with_suffix(".json.held")
+            profile_path.rename(held_profile)
+            with self.assertRaisesRegex(
+                release_installer.ReleaseError,
+                "qualification binding is invalid",
+            ):
+                installer.qualification_exec("real-pair")
+            held_profile.rename(profile_path)
+            projection = profile.contract.rung_qualification_digest("direct")
+            with mock.patch.object(
+                installer,
+                "_run_qualification_verifier",
+                side_effect=lambda **kw: fixed_qualification_smoke(
+                    installer,
+                    str(kw["step"]),
+                    rung_qualification_sha256=projection,
+                ),
+            ):
+                self.assertEqual(
+                    installer.qualification_exec("real-pair").status,
+                    "passed",
+                )
+            installer.promote_rung()
+            selected = json.loads(layout.selected.read_text(encoding="ascii"))
+            evidence_path = layout.rung_evidence_path(
+                release_id,
+                selected["qualified_rungs"][0]["evidence_sha256"],
+            )
+            evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+            self.assertEqual(
+                evidence["qualification_profile_sha256"],
+                profile.digest(),
+            )
+            # The terminal evidence is the live authorization. Qualification
+            # transcripts remain audit artifacts after atomic promotion.
+            layout.rung_qualification_path(
+                release_id,
+                str(canary["canary_nonce"]),
+            ).unlink()
+            self.assertEqual(
+                [item["rung"] for item in installer.status()["qualified_rungs"]],
+                ["direct"],
+            )
+
+            # The active pointer is the commit point.  If its per-release
+            # rollback archive cannot be written afterward, activation remains
+            # a reported success with an explicit degraded-history result.
+            with mock.patch.object(
+                installer,
+                "_write_profile_activation_history",
+                side_effect=OSError(
+                    "synthetic activation history failure"
+                ),
+            ):
+                activated = installer.activate_profile(profile.digest())
+            self.assertEqual(
+                (activated.release_id, activated.operation, activated.changed),
+                (release_id, "activate-profile", True),
+            )
+            self.assertEqual(
+                installer.profile_transition,
+                {
+                    "status": "activated-history-degraded",
+                    "release_id": release_id,
+                    "reason_code": "release_profile_history_write_failed",
+                },
+            )
+            activation = load_activation_record(
+                layout.active_profile,
+                expected_uid=layout.root_uid,
+                expected_gid=layout.root_gid,
+            )
+            activation.validate_profile(profile)
+            expected_activation = ActivationRecord.from_profile(
+                profile,
+                activated_unix_ns=activation.activated_unix_ns,
+            )
+            self.assertEqual(activation, expected_activation)
+            self.assertFalse(
+                layout.profile_activation_history_path(release_id).exists()
+            )
+
+            catalog = installer._read_qualified_rung_catalog(release_id)
+            self.assertEqual([item["rung"] for item in catalog], ["direct"])
+            write_source(source, "v2")
+            next_release = installer.install().release_id
+            self.assertNotEqual(next_release, release_id)
+            archived_activation = load_activation_record(
+                layout.profile_activation_history_path(release_id),
+                expected_uid=layout.root_uid,
+                expected_gid=layout.root_gid,
+            )
+            self.assertEqual(archived_activation, activation)
+            self.assertEqual(installer.status()["qualified_rungs"], [])
+            next_profile, _next_grok = make_activation_profile(
+                base,
+                next_release,
+            )
+            write_content_addressed_profile(
+                layout.profile_root,
+                next_profile,
+                owner_uid=layout.target_uid,
+                owner_gid=layout.target_gid,
+            )
+            complete_release_qualification(installer, next_release)
+            installer.begin_rung_canary(
+                release_id=next_release,
+                rung="direct",
+                profile_sha256=next_profile.digest(),
+            )
+            with mock.patch.object(
+                installer,
+                "_run_qualification_verifier",
+                side_effect=lambda **kw: fixed_qualification_smoke(
+                    installer,
+                    str(kw["step"]),
+                    rung_qualification_sha256=(
+                        next_profile.contract.rung_qualification_digest("direct")
+                    ),
+                ),
+            ):
+                installer.qualification_exec("real-pair")
+            installer.promote_rung()
+            installer.activate_profile(next_profile.digest())
+            self.assertEqual(
+                load_activation_record(
+                    layout.active_profile,
+                    expected_uid=layout.root_uid,
+                    expected_gid=layout.root_gid,
+                ).release_id,
+                next_release,
+            )
+            real_writer = release_installer.write_activation_record
+
+            def restore_then_report_uncertain(path: Path, *args, **kwargs) -> None:
+                real_writer(path, *args, **kwargs)
+                if path == layout.active_profile:
+                    raise ActivationCommitUncertain(
+                        "synthetic rollback pointer durability uncertainty"
+                    )
+
+            with mock.patch.object(
+                release_installer,
+                "write_activation_record",
+                side_effect=restore_then_report_uncertain,
+            ):
+                rolled_back = installer.rollback(release_id)
+            self.assertEqual(rolled_back.release_id, release_id)
+            self.assertEqual(
+                [item["rung"] for item in installer.status()["qualified_rungs"]],
+                ["direct"],
+            )
+            restored_activation = load_activation_record(
+                layout.active_profile,
+                expected_uid=layout.root_uid,
+                expected_gid=layout.root_gid,
+            )
+            self.assertEqual(restored_activation, activation)
+            restored_activation.validate_profile(profile)
+            self.assertEqual(
+                installer.profile_transition,
+                {
+                    "status": "restored-durability-uncertain",
+                    "release_id": release_id,
+                    "reason_code": "active_profile_directory_fsync_failed",
+                },
+            )
+
+            published = layout.active_profile.read_bytes()
+            grok.write_text("#!/usr/bin/env sh\nexit 9\n", encoding="ascii")
+            with self.assertRaisesRegex(
+                release_installer.ReleaseError,
+                "identity mismatch",
+            ):
+                installer.activate_profile(profile.digest())
+            self.assertEqual(layout.active_profile.read_bytes(), published)
+
+    def test_activation_reports_postrename_durability_uncertainty(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            installer, layout, _source = make_installer(base)
+            release_id = installer.install().release_id
+            profile, _grok = prepare_activatable_profile(
+                base,
+                installer,
+                layout,
+                release_id,
+            )
+            real_writer = release_installer.write_activation_record
+
+            def commit_then_report_uncertain(path: Path, *args, **kwargs) -> None:
+                real_writer(path, *args, **kwargs)
+                if path == layout.active_profile:
+                    raise ActivationCommitUncertain(
+                        "synthetic post-rename directory fsync uncertainty"
+                    )
+
+            with mock.patch.object(
+                release_installer,
+                "write_activation_record",
+                side_effect=commit_then_report_uncertain,
+            ):
+                activated = installer.activate_profile(profile.digest())
+            self.assertEqual(activated.operation, "activate-profile")
+            self.assertEqual(
+                installer.profile_transition,
+                {
+                    "status": "activated-durability-uncertain",
+                    "release_id": release_id,
+                    "reason_code": "active_profile_directory_fsync_failed",
+                },
+            )
+            load_activation_record(
+                layout.active_profile,
+                expected_uid=layout.root_uid,
+                expected_gid=layout.root_gid,
+            ).validate_profile(profile)
+
+    def test_rollback_rebuilds_missing_history_from_exact_dormant_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            installer, layout, source = make_installer(base)
+            release_id = installer.install().release_id
+            profile, _grok = prepare_activatable_profile(
+                base,
+                installer,
+                layout,
+                release_id,
+            )
+            installer.activate_profile(profile.digest())
+            history = layout.profile_activation_history_path(release_id)
+            self.assertTrue(history.exists())
+
+            write_source(source, "v2")
+            next_release = installer.install().release_id
+            self.assertNotEqual(next_release, release_id)
+            self.assertEqual(
+                load_activation_record(
+                    layout.active_profile,
+                    expected_uid=layout.root_uid,
+                    expected_gid=layout.root_gid,
+                ).release_id,
+                release_id,
+            )
+            history.unlink()
+
+            installer.rollback(release_id)
+            self.assertEqual(
+                installer.profile_transition,
+                {
+                    "status": "restored",
+                    "release_id": release_id,
+                    "reason_code": None,
+                },
+            )
+            restored = load_activation_record(
+                layout.active_profile,
+                expected_uid=layout.root_uid,
+                expected_gid=layout.root_gid,
+            )
+            restored.validate_profile(profile)
+            self.assertEqual(
+                load_activation_record(
+                    history,
+                    expected_uid=layout.root_uid,
+                    expected_gid=layout.root_gid,
+                ),
+                restored,
+            )
+            with mock.patch.object(
+                installer,
+                "_write_profile_activation_history",
+                side_effect=OSError("synthetic restored history failure"),
+            ):
+                installer._restore_profile_activation(release_id)
+            self.assertEqual(
+                installer.profile_transition,
+                {
+                    "status": "restored-history-degraded",
+                    "release_id": release_id,
+                    "reason_code": "release_profile_history_write_failed",
+                },
+            )
+
     def test_rung_promotion_is_exact_and_unqualified_rungs_remain_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -4829,7 +6215,7 @@ os._exit(0)
             self.assertEqual(len(selected["qualified_rungs"]), 1)
             record = selected["qualified_rungs"][0]
             self.assertEqual(record["rung"], "direct")
-            self.assertEqual(record["contract_sha256"], contract)
+            self.assertEqual(record["contract_sha256"], "b" * 64)
             self.assertTrue(
                 layout.rung_evidence_path(
                     release_id, record["evidence_sha256"]
@@ -4843,8 +6229,11 @@ os._exit(0)
                 evidence["schema_version"],
                 release_installer.RUNG_EVIDENCE_SCHEMA_VERSION,
             )
-            self.assertEqual(evidence["schema_version"], 6)
+            self.assertEqual(evidence["schema_version"], 9)
+            self.assertEqual(evidence["contract_sha256"], contract)
+            self.assertEqual(evidence["rung_qualification_sha256"], "b" * 64)
             self.assertEqual(evidence["model_id"], model_id)
+            self.assertIsNone(evidence["qualification_profile_sha256"])
             self.assertNotIn("transcript_sha256s", evidence)
             self.assertIn(
                 "post_repair_reconnect_cache_execution_units_verified",
@@ -4855,7 +6244,7 @@ os._exit(0)
                 evidence["measurements"],
             )
             legacy_evidence = json.loads(json.dumps(evidence))
-            legacy_evidence["schema_version"] = 5
+            legacy_evidence["schema_version"] = 7
             legacy_evidence["measurements"][
                 "post_repair_reconnect_cache_leader_verified"
             ] = (
@@ -4871,16 +6260,22 @@ os._exit(0)
                     release_id,
                     legacy_evidence,
                 )
-            self.assertEqual(invoke(layout.entrypoint).returncode, 0)
+            admitted_selection = invoke(layout.entrypoint)
+            self.assertEqual(
+                admitted_selection.returncode, 0, admitted_selection.stderr
+            )
 
             real_pair = layout.rung_qualification_path(
                 release_id, str(current["canary_nonce"])
             )
             real_pair_bytes = real_pair.read_bytes()
             real_pair.unlink()
-            rejected = invoke(layout.entrypoint)
-            self.assertEqual(rejected.returncode, 78, rejected.stderr)
-            self.assertIn("qualification", rejected.stderr)
+            admitted_without_audit_transcript = invoke(layout.entrypoint)
+            self.assertEqual(
+                admitted_without_audit_transcript.returncode,
+                0,
+                admitted_without_audit_transcript.stderr,
+            )
             release_installer._exclusive_write(
                 real_pair,
                 real_pair_bytes,
@@ -4890,9 +6285,8 @@ os._exit(0)
                 parent_mode=0o755,
             )
 
-            # Simulate a coherently rehashed record from a buggy older root
-            # installer: the generated gate must still reject false semantic
-            # observations, not merely trust filenames and digests.
+            # Promotion already proved these audit artifacts. Runtime uses the
+            # content-addressed terminal attestation as its live authority.
             invalid_real = json.loads(real_pair_bytes)
             invalid_real["observations"]["sessions_completed"] = 1
             invalid_real_raw = release_installer._canonical_json(invalid_real) + b"\n"
@@ -4904,47 +6298,34 @@ os._exit(0)
                 gid=layout.root_gid,
                 parent_mode=0o755,
             )
-            invalid_real_sha = hashlib.sha256(invalid_real_raw).hexdigest()
-            invalid_evidence = dict(evidence)
-            invalid_evidence["real_pair_result_sha256"] = invalid_real_sha
-            invalid_evidence["measurements"] = dict(evidence["measurements"])
-            invalid_evidence["measurements"]["result_sha256"] = hashlib.sha256(
-                release_installer._canonical_json(
-                    {
-                        "release_qualification_sha256": evidence[
-                            "release_qualification_sha256"
-                        ],
-                        "real_pair_result_sha256": invalid_real_sha,
-                    }
-                )
-                + b"\n"
-            ).hexdigest()
-            invalid_evidence_raw = (
-                release_installer._canonical_json(invalid_evidence) + b"\n"
+            admitted_with_changed_audit_transcript = invoke(layout.entrypoint)
+            self.assertEqual(
+                admitted_with_changed_audit_transcript.returncode,
+                0,
+                admitted_with_changed_audit_transcript.stderr,
             )
-            invalid_evidence_sha = hashlib.sha256(invalid_evidence_raw).hexdigest()
-            release_installer._exclusive_write(
-                layout.rung_evidence_path(release_id, invalid_evidence_sha),
-                invalid_evidence_raw,
-                mode=0o444,
-                uid=layout.root_uid,
-                gid=layout.root_gid,
-                parent_mode=0o755,
+
+            terminal_evidence = layout.rung_evidence_path(
+                release_id,
+                record["evidence_sha256"],
             )
-            invalid_record = {**record, "evidence_sha256": invalid_evidence_sha}
-            with mock.patch.object(installer, "_selection_is_exact", return_value=True):
-                installer._publish_selection(
-                    release_id,
-                    str(selected["operation"]),
-                    evidence_sha256=str(selected["evidence_sha256"]),
-                    selection_phase="READY",
-                    fault_at=None,
-                    selector_faults=False,
-                    qualified_rungs=[invalid_record],
+            held_terminal_evidence = terminal_evidence.with_suffix(".json.held")
+            terminal_evidence.rename(held_terminal_evidence)
+            try:
+                self.assertTrue(installer._selection_is_exact(release_id))
+                self.assertEqual(installer.status()["qualified_rungs"], [])
+                requalification = installer.begin_rung_canary(
+                    release_id=release_id,
+                    rung="direct",
+                    route_profile="direct",
+                    contract_sha256=contract,
+                    grok_release_id=grok_release,
+                    model_id=model_id,
                 )
-            gate_rejected = invoke(layout.entrypoint)
-            self.assertEqual(gate_rejected.returncode, 78, gate_rejected.stderr)
-            self.assertIn("observations", gate_rejected.stderr)
+                self.assertTrue(requalification.changed)
+                installer.abort_restore(release_id)
+            finally:
+                held_terminal_evidence.rename(terminal_evidence)
 
     def test_rung_canary_nonce_replay_and_crash_pending_execution_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -4959,6 +6340,7 @@ os._exit(0)
                 route_profile="direct",
                 contract_sha256=contract,
                 grok_release_id=grok_release,
+                model_id="vendor/model-1",
             )
             first_nonce = installer._read_rung_canary()["canary_nonce"]
             installer.canary_exec(("first",))
@@ -5202,6 +6584,7 @@ os._exit(0)
                 route_profile="direct",
                 contract_sha256=contract,
                 grok_release_id=grok_release,
+                model_id="vendor/model-1",
             )
             first_nonce = installer._read_rung_canary()["canary_nonce"]
             installer.canary_exec(("first",))
@@ -5221,6 +6604,7 @@ os._exit(0)
                 route_profile="direct",
                 contract_sha256=contract,
                 grok_release_id=grok_release,
+                model_id="vendor/model-1",
             )
             second_nonce = installer._read_rung_canary()["canary_nonce"]
             self.assertNotEqual(first_nonce, second_nonce)
@@ -5235,6 +6619,7 @@ os._exit(0)
                 route_profile="direct",
                 contract_sha256=contract,
                 grok_release_id=grok_release,
+                model_id="vendor/model-1",
             )
             with mock.patch.object(
                 release_installer.subprocess,
@@ -5261,6 +6646,7 @@ os._exit(0)
                 route_profile="direct",
                 contract_sha256=contract,
                 grok_release_id=grok_release,
+                model_id="vendor/model-1",
             )
             partial_record = layout.rung_transcript_dir(
                 release_id,
@@ -5290,6 +6676,7 @@ os._exit(0)
                 route_profile="direct",
                 contract_sha256=contract,
                 grok_release_id=grok_release,
+                model_id="vendor/model-1",
             )
             failed_process = subprocess.Popen(
                 ["/bin/sh", "-c", "exit 42"],
@@ -5339,6 +6726,7 @@ os._exit(0)
                 route_profile="direct",
                 contract_sha256="a" * 64,
                 grok_release_id="grok-build-v1",
+                model_id="vendor/model-1",
             )
             worker = os.fork()
             if worker == 0:
@@ -5401,7 +6789,19 @@ os._exit(0)
                 gid=layout.root_gid,
                 parent_mode=0o755,
             )
-            self.assertEqual(invoke(layout.entrypoint).returncode, 0)
+            compatibility = subprocess.run(
+                [str(layout.entrypoint)],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+                env={**os.environ, "GROK_MULTI_SESSION": "0"},
+            )
+            self.assertEqual(
+                compatibility.returncode,
+                0,
+                compatibility.stderr,
+            )
             feature_on = subprocess.run(
                 [str(layout.entrypoint)],
                 text=True,
@@ -5655,6 +7055,7 @@ os._exit(0)
                 root_state_root=base / "root/var/lib/grok-proxy/release-control",
                 state_root=home / ".local/state/grok-proxy/release-control",
                 entrypoint=home / ".local/bin/grok-remote",
+                test_install=True,
             )
             installer = release_installer.ReleaseInstaller(
                 layout,
@@ -5683,7 +7084,19 @@ os._exit(0)
 
     def test_rollback_gates_bind_the_target_release_root_helper_map(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            installer_a, layout, source = make_installer(Path(td))
+            base = Path(td)
+            fixture, _boot_id, _pid = write_proc_fixture(base / "fixture-prefix")
+            descriptor = os.open(
+                fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            )
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            self.addCleanup(authority.close)
+            installer_a, layout, source = make_installer(
+                base / "install", proc_authority=authority
+            )
             alternate = source / "vpn-broker.py"
             alternate_map = {**ROOT_FILES, "broker": "vpn-broker.py"}
             alternate.write_text(
@@ -5714,6 +7127,7 @@ os._exit(0)
                 layout,
                 runtime_files=runtime_files,
                 root_files=ROOT_FILES,
+                proc_authority=authority,
             )
             release_a = installer_a.install().release_id
 
@@ -5721,6 +7135,7 @@ os._exit(0)
                 layout,
                 runtime_files=runtime_files,
                 root_files=alternate_map,
+                proc_authority=authority,
             )
             release_b = installer_b.install().release_id
             self.assertNotEqual(release_a, release_b)
@@ -5735,7 +7150,11 @@ os._exit(0)
                 (layout.root_releases / release_a / "release.json").read_text()
             )
             self.assertEqual(
-                {entry["role"]: entry["path"] for entry in root_manifest["files"]},
+                {
+                    entry["role"]: entry["path"]
+                    for entry in root_manifest["files"]
+                    if "role" in entry
+                },
                 ROOT_FILES,
             )
 
@@ -6168,6 +7587,13 @@ os._exit(0)
             openvpn = base / "openvpn"
             openvpn.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
             openvpn.chmod(0o700)
+            fixture, _boot_id, _pid = write_proc_fixture(prefix)
+            proc_fd = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            self.addCleanup(os.close, proc_fd)
+            proc_environment = {
+                **os.environ,
+                release_installer._PREFIX_PROC_FD_ENV: str(proc_fd),
+            }
             write_default_source(source, "v1")
             common = [
                 sys.executable,
@@ -6187,6 +7613,8 @@ os._exit(0)
                 capture_output=True,
                 timeout=20,
                 check=False,
+                env=proc_environment,
+                pass_fds=(proc_fd,),
             )
             self.assertEqual(first.returncode, 0, first.stderr)
             old_id = json.loads(first.stdout)["release_id"]
@@ -6203,6 +7631,8 @@ os._exit(0)
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=proc_environment,
+                pass_fds=(proc_fd,),
             )
             deny = prefix / "var/lib/grok-proxy/release-control/rollback-deny.json"
             deadline = time.monotonic() + 10
@@ -6222,6 +7652,8 @@ os._exit(0)
                 capture_output=True,
                 timeout=30,
                 check=False,
+                env=proc_environment,
+                pass_fds=(proc_fd,),
             )
             self.assertEqual(resumed.returncode, 0, resumed.stderr)
             new_id = json.loads(resumed.stdout)["release_id"]
@@ -6238,6 +7670,8 @@ os._exit(0)
                 capture_output=True,
                 timeout=30,
                 check=False,
+                env=proc_environment,
+                pass_fds=(proc_fd,),
             )
             self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
             self.assertFalse(deny.exists())
@@ -6341,6 +7775,7 @@ os._exit(0)
                 target_gid=target_gid,
                 root_uid=0,
                 root_gid=0,
+                test_install=True,
             )
             installer = release_installer.ReleaseInstaller(
                 layout,
@@ -6390,6 +7825,44 @@ os._exit(0)
             )
             self.assertEqual(execution.returncode, 0, execution.stderr)
             self.assertIn("grok-remote:v1:--ownership-check", execution.stdout)
+
+            profile, grok = make_activation_profile(base, release_id)
+            os.chown(grok, target_uid, target_gid)
+            write_content_addressed_profile(
+                layout.profile_root,
+                profile,
+                owner_uid=target_uid,
+                owner_gid=target_gid,
+            )
+            complete_release_qualification(installer, release_id)
+            installer.begin_rung_canary(
+                release_id=release_id,
+                rung="direct",
+                route_profile="direct",
+                contract_sha256=profile.contract.digest(),
+                grok_release_id=profile.grok_release_id,
+                model_id=profile.contract.model_id,
+            )
+            projection = profile.contract.rung_qualification_digest("direct")
+            with mock.patch.object(
+                installer,
+                "_run_qualification_verifier",
+                side_effect=lambda **kw: fixed_qualification_smoke(
+                    installer,
+                    str(kw["step"]),
+                    rung_qualification_sha256=projection,
+                ),
+            ):
+                installer.qualification_exec("real-pair")
+            installer.promote_rung()
+            activated = installer.activate_profile(profile.digest())
+            self.assertEqual(activated.operation, "activate-profile")
+            self.assertEqual(grok.stat().st_uid, target_uid)
+            load_activation_record(
+                layout.active_profile,
+                expected_uid=0,
+                expected_gid=0,
+            ).validate_profile(profile)
 
             write_source(source, "v2")
             replacement = installer.install().release_id
@@ -6466,6 +7939,13 @@ os._exit(0)
             openvpn = base / "openvpn"
             openvpn.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
             openvpn.chmod(0o700)
+            fixture, _boot_id, _pid = write_proc_fixture(prefix)
+            proc_fd = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            self.addCleanup(os.close, proc_fd)
+            proc_environment = {
+                **os.environ,
+                release_installer._PREFIX_PROC_FD_ENV: str(proc_fd),
+            }
             write_default_source(source, "v1")
             common = [
                 sys.executable,
@@ -6485,11 +7965,16 @@ os._exit(0)
                 text=True,
                 capture_output=True,
                 check=False,
+                env=proc_environment,
+                pass_fds=(proc_fd,),
             )
             self.assertEqual(dry.returncode, 0, dry.stderr)
             dry_record = json.loads(dry.stdout)
             self.assertFalse(dry_record["applied"])
-            self.assertFalse(prefix.exists(), "dry run mutated the prefix")
+            self.assertFalse(
+                (prefix / "var/lib/grok-proxy").exists(),
+                "dry run mutated release state",
+            )
 
             first_installers = [
                 subprocess.Popen(
@@ -6497,6 +7982,8 @@ os._exit(0)
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    env=proc_environment,
+                    pass_fds=(proc_fd,),
                 )
                 for _ in range(2)
             ]
@@ -6518,6 +8005,8 @@ os._exit(0)
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    env=proc_environment,
+                    pass_fds=(proc_fd,),
                 )
                 for _ in range(2)
             ]
@@ -6539,6 +8028,8 @@ os._exit(0)
                 text=True,
                 capture_output=True,
                 check=False,
+                env=proc_environment,
+                pass_fds=(proc_fd,),
             )
             self.assertEqual(rollback_dry.returncode, 0, rollback_dry.stderr)
             self.assertIn("grok-remote:v2", invoke(entrypoint).stdout)
@@ -6550,15 +8041,22 @@ os._exit(0)
                 text=True,
                 capture_output=True,
                 check=False,
+                env=proc_environment,
+                pass_fds=(proc_fd,),
             )
             self.assertEqual(rollback.returncode, 0, rollback.stderr)
             self.assertIn("grok-remote:v1", invoke(entrypoint).stdout)
 
             status = subprocess.run(
-                [common[0], common[1], "status", *common[2:]],
+                [
+                    common[0], common[1], "status",
+                    *common[2:-2],
+                ],
                 text=True,
                 capture_output=True,
                 check=False,
+                env=proc_environment,
+                pass_fds=(proc_fd,),
             )
             self.assertEqual(status.returncode, 0, status.stderr)
             status_record = json.loads(status.stdout)
@@ -7159,7 +8657,7 @@ os._exit(0)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "vpn-broker:v1:status:evil=unset\n")
 
-    def test_user_gate_uses_fixed_bash_and_strips_test_and_shell_startup_environment(self) -> None:
+    def test_user_gate_uses_fixed_bash_and_bounds_test_and_startup_environment(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             installer, layout, source = make_installer(base)
@@ -7172,7 +8670,26 @@ if [[ "${GROK_RELEASE_CANARY_MODE:-0}" == 1 ]]; then
 fi
 /usr/bin/python3 - <<'PY'
 import os
-names = ("PATH", "GROK_TESTING", "GROK_TEST_FAULT", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")
+names = (
+    "PATH",
+    "GROK_TESTING",
+    "GROK_TEST_ROOT_RELEASE_CONTROL",
+    "GROK_TEST_CURL_BIN",
+    "GROK_TEST_IPHONE_STATE_DIR",
+    "GROK_TEST_SKIP_WARM_HANDOFF",
+    "GROK_TEST_FAULT",
+    "GROK_TEST_CONTROL_DIR",
+    "GROK_TEST_VPN_BROKER",
+    "GROK_BOOTSTRAP_PUBLISHER_TEST_MODE",
+    "GROK_BOOTSTRAP_PACKAGE_ACTIVATOR_TEST_MODE",
+    "GROK_LAUNCHER_TEST_CLOSE_RANGE_SYSCALL",
+    "GROK_RUN_ROOT_CGROUP_TEST",
+    "GROK_INSTALLER_INTERNAL_PROC_FD",
+    "BASH_ENV",
+    "ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
+)
 print("|".join(os.environ.get(name, "unset") for name in names))
 PY
 """,
@@ -7200,8 +8717,19 @@ PY
             environment.update(
                 {
                     "PATH": str(fake_bin),
-                    "GROK_TESTING": "1",
+                    "GROK_TESTING": "0",
+                    "GROK_TEST_ROOT_RELEASE_CONTROL": "/tmp/untrusted-control",
+                    "GROK_TEST_CURL_BIN": "/fixture/fake-curl",
+                    "GROK_TEST_IPHONE_STATE_DIR": "/fixture/iphone-state",
+                    "GROK_TEST_SKIP_WARM_HANDOFF": "1",
                     "GROK_TEST_FAULT": "injected",
+                    "GROK_TEST_CONTROL_DIR": "/tmp/untrusted-state",
+                    "GROK_TEST_VPN_BROKER": "/bin/false",
+                    "GROK_BOOTSTRAP_PUBLISHER_TEST_MODE": "1",
+                    "GROK_BOOTSTRAP_PACKAGE_ACTIVATOR_TEST_MODE": "1",
+                    "GROK_LAUNCHER_TEST_CLOSE_RANGE_SYSCALL": "999",
+                    "GROK_RUN_ROOT_CGROUP_TEST": "1",
+                    "GROK_INSTALLER_INTERNAL_PROC_FD": "99",
                     "BASH_ENV": str(startup),
                     "ENV": str(startup),
                     "SHELLOPTS": "xtrace",
@@ -7219,7 +8747,28 @@ PY
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 result.stdout,
-                "/usr/sbin:/usr/bin:/sbin:/bin|unset|unset|unset|unset|unset|unset\n",
+                "|".join(
+                    (
+                        "/usr/sbin:/usr/bin:/sbin:/bin",
+                        "1",
+                        str(layout.root_control),
+                        "/fixture/fake-curl",
+                        "/fixture/iphone-state",
+                        "1",
+                        "unset",
+                        "unset",
+                        "unset",
+                        "unset",
+                        "unset",
+                        "unset",
+                        "unset",
+                        "unset",
+                        "unset",
+                        "unset",
+                        "unset",
+                        "unset\n",
+                    )
+                ),
             )
             self.assertFalse(marker.exists())
 

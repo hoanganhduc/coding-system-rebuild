@@ -421,8 +421,8 @@ entries:
     root: grok-proxy
     match: ["README.md", "SPEC.md", "PLAN.md", "TASKS.md", "grok-remote", "egress.sh",
             "socks-netns.py", "sanitize.awk", "vpngate-connect.sh", "vpn-broker",
-            "install-release.py", "grok_ms", "dist", "tests"]
-    exclude: ["**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**"]
+            "install-release.py", "bootstrap", "grok_ms", "dist", "tests"]
+    exclude: ["bootstrap/build", "bootstrap/build/**", "**/__pycache__", "**/__pycache__/**", "**/*.pyc", "**/.pytest_cache", "**/.pytest_cache/**"]
     class: public-copy
     dest_dir: system/grok-proxy
     authoritative: true
@@ -447,24 +447,26 @@ entries:
 
   - id: grokproxy-exclude
     root: grok-proxy
-    match: [".tunnel.*", ".egress.state", ".egress.recovery-required", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-remote.lock", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", ".grok-source-restore*", ".planning", ".learnings", "__pycache__"]
+    match: [".tunnel.*", ".egress.state", ".egress.recovery-required", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-remote.lock", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", ".grok-source-restore*", ".planning", ".learnings", "bootstrap/build", "bootstrap/build/**", "__pycache__", "**/__pycache__", "**/__pycache__/**", "**/.pytest_cache", "**/.pytest_cache/**", "**/*.pyc"]
     class: exclude-generated
     note: SSH control sockets + tunnel/leader runtime state + per-run egress/model cache (regenerated); local planning/learning ledgers remain outside the public mirror
 
   - id: grokproxy-iphone-private
     root: .local/state/grok-proxy/iphone
-    match: ["tailscaled.state", "exit-node"]
+    match: ["tailscaled.state", "exit-node", "devices.json"]
     class: private-archive
     note: >
       Persistent identity of the isolated userspace Tailscale sidecar plus the
-      selected phone node. The state contains node credentials and the selector
-      exposes private tailnet topology; both belong only in the encrypted archive.
+      ordered iOS exit-node registry. The state contains node credentials and the
+      stable IDs expose private tailnet topology; all belong only in the encrypted
+      archive.
 
   - id: grokproxy-iphone-exclude
     root: .local/state/grok-proxy/iphone
     match: ["tailscaled.sock", "tailscaled.pid", "tailscaled.log", "ready", "*"]
+    exclude: ["tailscaled.state", "exit-node", "devices.json"]
     class: exclude-generated
     note: >
       LocalAPI socket, process/log state, and live-readiness marker are regenerated.
-      After restore, rerun grok-remote iphone-setup to revalidate the phone before
-      the rung is admitted to the normal ladder.
+      Registered devices survive restore through devices.json; live availability
+      is revalidated on use, without rerunning iphone-setup.

@@ -1,0 +1,186 @@
+{
+  "schema_version": "grok-bootstrap-package.v1",
+  "package_name": "grok-bootstrap",
+  "artifacts": {
+    "payload_root": "/usr/lib/grok-bootstrap-package",
+    "payload_root_owner": 0,
+    "payload_root_group": 0,
+    "payload_root_mode": "0555",
+    "closed_payload": {
+      "grok-bootstrap": {"build": "build/grok-bootstrap", "mode": "0555", "link_count": 1},
+      "grok-bootstrap-publisher.py": {"build": "build/grok-bootstrap-publisher.py", "mode": "0444", "link_count": 1},
+      "grok-bootstrap-publisher": {"build": "build/grok-bootstrap-publisher", "mode": "0555", "link_count": 1, "format": "freestanding static host-ABI ELF", "argument_contract": "fixed isolated-Python prefix plus at most 64 forwarded administrative arguments"}
+    },
+    "activator_root": "/usr/libexec/grok-bootstrap-package",
+    "activator_root_owner": 0,
+    "activator_root_group": 0,
+    "activator_root_mode": "0555",
+    "closed_activator": {
+      "activate_package.py": {"build": "build/activate_package.py", "mode": "0444", "link_count": 1},
+      "grok-bootstrap-package-activate": {"build": "build/grok-bootstrap-package-activate", "mode": "0555", "link_count": 1, "format": "freestanding static host-ABI ELF", "argument_contract": "fixed isolated-Python activator vector; no caller arguments forwarded"}
+    }
+  },
+  "sources": [
+    "bootstrap.c",
+    "publish_signed_application.py",
+    "activate_package.py",
+    "isolated_python_launcher.c"
+  ],
+  "supported_launcher_architectures": ["x86_64", "aarch64"],
+  "build_system": "make",
+  "build_requires": [
+    "c11-compiler",
+    "binutils-readelf-and-nm",
+    "pkg-config",
+    "openssl-libcrypto>=3.0"
+  ],
+  "required_build_parameters": {
+    "KEY_ID": "production Ed25519 key identifier matching [A-Za-z0-9._-]{1,64}",
+    "PUBLIC_KEY_HEX": "raw 32-byte production Ed25519 public key as 64 lowercase hex characters"
+  },
+  "forbidden_inputs": [
+    "production private signing key",
+    "GROK_BOOTSTRAP_TEST_BUILD",
+    "GROK_LAUNCHER_TEST_CLOSE_RANGE_SYSCALL"
+  ],
+  "install": {
+    "path": "/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap",
+    "owner": 0,
+    "group": 0,
+    "mode": "0555"
+  },
+  "package_transaction": {
+    "activation_command": "/usr/libexec/grok-bootstrap-package/grok-bootstrap-package-activate",
+    "activation_arguments": [],
+    "closed_activation_environment": "freestanding raw-syscall launcher directly execve()s /usr/bin/python3 -I -B -S with fixed script and newly constructed exact PATH, locale, and bytecode envp",
+    "launcher_elf_gate": "host machine must be x86_64 or AArch64; ELF has no PT_INTERP, PT_DYNAMIC, DT_NEEDED, or undefined symbols",
+    "launcher_closes_inherited_descriptors_above_stderr": true,
+    "launcher_close_range_failure": "fail closed before Python with exit 126",
+    "launcher_has_no_libc_startup": true,
+    "make_is_never_invoked_as_root": true,
+    "make_preparse_reason": "GNU Make processes MAKEFLAGS, MAKEFILES, includes, and evaluations before a recipe can establish a privilege boundary",
+    "package_manager_pre_execution_requirement": "one authenticated five-file generation is installed; activator and payload ancestry is root-owned and non-group-or-other-writable; both roots and every file have the exact ownership, mode, type, link count, architecture, and static-ELF contract declared above before the current launcher is executed",
+    "current_launcher_execution_authority": "administrative package signature plus package-manager pre-execution validation; Python revalidation protects subsequent use after the current launcher has already executed",
+    "bootstrap_lock": "/usr/local/libexec/grok-proxy/bootstrap/update.lock held LOCK_EX",
+    "release_operation_lock": "/var/lib/grok-proxy/release-control/operation.lock held LOCK_SH",
+    "pending_marker": "/usr/local/libexec/grok-proxy/bootstrap/package-update.pending",
+    "support_files_activate_before_native_verifier": true,
+    "native_verifier_activates_last": true,
+    "consumers_fail_closed_while_pending": true,
+    "same_target_rerun_reconciles_or_completes_pending_update": true,
+    "pending_marker_content": "canonical JSON binding the exact trust anchor, every payload artifact mode, size, SHA-256 digest, and their canonical generation ID",
+    "different_same_key_generation_while_pending_fails_closed": true,
+    "pending_marker_removed_only_after_component_and_directory_fsync": true,
+    "directory_modes_independent_of_inherited_umask": true,
+    "failure_injection_requires_explicit_destdir_test_mode": true,
+    "production_launcher_forwards_arguments": false,
+    "production_launcher_can_reach_test_controls": false
+  },
+  "trust_anchor_introspection": {
+    "binary_path": "/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap",
+    "report_option": "--describe-trust-anchor",
+    "content": "canonical key id and raw Ed25519 public key reported directly from the compiled verifier",
+    "publisher_query_lock": "existing bootstrap/update.lock held LOCK_EX",
+    "separate_mutable_trust_metadata": false
+  },
+  "administrative_publisher": {
+    "path": "/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap-publisher",
+    "implementation_path": "/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap-publisher.py",
+    "owner": 0,
+    "group": 0,
+    "mode": "0555",
+    "root_only": true,
+    "candidate_installer_invokes_publisher": false,
+    "release_control_operation_lock": "/var/lib/grok-proxy/release-control/operation.lock",
+    "operation_lock_owner": 0,
+    "operation_lock_group": 0,
+    "operation_lock_mode": "0600",
+    "operation_lock_inode_must_never_be_replaced_or_truncated": true,
+    "signed_input_path": "absolute root-owned directory with root-owned, non-group-or-other-writable, no-symlink ancestry from /",
+    "signed_input_contains_private_key": false,
+    "closed_launcher": "freestanding static host-ABI no-interpreter ELF directly execve()s fixed /usr/bin/python3 -I -B -S prefix with exact envp and forwards at most 64 arguments",
+    "selector_compare_and_swap": "publish and reselect require exact --expected-current",
+    "selector_audit_root": "/usr/local/libexec/grok-proxy/bootstrap/selector-audit",
+    "retains_all_published_signed_applications": true
+  },
+  "signed_application_store": {
+    "root": "/usr/local/libexec/grok-proxy/bootstrap-releases",
+    "directory_name": "64-lowercase-hex manifest release_id",
+    "root_owner": 0,
+    "root_group": 0,
+    "root_mode": "0755",
+    "release_owner": 0,
+    "release_group": 0,
+    "release_directory_mode": "0555",
+    "artifact_mode": "0444",
+    "reserved_runtime_release_root": "/usr/local/libexec/grok-proxy/releases",
+    "namespaces_must_remain_disjoint": true
+  },
+  "selector": {
+    "path": "/usr/local/libexec/grok-proxy/bootstrap/selected-release",
+    "type": "regular",
+    "owner": 0,
+    "group": 0,
+    "mode": "0444",
+    "link_count": 1,
+    "content": "exactly 64 lowercase hex signed-application id bytes plus newline",
+    "target_root": "/usr/local/libexec/grok-proxy/bootstrap-releases",
+    "publication_owner": "administrative package/update transaction",
+    "native_enforcement": "requested signed-application id must equal the fixed selector before verification and at the final exec boundary",
+    "caller_validation_is_defense_in_depth": true,
+    "transaction_lock": {
+      "anchor": "/usr/local/libexec/grok-proxy/bootstrap/update.lock",
+      "type": "regular",
+      "owner": 0,
+      "group": 0,
+      "mode": "0600",
+      "link_count": 1,
+      "size": 0,
+      "native_verifier": "LOCK_SH acquired before first selector read and retained until successful execve closes the CLOEXEC descriptor",
+      "administrative_publisher": "LOCK_EX held across complete signed-application publication, selector rename, and durability fsyncs",
+      "anchor_inode_must_never_be_replaced_or_truncated": true
+    }
+  },
+  "dispatcher_staging": {
+    "stager": "stage_dispatcher.py",
+    "signed_entrypoint_source": "dispatcher_main.py",
+    "closed_inputs": "installer-declared top-level runtime files, exactly one broker, and admitted grok_ms Python modules",
+    "runtime_extraction_parent": "/run",
+    "runtime_extraction_owner": 0,
+    "runtime_extraction_group": 0,
+    "runtime_extraction_mode": "0700",
+    "bootstrap_source": "the extracted signed directory",
+    "mutable_authoring_source_fallback": false,
+    "bootstrap_lane_authority": "root-owned sealed anonymous dispatcher memfd inherited only from the native verifier and consumed before source discovery"
+  },
+  "target_identity": {
+    "native_invocation_uid": 0,
+    "native_loader_boundary": "production native execution is admitted only through fixed setuid sudo secure execution (AT_SECURE) or as a child of an already environment-isolated activator/publisher process; direct already-root invocation with hostile loader environment is unsupported",
+    "root_invocation_requires": "canonical nonzero SUDO_UID resolving to a non-root passwd account with a nonempty absolute home other than /",
+    "forwarded_environment": [
+      "PATH=/usr/bin:/bin",
+      "LANG=C",
+      "LC_ALL=C",
+      "PYTHONDONTWRITEBYTECODE=1",
+      "GROK_BOOTSTRAP_AUTHORITY_FD=<root-owned sealed dispatcher memfd descriptor>",
+      "SUDO_UID=<validated canonical value, root invocation only>"
+    ],
+    "forbidden_forwarding": [
+      "SUDO_USER",
+      "SUDO_GID",
+      "HOME",
+      "PYTHONPATH",
+      "all other caller environment"
+    ],
+    "missing_or_invalid_root_identity_is_fatal": true
+  },
+  "package_requirements": {
+    "administrative_signature_required": true,
+    "publisher_and_installer_share_preserved_operation_lock": true,
+    "candidate_source_must_not_install_or_replace_trust_anchor": true,
+    "in_place_key_rotation_supported": false,
+    "existing_anchor_mismatch_is_fatal": true,
+    "future_rotation_requires": "an explicit bounded multi-key or new signed-application-ID migration that preserves retained rollback applications",
+    "missing_or_invalid_trust_anchor_is_fatal": true
+  }
+}

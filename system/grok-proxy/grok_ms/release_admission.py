@@ -23,6 +23,13 @@ class AdmissionError(RuntimeError):
     pass
 
 
+class ManagedDoctorBlocked(AdmissionError):
+    """Core release identity admitted, but doctor must report evidence blocked."""
+
+
+MANAGED_DOCTOR_BLOCKED_EXIT = 79
+
+
 _RID = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9._:+@-]{1,256}$")
 _BOOT = re.compile(
@@ -228,6 +235,89 @@ def _manifest_file(
         raise AdmissionError(f"release manifest digest differs for {relative}")
 
 
+def _validate_selected_release_evidence(
+    control: Path,
+    release_id: str,
+    root_uid: int,
+    root_gid: int,
+    selection: Mapping[str, Any],
+) -> None:
+    evidence_digest = selection.get("evidence_sha256")
+    if (
+        not isinstance(evidence_digest, str)
+        or _RID.fullmatch(evidence_digest) is None
+        or evidence_digest == _ZERO
+    ):
+        raise AdmissionError("selected release lacks final evidence")
+    evidence, evidence_raw = _json(
+        control / "evidence" / f"{release_id}.json", root_uid, root_gid, 0o444
+    )
+    if (
+        hashlib.sha256(evidence_raw).hexdigest() != evidence_digest
+        or evidence.get("schema_version") != 3
+        or evidence.get("release_id") != release_id
+        or evidence.get("overall_pass") is not True
+        or evidence.get("user_manifest_sha256")
+        != selection.get("user_manifest_sha256")
+        or evidence.get("root_manifest_sha256")
+        != selection.get("root_manifest_sha256")
+        or evidence.get("root_files") != selection.get("root_files")
+    ):
+        raise AdmissionError("selected release evidence is invalid")
+
+
+def _host_id() -> str:
+    try:
+        raw = Path("/etc/machine-id").read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as exc:
+        raise AdmissionError("cannot read host identity") from exc
+    if re.fullmatch(r"[0-9a-f]{32}", raw) is None:
+        raise AdmissionError("host machine identity is invalid")
+    return hashlib.sha256(raw.encode("ascii")).hexdigest()
+
+
+def _validate_boot_inventory(
+    control: Path,
+    release_id: str,
+    root_uid: int,
+    root_gid: int,
+) -> None:
+    inventory, _raw = _json(
+        control / "boot-inventory" / f"{release_id}.json",
+        root_uid,
+        root_gid,
+        0o444,
+    )
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="ascii"
+        ).strip()
+    except (OSError, UnicodeError) as exc:
+        raise AdmissionError("cannot read current boot identity") from exc
+    if _BOOT.fullmatch(boot_id) is None:
+        raise AdmissionError("current boot identity is invalid")
+    if (
+        set(inventory)
+        != {
+            "schema_version",
+            "release_id",
+            "host_id",
+            "boot_id",
+            "checked_unix_ns",
+            "inventory_sha256",
+        }
+        or inventory.get("schema_version") != 1
+        or inventory.get("release_id") != release_id
+        or inventory.get("host_id") != _host_id()
+        or inventory.get("boot_id") != boot_id
+        or type(inventory.get("checked_unix_ns")) is not int
+        or inventory.get("checked_unix_ns", 0) <= 0
+        or type(inventory.get("inventory_sha256")) is not str
+        or _RID.fullmatch(inventory["inventory_sha256"]) is None
+    ):
+        raise AdmissionError("current-boot root inventory is invalid")
+
+
 def validate(
     release_dir: Path,
     executable: Path,
@@ -237,9 +327,12 @@ def validate(
     canary_fd: int | None = None,
     public_recovery: bool = False,
     provider_recovery: bool = False,
+    managed_doctor: bool = False,
 ) -> str:
     if provider_recovery and not public_recovery:
         raise AdmissionError("provider recovery requires public recovery admission")
+    if managed_doctor and (canary_fd is not None or public_recovery):
+        raise AdmissionError("managed doctor admission cannot combine with recovery/canary")
     control, root_uid, root_gid, test_install = _control(environment)
     if not test_install and any(
         name == "GROK_TESTING" or name.startswith("GROK_TEST_")
@@ -378,54 +471,25 @@ def validate(
         != hashlib.sha256(root_manifest_raw).hexdigest()
     ):
         raise AdmissionError("selected release metadata is not READY and coherent")
-    evidence_digest = root_copy.get("evidence_sha256")
-    if (
-        not isinstance(evidence_digest, str)
-        or _RID.fullmatch(evidence_digest) is None
-        or evidence_digest == _ZERO
-    ):
-        raise AdmissionError("selected release lacks final evidence")
-    evidence, evidence_raw = _json(
-        control / "evidence" / f"{release_id}.json", root_uid, root_gid, 0o444
-    )
-    if (
-        hashlib.sha256(evidence_raw).hexdigest() != evidence_digest
-        or evidence.get("schema_version") != 3
-        or evidence.get("release_id") != release_id
-        or evidence.get("overall_pass") is not True
-        or evidence.get("user_manifest_sha256")
-        != root_copy.get("user_manifest_sha256")
-        or evidence.get("root_manifest_sha256")
-        != root_copy.get("root_manifest_sha256")
-        or evidence.get("root_files") != root_copy.get("root_files")
-    ):
-        raise AdmissionError("selected release evidence is invalid")
+    try:
+        _validate_selected_release_evidence(
+            control,
+            release_id,
+            root_uid,
+            root_gid,
+            root_copy,
+        )
+    except (AdmissionError, OSError, ValueError) as exc:
+        if managed_doctor:
+            raise ManagedDoctorBlocked(
+                "selected release evidence is unavailable"
+            ) from exc
+        raise
     _selector(user_root / "current", root_uid, root_gid, release_id)
     _selector(root_root / "current", root_uid, root_gid, release_id)
 
-    if environment.get("GROK_MULTI_SESSION") == "1":
-        inventory, _raw = _json(
-            control / "boot-inventory" / f"{release_id}.json",
-            root_uid,
-            root_gid,
-            0o444,
-        )
-        try:
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
-                encoding="ascii"
-            ).strip()
-        except OSError as exc:
-            raise AdmissionError("cannot read current boot identity") from exc
-        if (
-            inventory.get("schema_version") != 1
-            or inventory.get("release_id") != release_id
-            or inventory.get("boot_id") != boot_id
-            or not isinstance(inventory.get("checked_unix_ns"), int)
-            or inventory.get("checked_unix_ns", 0) <= 0
-            or not isinstance(inventory.get("inventory_sha256"), str)
-            or _RID.fullmatch(inventory["inventory_sha256"]) is None
-        ):
-            raise AdmissionError("current-boot root inventory is invalid")
+    if environment.get("GROK_MULTI_SESSION") == "1" and not managed_doctor:
+        _validate_boot_inventory(control, release_id, root_uid, root_gid)
 
     if (control / "rollback-deny.json").exists() or (
         control / "rollback-deny.json"
@@ -438,6 +502,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--public-recovery", action="store_true")
     parser.add_argument("--provider-recovery", action="store_true")
+    parser.add_argument("--managed-doctor", action="store_true")
     parser.add_argument("release_dir")
     parser.add_argument("executable")
     parser.add_argument("lock_fd", type=int)
@@ -452,7 +517,10 @@ def main() -> int:
             canary_fd=args.canary_fd,
             public_recovery=args.public_recovery,
             provider_recovery=args.provider_recovery,
+            managed_doctor=args.managed_doctor,
         )
+    except ManagedDoctorBlocked:
+        return MANAGED_DOCTOR_BLOCKED_EXIT
     except (AdmissionError, OSError, ValueError) as exc:
         print(f"release admission failed: {exc}", file=os.sys.stderr)
         return 78

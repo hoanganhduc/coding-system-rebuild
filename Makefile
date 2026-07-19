@@ -81,6 +81,7 @@ test: ## self-tests: canary scan + field-set guard + rotation units + grok-proxy
 	@bash tests/leak_scan_selftest.sh
 	@bash tests/field_set_sync.sh
 	@bash tests/rotation_unit.sh
+	@python3 -B tests/test_aas_component.py
 	@python3 tests/test_stage_backup.py
 	@bash system/grok-proxy/tests/run.sh
 	@bash bin/test-roundtrip.sh

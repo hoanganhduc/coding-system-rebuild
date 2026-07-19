@@ -23,6 +23,7 @@ from grok_ms.config import (
     resolve_model,
 )
 from grok_ms.contract import RouteMode
+from grok_ms.ios_registry import IosDevice, IosRegistry, write_registry
 from grok_ms.grok_exec import (  # noqa: E402
     GrokExecutableError,
     VerifiedGrokExecutable,
@@ -56,6 +57,75 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(direct.route_mode, RouteMode.DIRECT)
         with self.assertRaises(ConfigurationError):
             classify(["--direct", "--vpn"])
+        with self.assertRaisesRegex(ConfigurationError, "contradictory"):
+            classify(["--direct", "--no-direct", "-m", "grok-4.5"])
+        family = classify(["--iphone", "-m", "grok-4.5"])
+        self.assertEqual(family.route_mode, RouteMode.IOS)
+        self.assertIsNone(family.forced_ios_key)
+        exact = classify(["--ios", "ipad-pro", "-m", "grok-4.5"])
+        self.assertEqual(exact.route_mode, RouteMode.IOS)
+        self.assertEqual(exact.forced_ios_key, "ipad-pro")
+        with self.assertRaises(ConfigurationError):
+            classify(["--ios", "Bad/Key"])
+        self.assertEqual(classify(["iphone-list"]).kind, CommandKind.CONTROL)
+        for command in ("iphone-setup", "iphone-remove", "iphone-reorder"):
+            self.assertEqual(classify([command]).kind, CommandKind.MAINTENANCE)
+
+    def test_two_device_contracts_preserve_family_order_and_exact_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            release = root / "release"
+            release.mkdir()
+            for name in (
+                "grok-remote",
+                "egress.sh",
+                "socks-netns.py",
+                "vpngate-connect.sh",
+            ):
+                (release / name).write_text(name)
+            phone = root / "iphone"
+            phone.mkdir(mode=0o700)
+            write_registry(
+                phone / "devices.json",
+                IosRegistry(
+                    (
+                        IosDevice("iphone-xr", "n-phone"),
+                        IosDevice("ipad-pro", "n-tablet"),
+                    )
+                ),
+            )
+            environment = {
+                "GROK_TESTING": "1",
+                "GROK_TEST_IPHONE_STATE_DIR": str(phone),
+            }
+            with mock.patch("grok_ms.config._grok_release", return_value="grok-test"):
+                family = build_contract(
+                    classify(["--iphone", "-m", "grok-4.5"]),
+                    "grok-4.5",
+                    release_dir=release,
+                    grok_bin=Path("/bin/false"),
+                    env=environment,
+                )
+                exact = build_contract(
+                    classify(["--ios", "ipad-pro", "-m", "grok-4.5"]),
+                    "grok-4.5",
+                    release_dir=release,
+                    grok_bin=Path("/bin/false"),
+                    env=environment,
+                )
+            self.assertEqual(
+                family.ladder,
+                ("ios:iphone-xr", "ios:ipad-pro"),
+            )
+            self.assertEqual(exact.ladder, ("ios:ipad-pro",))
+            self.assertEqual(exact.forced_ios_key, "ipad-pro")
+            self.assertEqual(
+                tuple(
+                    (endpoint.key, endpoint.stable_node_id)
+                    for endpoint in exact.ios_endpoints
+                ),
+                (("ipad-pro", "n-tablet"),),
+            )
 
     def test_gated_classifier_reserves_leader_controls(self) -> None:
         self.assertEqual(classify(["leader", "list"]).kind, CommandKind.BARE)
@@ -123,6 +193,31 @@ class ConfigTests(unittest.TestCase):
                     self.assertEqual(adopted.path, first.resolve())
                 first.write_text(first.read_text() + "# changed\n", encoding="ascii")
                 with self.assertRaisesRegex(GrokExecutableError, "changed"):
+                    executable.verify()
+
+    def test_explicit_owner_set_survives_privilege_boundary_revalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            grok = Path(td) / "grok"
+            grok.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="ascii")
+            grok.chmod(0o700)
+            target_uid = grok.stat().st_uid
+            if target_uid == 0:
+                self.skipTest("split root/user owner simulation requires a non-root fixture")
+
+            with mock.patch("grok_ms.grok_exec.os.getuid", return_value=0):
+                with self.assertRaisesRegex(
+                    GrokExecutableError,
+                    "unexpected owner",
+                ):
+                    VerifiedGrokExecutable.open(grok)
+                with VerifiedGrokExecutable.open(
+                    grok,
+                    allowed_owner_uids=frozenset((0, target_uid)),
+                ) as executable:
+                    self.assertEqual(
+                        executable.allowed_owner_uids,
+                        frozenset((0, target_uid)),
+                    )
                     executable.verify()
 
     def test_exact_env_shell_fixtures_use_fixed_interpreters_in_both_fd_paths(self) -> None:
@@ -497,7 +592,7 @@ with VerifiedGrokExecutable.open(path) as executable:
                         env={"GROK_VPN_MAX_TRIES": "9"},
                     )
 
-    def test_auto_contract_freezes_ordered_home_and_phone_identity(self) -> None:
+    def test_auto_contract_freezes_ordered_home_and_ios_identities(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             release = Path(td) / "release"
             release.mkdir()
@@ -509,7 +604,11 @@ with VerifiedGrokExecutable.open(path) as executable:
             )
             phone = Path(td) / "iphone"
             phone.mkdir()
+            os.chmod(phone, 0o700)
             (phone / "exit-node").write_text("n-stable-iphone\n")
+            (phone / "ready").write_text("n-stable-iphone\n")
+            os.chmod(phone / "exit-node", 0o600)
+            os.chmod(phone / "ready", 0o600)
             environment = {
                 "GROK_TESTING": "1",
                 "GROK_TEST_IPHONE_STATE_DIR": str(phone),
@@ -535,10 +634,13 @@ with VerifiedGrokExecutable.open(path) as executable:
                 tuple(item.label for item in frozen.home_endpoints),
                 ("arch", "win"),
             )
-            self.assertEqual(frozen.phone_node_id, "n-stable-iphone")
+            self.assertEqual(
+                tuple((item.key, item.stable_node_id) for item in frozen.ios_endpoints),
+                (("iphone", "n-stable-iphone"),),
+            )
             self.assertEqual(
                 frozen.ladder,
-                ("home:arch", "home:win", "iphone", "vpn", "direct"),
+                ("home:arch", "home:win", "ios:iphone", "vpn", "direct"),
             )
             self.assertEqual(frozen.home_endpoint("win").port, 2200)
             self.assertEqual(tuple(item.label for item in changed.home_endpoints), ("changed",))
@@ -554,7 +656,11 @@ with VerifiedGrokExecutable.open(path) as executable:
                 (release / name).write_text(name)
             alternate = root / "caller-state"
             alternate.mkdir()
+            os.chmod(alternate, 0o700)
             (alternate / "exit-node").write_text("n-wrong-source\n")
+            (alternate / "ready").write_text("n-wrong-source\n")
+            os.chmod(alternate / "exit-node", 0o600)
+            os.chmod(alternate / "ready", 0o600)
 
             patches = (
                 mock.patch("grok_ms.config._account_home", return_value=account_home),
@@ -590,7 +696,10 @@ with VerifiedGrokExecutable.open(path) as executable:
                         "GROK_TEST_IPHONE_STATE_DIR": str(alternate),
                     },
                 )
-            self.assertEqual(tested.phone_node_id, "n-wrong-source")
+            self.assertEqual(
+                tuple((item.key, item.stable_node_id) for item in tested.ios_endpoints),
+                (("iphone", "n-wrong-source"),),
+            )
 
 
 if __name__ == "__main__":

@@ -16,8 +16,12 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
 
 ### In scope
 
-- Exact `GROK_MULTI_SESSION=1` opt-in; every other value follows the
-  compatibility lane.
+- Managed-default dispatch: bare `grok-remote` uses the current
+  installer-attested profile, `GROK_MULTI_SESSION=0` selects the supported
+  compatibility escape, and exact `GROK_MULTI_SESSION=1` remains a
+  qualification/migration input when no current activation exists. Any other
+  present value retains literal legacy compatibility behavior and never causes
+  managed activation or managed boot-state inspection.
 - One per-user supervisor, one public SOCKS endpoint, one watchdog/transition
   writer, and multiple same-contract leases.
 - Concrete model pinning and typed canonical contract comparison before route
@@ -84,10 +88,18 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
 
 ## Interfaces
 
-- Compatibility: `grok-remote [existing arguments]`.
-- Opt-in: `GROK_MULTI_SESSION=1 grok-remote [existing arguments]`.
-- Recovery: `GROK_MULTI_SESSION=1 grok-remote recover`.
-- Read-only status: `GROK_MULTI_SESSION=1 grok-remote status`.
+- Managed default: `grok-remote [existing arguments]` when the selected release
+  has a valid active profile; the immutable release payload makes the same
+  decision even when invoked directly.
+- Compatibility escape: `GROK_MULTI_SESSION=0 grok-remote [existing arguments]`.
+- Qualification/migration compatibility input:
+  `GROK_MULTI_SESSION=1 grok-remote [existing arguments]`.
+- Recovery and read-only status: `grok-remote recover` and
+  `grok-remote status` under a current managed activation.
+- Emergency recovery: exact one-argument `recover` remains public for an
+  absent or exact `0`/`1` mode so dead state can be reconciled during a durable
+  install/rollback deny. A present nonliteral mode remains compatibility and
+  receives neither managed recovery nor deny-bypass authority.
 - Control socket: bounded JSON records over mode-`0600` Unix
   `SOCK_SEQPACKET` in a verified mode-`0700` runtime directory.
 - Stable production state: the passwd account home at
@@ -105,6 +117,71 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   and every retained inactive user release is mode `0500`. Running
   `~/grok-proxy/grok-remote` or another unfrozen source copy directly is
   unsupported and must refuse production execution.
+- Pre-import update authority: a separately packaged native verifier at
+  `/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap`, compiled with the
+  production Ed25519 public key. It accepts only a closed signed dispatcher
+  beneath `/usr/local/libexec/grok-proxy/bootstrap-releases/<signed-app-id>`.
+  The administrative package transaction owns the root-only trust-anchor
+  update, signed application publication, and exact `selected-release` file;
+  the native verifier itself requires the requested ID to equal that selector
+  and rechecks its descriptor-bound identity at the final exec boundary. Native
+  execution holds a shared lock on the inode-stable root-only
+  `bootstrap/update.lock` file through `execve`; the administrative publisher
+  holds the matching exclusive lock on that same inode through publication,
+  selector rename, and fsync. Before changing the selector it also holds the
+  package-preserved `release-control/operation.lock` in shared mode and blocks
+  on any install/rollback deny, canary terminal, rung canary, or nonempty runner
+  journal. Immutable application publication may finish while selection is
+  blocked, preserving the originating dispatcher for recovery. Audited
+  compare-and-swap reselection and rollback retain every older signed
+  application. A singleton durable pending selector audit reconciles an
+  unchanged old selector as aborted and an already-renamed, revalidated target
+  as committed; every other state fails closed. Partial audit staging is safely
+  discarded, and retained history is not scanned as an update admission
+  condition. The publisher obtains the key ID and public key directly
+  from the exact locked native binary's constant trust-anchor report and runs
+  through a host-ABI freestanding static launcher that constructs a fixed
+  isolated-Python prefix and exact environment before forwarding a bounded
+  administrative argument vector. Neither lock file is ever replaced or
+  truncated. The dynamically linked native verifier is admitted only through
+  fixed setuid `sudo` secure execution (`AT_SECURE`) or as a child of an already
+  environment-isolated activator/publisher process; direct already-root
+  invocation with a hostile loader environment is unsupported.
+  Production signed staging is an absolute root-owned path whose complete
+  ancestry from `/` is opened without following symlinks and is never group- or
+  other-writable. GNU Make is never invoked as root because its pre-recipe
+  `MAKEFLAGS`, `MAKEFILES`, include, and evaluation processing cannot establish
+  a privilege boundary. The package manager installs a closed three-file
+  payload at `/usr/lib/grok-bootstrap-package` and a closed two-file activator at
+  `/usr/libexec/grok-bootstrap-package`, verifies their root-owned non-writable
+  ancestry and exact single-link file metadata as one authenticated five-file
+  generation, then invokes the fixed zero-argument activator launcher directly.
+  That host-ABI x86_64/AArch64 launcher has no interpreter, dynamic section,
+  needed library, libc startup, or undefined symbol; its raw `_start` closes
+  inherited descriptors and directly executes the fixed isolated-Python argv
+  and newly constructed exact envp without reading or forwarding caller
+  arguments. A failed or denied descriptor-range close exits `126` before
+  Python. The activator descriptor-opens and snapshots its own fixed files
+  and payload, fixes its umask and newly-created directory modes, takes update
+  `LOCK_EX` then operation `LOCK_SH`, and activates validated support files
+  before the native verifier. Its durable `package-update.pending` canonical
+  JSON binds the trust anchor and every payload artifact mode, size, digest, and
+  canonical generation ID; native execution and publisher work fail closed
+  until only that byte-identical generation completes the native-last
+  transaction and removes the marker. A different same-key generation cannot
+  reconcile the marker. Existing key-ID or public-key changes are rejected:
+  in-place rotation is unsupported until an explicit bounded multi-key/new-ID
+  migration is implemented.
+  Candidate source and ordinary release installation cannot replace them.
+- Installer lanes: signed bootstrap applications may plan/install/rollback and
+  recover release publication. Post-install qualification, promotion, profile
+  activation, and read-only status run only from the concrete root-selected
+  immutable release. Installed commands reject caller `--source`, `--home`, and
+  `--prefix`; prefix tests use only their inherited descriptor-bound proc
+  fixture. Bootstrap commands require the native verifier's root-owned sealed
+  memfd authority; direct editable, user-release, or extracted Python is
+  rejected before source discovery. No privileged lane imports or executes
+  editable source.
 - Root broker: fixed `/usr/local/libexec/grok-proxy/vpn-broker`, selecting only
   root-owned `/usr/local/libexec/grok-proxy/releases/<release-id>/` helpers.
 - Atomic user releases: root-owned
@@ -140,10 +217,12 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
 - Controlled qualification has two fences. First,
   `begin-release-qualification --release-id ID --apply` is followed by the
   installer-owned fixed `load32` and `fault-recovery` steps. Then
-  `begin-rung-canary --release-id ID --rung RUNG --route-profile PROFILE
-  --contract-sha256 DIGEST --grok-release-id IDENTITY --model-id MODEL --apply`
-  authorizes one fixed `real-pair` step. `promote-rung --apply` derives evidence
-  only from those root-owned results; external evidence is rejected. Free-form
+  `begin-rung-canary --release-id ID --rung RUNG --profile-sha256 DIGEST
+  --apply` derives the route, full contract, projected contract, Grok, and model
+  bindings from one exact private profile and authorizes one fixed `real-pair`
+  step. The explicit binding form remains only for controlled legacy
+  qualification. `promote-rung --apply` derives evidence only from those
+  root-owned results; external evidence is rejected. Free-form
   `canary-exec --canary-arg ...` runs are diagnostic transcripts and never
   qualify promotion. `abort --apply` cancels either fence.
 - The durable deny remains active throughout rung qualification. A VPN canary
@@ -170,7 +249,7 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   an uncertain thaw drains and reconciles the exact epoch instead of reopening
   admission. This qualification-only fence does not alter the promoted route
   contract's normal session capacity.
-- Fixed qualification result schema 3 exposes only installer-validated,
+- Fixed qualification result schema 5 exposes only installer-validated,
   step/status-specific failure codes plus a hash of suppressed detail. Dynamic
   exception text, provider stderr, paths, and process identities are never
   returned. Cleanup uncertainty overrides any earlier stage code, and failed or
@@ -190,6 +269,11 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   user/root target pair has been published. Before target publication, recovery
   must retry the byte-identical frozen source or abort to the recorded prior
   release; `resume` does not reconstruct unpublished source bytes.
+- Rung-canary schema 6 binds the profile digest, qualification-result schema 5
+  binds the projected contract digest, and terminal rung-evidence schema 9 is
+  the live per-rung authorization. Promotion transcripts remain audit records;
+  deleting one cannot revoke a promoted rung. Removing or invalidating one
+  terminal evidence object revokes only its exact selected rung.
 - Legacy-root migration is an install-only internal broker operation. It is
   authorized only by coherent root/user `CANARY` selectors whose operation is
   exactly `install` and whose deny ledger names the same source and target.
@@ -455,3 +539,182 @@ cleanup.
   proof of cleanup.
 - Live destructive tests must remain inside the dedicated sidecar/netns and
   restore the original feature-off state.
+
+## Multi-device iOS routing
+
+### Goal and interfaces
+
+Register each iPhone or iPad once, retain every exact Tailscale stable node ID,
+and expand the phone position in the routing ladder into ordered typed
+`ios:<key>` candidates.  `grok-remote --iphone` is an iOS-family request,
+`grok-remote --ios KEY` is an exact-device request, and a bare invocation keeps
+the order `home:*`, registered iOS devices, VPN, then the existing qualified
+direct fallback.
+
+The maintenance interface is:
+
+- `iphone-setup [SELECTOR] [--label KEY]`: resolve, select, verify, and register
+  one exact iOS exit node without replacing earlier devices;
+- `iphone-list`: show ordered keys and current availability/qualification;
+- `iphone-remove KEY`: remove one registered key while routing is quiescent;
+- `iphone-reorder KEY...`: replace priority with one exact permutation.
+
+Automatically derived keys use a unique Tailscale DNS short name and the
+closed grammar `[a-z0-9][a-z0-9._-]{0,63}`.  A caller-supplied label uses the
+same grammar.  Alias, DNS, and IP values are setup-only selectors; runtime
+authority is always the verified stable node ID.
+
+### Registry and migration
+
+The owner-only canonical registry is
+`~/.local/state/grok-proxy/iphone/devices.json`, schema 1, with no more than 16
+ordered `{key, stable_node_id}` records.  Duplicate keys or IDs, key rebinding,
+unsafe ownership/mode/link state, oversized input, and unknown fields fail
+before mutation.  Writers use the existing maintenance exclusion plus a
+mode-0600 same-directory temporary file, canonical JSON, file fsync, atomic
+rename, and directory fsync.
+
+A successful setup commits only after exact sidecar teardown proves empty.
+Repeating setup for the same stable ID is an order-preserving no-op.  A valid
+legacy `exit-node`/`ready` pair is imported once without requiring live device
+access; both files and `tailscaled.state` remain intact for old-release
+rollback.  On a fresh installation the first registered device is also
+projected into the legacy pair using readiness-last publication.  The registry
+is encrypted private backup data and never enters the public mirror.
+
+### Routing and ownership
+
+Every compatibility and multi-session device is an independent `ios:<key>`
+rung.  Compatibility ownership records `RUNG=ios:<key>` and the frozen stable
+ID in `DEST`; legacy `RUNG=iphone` is accepted only for recovery.  The same
+sidecar identity may select different devices sequentially, but only after the
+prior provider is stopped and exact port/process absence is proved.
+
+`--ios KEY` contains exactly one device and never substitutes another device,
+home route, VPN, or direct.  `--iphone` contains all registered devices in
+registry order but no non-iOS rung.  Automatic modes repair the current device
+in place within the existing repair budget, then treat A-to-B as a downward
+candidate transition with a new provider generation.  Cleanup uses the
+persisted request rather than the current registry.  A failed or uncertain A
+cleanup prevents B from starting.
+
+Live Tailscale qualification showed that a usable iOS sidecar can spend about
+eight seconds starting before the Grok model probe begins.  Each exact-device
+selection therefore has a 30-second envelope, and the iOS family shares a
+120-second cap inside the existing cumulative transition deadline.  These
+bounds leave time for a real model probe without allowing offline devices to
+consume the outer transition and cleanup budgets.
+
+### Multi-session and qualification
+
+Contract schema 2 replaces `phone_node_id` with ordered immutable iOS endpoint
+records and an optional exact key.  Protocol version 2 carries the typed rung,
+key, and stable ID.  The ordered mapping is part of the canonical contract
+digest; a registry identity or order change rejects a join before provider
+effects.  Existing rung plus canonical-contract evidence binding is the route
+authority; no duplicative route-binding digest is added.
+
+Provider startup, inventory validation, liveness, repair, and qualification
+must all prove `ExitNodeStatus.ID` equals the stable ID mapped by the frozen
+contract.  Evidence and ordinary diagnostics expose the key and a stable-ID
+digest rather than raw private topology.  Legacy `iphone` evidence never
+authorizes `ios:<key>`, and every multi-session device requires its own live
+real-pair promotion.  Compatibility routing retains its existing behavior of
+using a successfully registered device without an external promotion record.
+
+### Acceptance
+
+Acceptance requires seen-to-fail coverage for two devices sharing HostName,
+idempotent setup, append/reorder/remove, unsafe registry state, legacy import,
+exact readback mismatch, offline A to online B, exact A no-substitution,
+same-device repair, cross-device generation transition, evidence replay,
+registry-change join rejection, cleanup after registry mutation, installer
+rollback, private backup/restore, and unchanged Windows/VPN/direct behavior.
+Production multi-device qualification additionally requires two simultaneously
+available devices, two same-contract Grok clients, one authenticated active-
+device fault, bounded failover, surviving clients, and empty final residue.
+
+## Managed default multi-session profile and reusable rung qualification
+
+### Scope and correction
+
+Bare `grok-remote` shall use multi-session mode through one installer-attested,
+owner-only default profile.  Callers shall not need to set
+`GROK_MULTI_SESSION=1`, select a VPN rung, or reconstruct release-sensitive
+configuration.  `GROK_MULTI_SESSION=0` remains an explicit compatibility
+escape hatch, and the feature-on environment remains accepted for immutable
+release qualification and migration.
+
+The full `RouteContract` remains the exact supervisor-sharing boundary.  A
+second, versioned `RungQualificationContract` is the promotion boundary.  Its
+projection contains every common behavior, security, timeout, stability,
+helper, Grok-identity, resource, and selected-endpoint field that can affect
+the requested rung; it removes only route-selection state and endpoints for
+other rungs.  Every `RouteContract` field must be explicitly classified, and
+an unclassified future field fails closed.  Evidence binds both the original
+full contract digest and the projected rung-qualification digest.  Evidence
+from the prior schema is never silently upgraded.
+
+### Profile authority and atomicity
+
+The managed profile is canonical JSON, schema-versioned, content-addressed,
+mode 0600, and owned by the target user.  It freezes the full contract plus an
+absolute versioned Grok executable path and executable identity.  A separate
+root-owned, mode-0444 activation record contains no private endpoints and
+attests the profile digest, selected immutable proxy release, contract digest,
+model, and Grok identity.  Activation publishes the immutable user profile
+before atomically replacing the root pointer under the release-selection lock.
+That pointer rename is the activation commit point.  Its per-release rollback
+archive is written afterward; an archive-write failure reports
+`activated-history-degraded`, and a post-rename directory-fsync failure reports
+`activated-durability-uncertain` instead of falsely reporting a pre-commit
+failure.  The next release switch must re-snapshot the exact active binding or
+fail before publishing another release.  Any missing, unsafe, inconsistent, or
+mutable authority component fails closed; an already-attested profile remains
+the last-known-good profile after an interrupted candidate write.
+Privileged activation validates the pinned executable against the explicit
+set `{root UID, target-user UID}` and retains that set for descriptor
+revalidation; ordinary client loading retains its narrower `{root UID,
+current UID}` policy.  Thus `sudo` activation accepts the intended
+target-user-owned pinned binary without accepting an unrelated owner's file.
+
+Explicit route flags may select a rung already represented by the frozen
+profile but may not import ambient routing configuration or change the model,
+Grok executable, helper identity, or security policy.  Updating those values
+requires a new candidate profile, qualification of every required projected
+rung not covered by matching evidence, and atomic activation.  Before switching
+away, the installer snapshots the selected release's exact terminal rung set
+and active profile into root-owned, per-release catalogs.  A later upgrade or
+rollback revalidates both catalogs against the current host, immutable private
+profile, pinned Grok bytes, and terminal evidence before restoring them.
+Missing or invalid rung records are removed independently.  On rollback, an
+already-exact dormant active pointer is revalidated and may rebuild missing
+history; otherwise missing or invalid profile history produces a closed
+`profile_transition` result and leaves bare use in compatibility.  A canonical
+active pointer for a different selected proxy release is dormant: it cannot
+force the managed lane or break a bare command.  `doctor --json` remains
+nonzero until the selected release has a valid current activation.  Release
+recovery commands expose the same transition result as install and rollback.
+
+### Readiness interface
+
+`grok-remote doctor --json` emits schema
+`grok-remote.profile-status.v1` with only public readiness metadata: status,
+profile name/digest, proxy release, Grok identity, model, eligible rungs,
+missing rungs, and a closed reason code.  It exposes no endpoint, stable node
+ID, port, or private configuration.  Exit status is zero only when the managed
+profile satisfies its minimum readiness policy; blocked, unsafe, stale, and
+unconfigured states are nonzero.
+
+### Acceptance and migration
+
+Acceptance requires deterministic seen-to-fail coverage for cross-ladder
+evidence reuse, relevant-field invalidation, unclassified-field rejection,
+old-evidence rejection, unsafe profile files, activation interruption, stale
+release/Grok identity, mutable-symlink drift, explicit compatibility escape,
+bare managed dispatch, doctor redaction, route-neutral delegation, and real
+split root/target-UID activation of a target-user-owned pinned binary.  The
+first release with this schema requires one deliberate requalification of each
+desired rung.  Old immutable releases and their existing selection/evidence
+schemas remain rollback-readable; no live promotion or production activation
+is part of source-level implementation verification.

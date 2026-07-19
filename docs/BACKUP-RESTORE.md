@@ -48,9 +48,12 @@ make test
 
 ## research_compute broker (installer-owned)
 
-The `research_compute` GHA/Modal compute broker is **not** captured by the backup — it's
-delegated to the ai-agents-skills installer (phase 8 installs it from `~/ai-agents-skills` to
-the runtime root; the `_run.sh` shim forwards the documented call to it). Only its
+The `research_compute` GHA/Modal compute broker is **not** captured by the backup — it is
+delegated to the ai-agents-skills installer. Phase 5 makes the pinned Git object
+available without changing an existing `~/ai-agents-skills` development worktree;
+phase 8 publishes the raw pinned blobs under the stable root-owned SHA path and
+installs from there to the runtime root. The `_run.sh` shim forwards the documented
+call to it. Only its
 **per-install config** (`research-compute.toml`, with the `[gha]` repo targets — no tokens)
 rides the secrets zip. After a restore without the zip, run the broker's `bootstrap` once to
 regenerate config and authenticate `gh`. See

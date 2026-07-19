@@ -2,12 +2,14 @@
 
 ## Context
 
-The compatibility implementation began as a verified singleton. The opt-in v1
-implementation now supplies a typed same-contract supervisor, committed
-frontend, exact process scopes, generation-specific providers, fixed root
-broker, and coherent release installer. Promotion remains gated on the full
-deterministic suite and current-host live evidence; unavailable external peers
-are reported as blocked, never inferred healthy.
+The compatibility implementation began as a verified singleton. The original
+opt-in v1 supplied a typed same-contract supervisor, committed frontend, exact
+process scopes, generation-specific providers, fixed root broker, and coherent
+release installer. The managed-default correction now makes an exact active
+profile the bare-command authority while retaining an explicit compatibility
+escape. Promotion remains gated on the full deterministic suite and
+current-host live evidence; unavailable external peers are reported as
+blocked, never inferred healthy.
 
 ## Steps and Gates
 
@@ -41,7 +43,12 @@ are reported as blocked, never inferred healthy.
    make its allowlisted public tree an exact one-way capture source, restore it
    safely from the repository snapshot, refuse direct source execution, and
    retain immutable releases as the only production execution authority.
-10. **Delivery gate.** Fresh-context code/test/security reviews, remediation,
+10. **P9 / G9 — signed pre-import bootstrap.** Package a native verifier with
+    the production public key, sign a closed installer dispatcher outside the
+    candidate tree, make the administrative selector the only update authority,
+    separate bootstrap and installed CLI lanes, and prove no editable Python is
+    imported or executed across the privilege boundary.
+11. **Delivery gate.** Fresh-context code/test/security reviews, remediation,
    full affected reruns, artifact leak scan, and explicit remaining gaps.
 
 Provider and Grok probes are part of the same durable ownership graph as Grok
@@ -55,7 +62,7 @@ deny in place for an explicit resume or rollback.
 
 | Decision | Rationale | Status |
 |---|---|---|
-| Exact opt-in value `GROK_MULTI_SESSION=1` | Keeps compatibility default literal | Accepted |
+| Managed default with exact compatibility escape | Bare use consumes only a current root-attested profile; `GROK_MULTI_SESSION=0` selects compatibility and exact `1` remains for qualification/migration | Accepted |
 | One supervisor and one public frontend | Preserves port 1080 while sharing one contract | Accepted |
 | Require a concrete model | Prevents unprovable cross-session model drift | Accepted |
 | `SOCK_SEQPACKET` with explicit fallback gate | Preserves message boundaries and bounded parsing | Accepted |
@@ -82,7 +89,7 @@ deny in place for an explicit resume or rollback.
 | VPN-only provider-up substages | Preserve fixed codes 31–34 only for VPN startup while discarding helper output and normalizing every cross-rung or arbitrary exit | Accepted |
 | Supervisor-owned qualification freeze and admission fence | Binds the two real wrappers to exact lease cgroups, prevents foreign admission, auto-thaws on verifier loss, and makes per-scope post-repair reconnects observable | Accepted |
 | Nested Grok default plus atomic explicit choice | Matches `[models].default`, preserves `-m` memory, and keeps qualification preference-neutral | Accepted |
-| Admission/repair model qualification in opt-in v1 | Periodic checks prove process/exit identity; unchanged-IP catalog drift remains a documented residual | Accepted |
+| Admission/repair model qualification in the managed lane | Periodic checks prove process/exit identity; unchanged-IP catalog drift remains a documented residual | Accepted |
 | Single-tenant loopback trust boundary | Raw loopback SOCKS is not cross-UID authenticated; all local loopback-capable UIDs must be trusted | Accepted residual |
 | Reject ambiguous OpenVPN bytes before root execution | Unterminated blocks and embedded NUL input fail closed; adversarial tokenization corpus is permanent | Accepted |
 | Exact VPN rung-canary deny exception | Generated gate and immutable broker independently admit only supervisor `up`/`next` bound to the root canary's host/release/rung/profile/contract | Accepted |
@@ -98,6 +105,7 @@ deny in place for an explicit resume or rollback.
 | Exact one-way Grok source mirror | Missing/deleted public source cannot leave a hybrid repository backup; private/generated paths remain separately classified and untouched | Accepted |
 | Direct source execution refused | Prevents the editable tree from bypassing the generated release gate and invalidating release-bound evidence | Accepted |
 | Selected-only user release exposure | Keep exactly the selected user release at `0555`, archive every inactive user release at `0500`, and validate the exact production self-admission bytes before re-exposure | Accepted |
+| Native signed pre-import bootstrap | A separately packaged Ed25519 verifier and administrative selector admit a closed dispatcher before candidate Python can run; production private keys remain offline and candidate installation cannot replace the anchor | Accepted |
 
 ## Verification Plan
 
@@ -112,6 +120,7 @@ deny in place for an explicit resume or rollback.
 | G6 | Malicious inputs/partial root effects/live VPN, FIFO and mount substitution, unrelated OpenVPN process scan, authenticated legacy-root migration | One owner, no hooks, no ambiguous process or mount state, empty root residue |
 | G7 | Switch-crash matrix, hermetic compatibility matrix, process/listener/cgroup/root inventory, boot revalidation, exact-rung canary/promotion, resume/abort, rollback | Old or new only; release and boot evidence remain distinct; unqualified rungs are unroutable; failed target/restore smoke rolls back or remains denied |
 | G8 | Seen-to-fail source-mirror, restore-conflict, private-preservation, and direct-execution regressions; one-time source merge inventory | Exact public parity; deletions propagate; private/generated identities stay unchanged; only installed gate executes production |
+| G9 | Native bootstrap unit/integration tests, signed-bundle tamper matrix, selector/ownership checks, installed-lane invocation matrix, and private-source sentinel | Only the administratively selected signed closure reaches root; editable/private input is never opened or executed; installed maintenance revalidates the selected release under lock |
 
 Promotion stops at the first failed gate. A skipped or externally blocked live
 check is recorded as blocked, never converted into a pass.
@@ -134,8 +143,9 @@ check is recorded as blocked, never converted into a pass.
 5. Obtain fresh-context test/code review, audit release and source parity, and
    leave no listener, provider, supervisor, namespace, tun, or recovery residue.
 
-Out of scope: changing automatic ladder policy, making multi-session default,
-or supporting simultaneous different-route contracts.
+Historical phase boundary, superseded for default dispatch by the managed-
+profile phase below: changing automatic ladder policy or supporting
+simultaneous different-route contracts remains out of scope.
 
 ## Post-v1 correction — forced home host with a globally available model
 
@@ -169,8 +179,9 @@ or supporting simultaneous different-route contracts.
    immutable release, then verify live Windows success and iPhone non-regression
    with exact post-test cleanup and a fresh-context review.
 
-Out of scope: altering automatic ladder value policy or forced-VPN selection
-policy, making multi-session default, or changing multi-session contracts.
+Historical phase boundary, superseded for default dispatch by the managed-
+profile phase below: altering automatic ladder value policy, forced-VPN
+selection policy, or same-contract sharing semantics remains out of scope.
 
 ## Post-v1 correction — automatic preferred-route admission
 
@@ -192,5 +203,62 @@ policy, making multi-session default, or changing multi-session contracts.
    immutable release, and prove a live bare invocation selects Windows and
    leaves no route residue after stop.
 
-Out of scope: making multi-session mode default, remotely enabling an offline
-or non-advertising iOS exit node, or weakening immutable-release qualification.
+Historical phase boundary, superseded for default dispatch by the managed-
+profile phase below: remotely enabling an offline or non-advertising iOS exit
+node, or weakening immutable-release qualification, remains out of scope.
+
+## Multi-device iOS routing
+
+1. Add failing registry, setup, classifier, ladder, contract, provider,
+   supervisor, qualification, backup, and rollback tests for the approved
+   semantics in `SPEC.md`.
+2. Implement one strict registry helper and transactional maintenance commands;
+   import the legacy stable ID without deleting rollback state.
+3. Replace logical `iphone` routing with typed `ios:<key>` candidates in the
+   compatibility dispatcher and schema-2 multi-session contract.  Preserve
+   exact-device fail-closed behavior and make cross-device failover a new
+   generation rather than same-rung repair.
+4. Update every closed rung/profile parser, provider environment/inventory,
+   qualification verifier, generated installer gate, private backup class,
+   documentation, completion, and fake Tailscale seam.
+5. Run focused and complete deterministic tests, fixed fault/load gates,
+   source/mirror parity and leak scans, then install a new immutable release.
+   Requalify intended routes and run live exact-device, two-session failover,
+   Windows, VPN, canary, rollback, reinstall, and residue checks.  An offline
+   second device is recorded as a blocked live promotion gate, never a pass.
+
+Historical phase boundary, superseded for default dispatch by the managed-
+profile phase below: concurrent different-contract supervisors, automatic
+Tailscale admin approval, and modifying Grok itself remain out of scope.
+
+## Managed default multi-session profile and reusable rung qualification
+
+1. Define a versioned, exhaustive per-rung projection of `RouteContract`; keep
+   full-contract equality for supervisor sharing and bind new evidence to both
+   digests.
+2. Add a strict content-addressed user profile and root activation record with
+   pinned Grok path/identity, safe ownership and mode checks, atomic
+   publication, release-selection-lock serialization, and an explicit
+   root/target-user executable-owner set across privileged descriptor
+   validation and revalidation.
+3. Make bare `grok-remote` enter the managed client by default when an active
+   profile exists, retain explicit compatibility and qualification paths, and
+   ensure profile-backed requests never rebuild authority from ambient state.
+   Treat a canonical activation for another selected release as dormant so an
+   upgrade or rollback keeps bare compatibility available until activation.
+4. Add a redacted `doctor --json` readiness contract and installer-side
+   candidate validation/activation that reuses only matching projected rung
+   evidence and reports missing qualification without weakening the gate.
+5. Make terminal schema-9 evidence the independently revocable live rung
+   authority, persist exact per-release rung/profile catalogs, and restore them
+   only after host/profile/Grok/readiness revalidation. Revalidate an exact
+   dormant pointer when rebuilding missing rollback history. Treat the active-
+   pointer rename as the activation commit and distinguish later archive or
+   directory-fsync uncertainty from a pre-commit failure.
+6. Apply the same activation and current-boot-inventory decision inside a
+   directly invoked immutable payload so bypassing the outer selector cannot
+   bypass managed admission.
+7. Remove provider and route injection from downstream delegation, then run
+   focused/full deterministic tests, source checks, and a fresh-context trust-
+   boundary review.  Leave production install, live canaries, activation,
+   commit, and push to a separately authorized operational step.

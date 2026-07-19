@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import errno
-from dataclasses import dataclass
+from contextlib import redirect_stdout
+from dataclasses import dataclass, replace
 import fcntl
+import io
 import json
 import os
 from pathlib import Path
@@ -27,8 +29,102 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from grok_ms import client  # noqa: E402
-from grok_ms.grok_exec import VerifiedGrokExecutable  # noqa: E402
+from grok_ms.contract import (  # noqa: E402
+    CONTRACT_SCHEMA_VERSION,
+    PROTOCOL_VERSION,
+    Endpoint,
+    HomeEndpoint,
+    IosEndpoint,
+    ResourceLimits,
+    RouteContract,
+    RouteMode,
+    StabilityPolicy,
+    TimeoutPolicy,
+    VpnPolicy,
+    reconstruct_original_contract,
+)
+from grok_ms.grok_exec import (  # noqa: E402
+    VerifiedGrokExecutable,
+    grok_release_id,
+)
 from grok_ms.ipc import SeqPacketConnection, bind_seqpacket_listener  # noqa: E402
+from grok_ms.managed_profile import (  # noqa: E402
+    PROFILE_STATUS_SCHEMA,
+    ActivationRecord,
+    ManagedProfile,
+    ReadinessPolicy,
+    write_activation_record,
+)
+
+
+def make_managed_profile(root: Path) -> ManagedProfile:
+    grok = root / "grok-0.2.103-linux-aarch64"
+    grok.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="ascii")
+    grok.chmod(0o700)
+    contract = RouteContract(
+        schema_version=CONTRACT_SCHEMA_VERSION,
+        protocol_version=PROTOCOL_VERSION,
+        release_id="f" * 64,
+        model_id="grok-4.5",
+        route_mode=RouteMode.AUTO,
+        forced_host=None,
+        home_endpoints=(
+            HomeEndpoint("lab", "100.64.0.10", "alice", 22),
+        ),
+        ios_endpoints=(),
+        forced_ios_key=None,
+        allow_direct=True,
+        ladder=("home:lab", "vpn", "direct"),
+        routing_config_digest="a" * 64,
+        probe_policy_version="probe-v1",
+        timeout_policy=TimeoutPolicy(
+            connect_ms=8_000,
+            probe_ms=90_000,
+            transition_ms=900_000,
+            stop_ms=10_000,
+        ),
+        stability_policy=StabilityPolicy(
+            version="same-exit-v1",
+            sample_count=3,
+            sample_interval_ms=1_000,
+            require_same_exit=True,
+        ),
+        vpn_policy=VpnPolicy(
+            namespace="grokvpn",
+            max_tries=6,
+            ranking_version="vpn-rank-v1",
+            countries=("VN",),
+            blocked_countries=("CN",),
+        ),
+        helper_release_ids=(("relay", "relay-v1"),),
+        grok_release_id=grok_release_id(grok),
+        public_endpoint=Endpoint("127.0.0.1", 1080),
+        private_ports=(11880, 11881),
+        limits=ResourceLimits(
+            max_leases=32,
+            max_control_connections=64,
+            max_frontend_streams=256,
+            max_packet_bytes=65_536,
+            per_stream_buffer_bytes=262_144,
+            total_buffer_bytes=67_108_864,
+        ),
+    )
+    return ManagedProfile.create(
+        contract,
+        grok,
+        ReadinessPolicy(1, ("direct",)),
+    )
+
+
+def qualified_record(
+    profile: ManagedProfile, rung: str, evidence_digit: str
+) -> dict[str, str]:
+    return {
+        "contract_sha256": profile.contract.rung_qualification_digest(rung),
+        "evidence_sha256": evidence_digit * 64,
+        "grok_release_id": profile.grok_release_id,
+        "rung": rung,
+    }
 
 
 class ClientTests(unittest.TestCase):
@@ -73,8 +169,14 @@ while True:
         grok_release_id: str
         ladder: tuple[str, ...]
         home_endpoints: tuple[object, ...]
+        route_mode: RouteMode = RouteMode.AUTO
+        forced_ios_key: str | None = None
+        ios_endpoints: tuple[object, ...] = ()
 
         def digest(self) -> str:
+            return "a" * 64
+
+        def rung_qualification_digest(self, _rung: str) -> str:
             return "a" * 64
 
     @staticmethod
@@ -101,7 +203,9 @@ while True:
     def _canary_authorization_fixture(
         descriptor: int,
         kind: str = "rung",
-    ) -> tuple[dict[str, object], str, str | None, str, str, str, int, str]:
+    ) -> tuple[
+        dict[str, object], str, str | None, str, str, str, int, str, str | None
+    ]:
         return (
             {},
             "direct",
@@ -111,6 +215,7 @@ while True:
             kind,
             descriptor,
             "direct",
+            None,
         )
 
     def assertDescriptorClosed(self, descriptor: int) -> None:
@@ -118,7 +223,7 @@ while True:
             os.fstat(descriptor)
         self.assertEqual(caught.exception.errno, errno.EBADF)
 
-    def test_schema_v4_canary_accepts_namespaced_model_not_namespaced_home(self) -> None:
+    def test_schema_v6_canary_accepts_namespaced_model_not_namespaced_home(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             auth = root / "canary-auth.lock"
@@ -129,7 +234,7 @@ while True:
             contract_digest = "c" * 64
             model_id = "xai/grok-4.5"
             record = {
-                "schema_version": 4,
+                "schema_version": 6,
                 "release_id": release_id,
                 "host_id": client._host_id(),
                 "canary_kind": "rung",
@@ -140,6 +245,7 @@ while True:
                 "model_id": model_id,
                 "canary_nonce": nonce,
                 "created_unix_ns": time.time_ns(),
+                "profile_sha256": None,
             }
             canary = root / "rung-canary.json"
             canary.write_text(
@@ -202,6 +308,170 @@ while True:
                         ROOT,
                         {"GROK_RELEASE_CANARY_ROUTE_PROFILE": "direct"},
                     )
+
+    def test_multi_device_list_executes_read_only_compatibility_view(self) -> None:
+        def capture(path, argv, environment):
+            raise RuntimeError((path, argv, environment))
+
+        with (
+            mock.patch.object(
+                client, "_prepare_canary_dispatch", return_value=False
+            ),
+            mock.patch.object(client, "_execution_env", return_value={"HOME": "/tmp"}),
+            mock.patch.object(client.os, "execvpe", side_effect=capture),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                client.run(["iphone-list"], ROOT, {})
+        path, argv, environment = caught.exception.args[0]
+        self.assertEqual(path, str(ROOT / "grok-remote"))
+        self.assertEqual(argv, [str(ROOT / "grok-remote"), "iphone-list"])
+        self.assertEqual(environment["GROK_MULTI_SESSION"], "0")
+
+    def test_managed_activation_is_current_stale_or_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root_control = root / "root-control"
+            root_control.mkdir(mode=0o755)
+            profile = make_managed_profile(root)
+            activation_path = root_control / "active-profile.json"
+            write_activation_record(
+                activation_path,
+                ActivationRecord.from_profile(
+                    profile,
+                    activated_unix_ns=1,
+                ),
+                owner_uid=os.getuid(),
+                owner_gid=os.getgid(),
+            )
+            environment = {
+                "GROK_TESTING": "1",
+                "HOME": str(root / "home"),
+                "XDG_STATE_HOME": str(root / "state"),
+                "GROK_TEST_ROOT_RELEASE_CONTROL": str(root_control),
+            }
+            with mock.patch.object(
+                client,
+                "_release_id",
+                return_value=profile.contract.release_id,
+            ):
+                self.assertTrue(
+                    client._managed_activation_matches_release(ROOT, environment)
+                )
+            with mock.patch.object(
+                client,
+                "_release_id",
+                return_value="e" * 64,
+            ):
+                self.assertFalse(
+                    client._managed_activation_matches_release(ROOT, environment)
+                )
+
+            activation_path.chmod(0o600)
+            with self.assertRaisesRegex(
+                client.ClientError,
+                "active managed profile is invalid",
+            ):
+                client._managed_activation_matches_release(ROOT, environment)
+
+            activation_path.chmod(0o600)
+            activation_path.write_text("{}\n", encoding="ascii")
+            activation_path.chmod(0o444)
+            with self.assertRaisesRegex(
+                client.ClientError,
+                "active managed profile is invalid",
+            ):
+                client._managed_activation_matches_release(ROOT, environment)
+
+    def test_stale_activation_direct_client_delegates_to_compatibility(self) -> None:
+        def capture(path: str, argv: list[str], environment: dict[str, str]) -> None:
+            raise RuntimeError((path, argv, environment))
+
+        with (
+            mock.patch.object(
+                client, "_prepare_canary_dispatch", return_value=False
+            ),
+            mock.patch.object(
+                client, "_managed_activation_matches_release", return_value=False
+            ),
+            mock.patch.object(
+                client,
+                "_execution_env",
+                return_value={"HOME": "/tmp", "GROK_BIN": "/bin/true"},
+            ),
+            mock.patch.object(client.os, "execvpe", side_effect=capture),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                client.run(["inspect"], ROOT, {})
+        path, argv, environment = caught.exception.args[0]
+        self.assertEqual(path, str(ROOT / "grok-remote"))
+        self.assertEqual(argv, [str(ROOT / "grok-remote"), "inspect"])
+        self.assertEqual(environment["GROK_MULTI_SESSION"], "0")
+
+    def test_nonliteral_values_never_auto_activate_a_current_profile(self) -> None:
+        def capture(path: str, argv: list[str], environment: dict[str, str]) -> None:
+            raise RuntimeError((path, argv, environment))
+
+        for value in ("", "true", "01", "2"):
+            for command in (["inspect"], ["recover"]):
+                with (
+                    self.subTest(value=value, command=command),
+                    mock.patch.object(
+                        client, "_prepare_canary_dispatch", return_value=False
+                    ),
+                    mock.patch.object(
+                        client, "_managed_activation_matches_release"
+                    ) as activation_probe,
+                    mock.patch.object(
+                        client,
+                        "_execution_env",
+                        return_value={"HOME": "/tmp", "GROK_BIN": "/bin/true"},
+                    ),
+                    mock.patch.object(client.os, "execvpe", side_effect=capture),
+                    mock.patch.object(client, "_recover") as recover,
+                ):
+                    with self.assertRaises(RuntimeError) as caught:
+                        client.run(
+                            command,
+                            ROOT,
+                            {
+                                "GROK_MULTI_SESSION": value,
+                                "GROK_MANAGED_PROFILE_AVAILABLE": "1",
+                            },
+                        )
+                path, argv, environment = caught.exception.args[0]
+                self.assertEqual(path, str(ROOT / "grok-remote"))
+                self.assertEqual(argv, [str(ROOT / "grok-remote"), *command])
+                self.assertEqual(environment["GROK_MULTI_SESSION"], value)
+                activation_probe.assert_not_called()
+                recover.assert_not_called()
+
+    def test_managed_direct_client_requires_current_boot_inventory(self) -> None:
+        with (
+            mock.patch.object(
+                client, "_prepare_canary_dispatch", return_value=False
+            ),
+            mock.patch.object(
+                client, "_managed_activation_matches_release", return_value=True
+            ),
+            mock.patch.object(
+                client,
+                "_execution_env",
+                return_value={"HOME": "/tmp", "GROK_BIN": "/bin/true"},
+            ),
+            mock.patch.object(
+                client,
+                "_validate_current_boot_inventory",
+                side_effect=client.ClientError("current-boot inventory is stale"),
+            ) as validate_inventory,
+            mock.patch.object(client, "_load_active_managed_profile") as load_profile,
+            self.assertRaisesRegex(
+                client.ClientError,
+                "current-boot inventory is stale",
+            ),
+        ):
+            client.run(["inspect"], ROOT, {})
+        validate_inventory.assert_called_once()
+        load_profile.assert_not_called()
 
     def test_explicit_model_choice_is_atomic_and_canary_never_persists(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -430,6 +700,7 @@ while True:
                         str,
                         int,
                         str,
+                        str | None,
                     ],
                     visible: dict[str, str],
                 ) -> None:
@@ -497,6 +768,7 @@ while True:
                 "rung",
                 descriptor,
                 "home:windows",
+                None,
             )
             contract = SimpleNamespace(
                 release_id="f" * 64,
@@ -562,6 +834,7 @@ while True:
                 "rung",
                 descriptor,
                 "home:windows",
+                None,
             )
             contract = SimpleNamespace(
                 release_id="f" * 64,
@@ -616,6 +889,268 @@ while True:
         self.assertEqual(filtered.home_endpoints, (self._Home("pc"),))
         with self.assertRaisesRegex(client.ClientError, "no rung"):
             client._qualified_contract(contract, {"qualified_rungs": []}, {})
+
+    def test_managed_profile_route_derivation_preserves_rung_qualification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = make_managed_profile(Path(directory))
+            base = profile.contract
+            requests = (
+                (("-m", "grok-4.5", "prompt"), base.ladder),
+                (("--host", "lab", "-m", "grok-4.5", "prompt"), ("home:lab",)),
+                (("--vpn", "-m", "grok-4.5", "prompt"), ("vpn",)),
+                (("--direct", "-m", "grok-4.5", "prompt"), ("direct",)),
+                (("--no-direct", "-m", "grok-4.5", "prompt"), ("home:lab", "vpn")),
+            )
+            for argv, expected_ladder in requests:
+                with self.subTest(argv=argv):
+                    derived = client._profile_contract_for_request(
+                        profile,
+                        client.classify(argv),
+                        profile.contract.model_id,
+                    )
+                    self.assertEqual(derived.ladder, expected_ladder)
+                    for rung in derived.ladder:
+                        self.assertEqual(
+                            derived.rung_qualification_digest(rung),
+                            base.rung_qualification_digest(rung),
+                        )
+
+    def test_managed_ios_family_filters_endpoints_to_qualified_ordered_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base_profile = make_managed_profile(Path(directory))
+            endpoints = (
+                IosEndpoint("iphone-a", "node-a"),
+                IosEndpoint("ipad-b", "node-b"),
+                IosEndpoint("iphone-c", "node-c"),
+            )
+            contract = replace(
+                base_profile.contract,
+                home_endpoints=(),
+                ios_endpoints=endpoints,
+                ladder=("ios:iphone-a", "ios:ipad-b", "ios:iphone-c", "direct"),
+                routing_config_digest="9" * 64,
+            )
+            profile = ManagedProfile.create(
+                contract,
+                base_profile.grok_path,
+                ReadinessPolicy(1, ()),
+            )
+            family = client._profile_contract_for_request(
+                profile,
+                client.classify(("--iphone", "prompt")),
+                profile.contract.model_id,
+            )
+
+            one, _provider_canary = client._qualified_contract(
+                family,
+                {"qualified_rungs": [qualified_record(profile, "ios:ipad-b", "1")]},
+                {},
+            )
+            self.assertEqual(one.ladder, ("ios:ipad-b",))
+            self.assertEqual(one.ios_endpoints, endpoints)
+            self.assertEqual(reconstruct_original_contract(one), family)
+
+            subset, _provider_canary = client._qualified_contract(
+                family,
+                {
+                    "qualified_rungs": [
+                        qualified_record(profile, "ios:iphone-c", "2"),
+                        qualified_record(profile, "ios:iphone-a", "3"),
+                    ]
+                },
+                {},
+            )
+            self.assertEqual(
+                subset.ladder,
+                ("ios:iphone-a", "ios:iphone-c"),
+            )
+            self.assertEqual(
+                subset.ios_endpoints,
+                endpoints,
+            )
+            self.assertEqual(reconstruct_original_contract(subset), family)
+            with self.assertRaisesRegex(client.ClientError, "no rung"):
+                client._qualified_contract(
+                    family,
+                    {"qualified_rungs": []},
+                    {},
+                )
+
+    def test_managed_profile_rejects_explicit_model_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = make_managed_profile(Path(directory))
+            self.assertEqual(
+                client._managed_model(("prompt",), profile),
+                ("grok-4.5", False),
+            )
+            self.assertEqual(
+                client._managed_model(("-m", "grok-4.5", "prompt"), profile),
+                ("grok-4.5", True),
+            )
+            for argv in (
+                ("-m", "grok-4.5-fast", "prompt"),
+                ("--model=grok-4.5-fast", "prompt"),
+                ("-m", "grok-4.5", "--model", "grok-4.5-fast", "prompt"),
+            ):
+                with self.subTest(argv=argv), self.assertRaisesRegex(
+                    client.ClientError,
+                    "does not match the active managed profile",
+                ):
+                    client._managed_model(argv, profile)
+
+    def test_managed_profile_eligible_rungs_require_exact_projection_and_grok(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = make_managed_profile(Path(directory))
+            selection = {
+                "qualified_rungs": [
+                    qualified_record(profile, "direct", "1"),
+                    qualified_record(profile, "home:lab", "2"),
+                    {
+                        **qualified_record(profile, "vpn", "3"),
+                        "contract_sha256": "0" * 64,
+                    },
+                    {
+                        **qualified_record(profile, "vpn", "4"),
+                        "grok_release_id": "sha256:" + "5" * 64,
+                    },
+                ]
+            }
+            self.assertEqual(
+                client._eligible_qualified_rungs(profile.contract, selection),
+                ("home:lab", "direct"),
+            )
+
+    def test_doctor_emits_exact_redacted_states_without_provider_calls(self) -> None:
+        expected_fields = {
+            "schema_version",
+            "status",
+            "profile_name",
+            "profile_sha256",
+            "release_id",
+            "grok_release_id",
+            "model_id",
+            "eligible_rungs",
+            "missing_rungs",
+            "reason_code",
+        }
+
+        def invoke_doctor(environment: dict[str, str]) -> tuple[int, dict[str, object]]:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                returncode = client._doctor(ROOT, environment)
+            lines = output.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            record = json.loads(lines[0])
+            self.assertEqual(set(record), expected_fields)
+            self.assertEqual(record["schema_version"], PROFILE_STATUS_SCHEMA)
+            self.assertNotIn("contract", record)
+            self.assertNotIn("grok_path", record)
+            return returncode, record
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            root_control = root / "root-control"
+            root_control.mkdir()
+            environment = {
+                "GROK_TESTING": "1",
+                "HOME": str(root / "home"),
+                "XDG_STATE_HOME": str(state),
+                "GROK_TEST_ROOT_RELEASE_CONTROL": str(root_control),
+            }
+            with (
+                mock.patch.object(client, "_release_gate") as release_gate,
+                mock.patch.object(client, "open_profile_grok") as provider_open,
+            ):
+                returncode, record = invoke_doctor(environment)
+            self.assertEqual(returncode, 2)
+            self.assertEqual(
+                (record["status"], record["reason_code"]),
+                ("unconfigured", "no_active_profile"),
+            )
+            release_gate.assert_not_called()
+            provider_open.assert_not_called()
+
+            activation = root_control / "active-profile.json"
+            activation.write_bytes(b"present\n")
+            profile = make_managed_profile(root)
+            active = SimpleNamespace(profile=profile)
+            inventory = {
+                "schema_version": 1,
+                "release_id": profile.contract.release_id,
+                "host_id": "host-id",
+                "boot_id": "boot-id",
+                "checked_unix_ns": 1,
+                "inventory_sha256": "9" * 64,
+            }
+            selections = (
+                (
+                    "ready",
+                    {
+                        "qualified_rungs": [
+                            qualified_record(profile, rung, digit)
+                            for rung, digit in zip(
+                                profile.contract.ladder, ("1", "2", "3")
+                            )
+                        ]
+                    },
+                    0,
+                    "ready",
+                ),
+                (
+                    "degraded",
+                    {
+                        "qualified_rungs": [
+                            qualified_record(profile, "direct", "4")
+                        ]
+                    },
+                    0,
+                    "ready_with_missing_optional_rungs",
+                ),
+            )
+            for state_name, selection, expected_rc, reason in selections:
+                with (
+                    self.subTest(state=state_name),
+                    mock.patch.object(
+                        client, "_release_gate", return_value=selection
+                    ),
+                    mock.patch.object(
+                        client,
+                        "_release_id",
+                        return_value=profile.contract.release_id,
+                    ),
+                    mock.patch.object(client, "_read_json", return_value=inventory),
+                    mock.patch.object(client, "_host_id", return_value="host-id"),
+                    mock.patch.object(client, "read_boot_id", return_value="boot-id"),
+                    mock.patch.object(
+                        client, "_load_active_managed_profile", return_value=active
+                    ),
+                    mock.patch.object(client, "open_profile_grok") as provider_open,
+                ):
+                    returncode, record = invoke_doctor(environment)
+                self.assertEqual(returncode, expected_rc)
+                self.assertEqual(record["status"], state_name)
+                self.assertEqual(record["reason_code"], reason)
+                provider_open.assert_not_called()
+
+            with (
+                mock.patch.object(
+                    client,
+                    "_release_gate",
+                    side_effect=client.ClientError("selection invalid"),
+                ),
+                mock.patch.object(client, "_read_json") as read_inventory,
+                mock.patch.object(client, "open_profile_grok") as provider_open,
+            ):
+                returncode, record = invoke_doctor(environment)
+            self.assertEqual(returncode, 2)
+            self.assertEqual(
+                (record["status"], record["reason_code"]),
+                ("blocked", "active_profile_invalid"),
+            )
+            self.assertIsNone(record["profile_sha256"])
+            read_inventory.assert_not_called()
+            provider_open.assert_not_called()
 
     def _pty_owned_child(self, mode: str, action: str | None) -> tuple[int, bytes]:
         with tempfile.TemporaryDirectory() as directory:
@@ -905,7 +1440,7 @@ while True:
                 self.fail("readiness owner did not enter zombie state")
             ready = {
                 "schema_version": 1,
-                "protocol_version": 1,
+                "protocol_version": client.PROTOCOL_VERSION,
                 "release_id": "test-release",
                 "owner_epoch": "test-owner",
                 "pid": identity.pid,
@@ -926,7 +1461,7 @@ while True:
     def test_provider_canary_readiness_requires_the_exact_nonce(self) -> None:
         ready = {
             "schema_version": 1,
-            "protocol_version": 1,
+            "protocol_version": client.PROTOCOL_VERSION,
             "release_id": "a" * 64,
             "owner_epoch": "owner",
             "pid": os.getpid(),
@@ -968,7 +1503,7 @@ while True:
             identity = client.current_process_identity()
             ready = {
                 "schema_version": 1,
-                "protocol_version": 1,
+                "protocol_version": client.PROTOCOL_VERSION,
                 "release_id": "a" * 64,
                 "owner_epoch": "owner",
                 "pid": identity.pid,
@@ -1036,7 +1571,7 @@ while True:
             identity = client.current_process_identity()
             ready = {
                 "schema_version": 1,
-                "protocol_version": 1,
+                "protocol_version": client.PROTOCOL_VERSION,
                 "release_id": "a" * 64,
                 "owner_epoch": "owner",
                 "pid": identity.pid,
@@ -1724,6 +2259,7 @@ while True:
                 "GROK_FRONTEND_RELEASE_LOCK_FD": str(frontend_descriptor),
                 "HOME": str(base),
                 "GROK_BIN": "/bin/true",
+                "GROK_MULTI_SESSION": "1",
             }
             connection = SimpleNamespace(close=mock.Mock())
             registration = {
@@ -1758,6 +2294,11 @@ while True:
 
             with (
                 mock.patch.object(client, "_release_gate", return_value={}),
+                mock.patch.object(
+                    client,
+                    "_validate_current_boot_inventory",
+                    return_value={},
+                ),
                 mock.patch.object(
                     client, "_release_lock_fd", side_effect=acquire_selection_lock
                 ),

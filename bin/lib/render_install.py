@@ -39,6 +39,11 @@ RELEASE_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 GROK_PROXY_ENTRY_ID = "grokproxy-scripts"
 GROK_RELEASE_SCHEMA_VERSION = 2
 GROK_RELEASE_OUTPUT_LIMIT = 1024 * 1024
+GROK_BOOTSTRAP_DIRECTORY = "/usr/local/libexec/grok-proxy/bootstrap"
+GROK_BOOTSTRAP_BINARY = "grok-bootstrap"
+GROK_BOOTSTRAP_SELECTOR = "selected-release"
+GROK_BOOTSTRAP_UPDATE_LOCK = "update.lock"
+GROK_BOOTSTRAP_RELEASE_ROOT = "/usr/local/libexec/grok-proxy/bootstrap-releases"
 
 
 class GrokReleaseInstallError(RuntimeError):
@@ -47,6 +52,12 @@ class GrokReleaseInstallError(RuntimeError):
 
 class GrokSourceRestoreError(RuntimeError):
     """The editable Grok source cannot be restored without overwriting work."""
+
+
+def _raise_grok_walk_error(error):
+    raise GrokSourceRestoreError(
+        f"cannot inspect Grok source tree: {error.filename}: {error.strerror}"
+    ) from error
 
 
 def read(path):
@@ -168,6 +179,48 @@ def _entry_matches_path(entry, rel):
     return False
 
 
+def validate_grok_source_classification(home, entries):
+    """Require every existing Grok source path to have one closed class.
+
+    Public entries may carry ``exclude`` patterns so generated descendants do
+    not overlap their emitting closure.  Non-emitting private/generated/iOS
+    entries remain in the manifest as explicit classification boundaries.
+    """
+    grouped = {}
+    for entry in entries:
+        root = _safe_relative(entry.get("root"))
+        if root is None:
+            raise GrokSourceRestoreError("Grok classification root is unsafe")
+        grouped.setdefault(root, []).append(entry)
+
+    for root, root_entries in grouped.items():
+        source_root = os.path.join(home, root)
+        if not os.path.lexists(source_root):
+            continue
+        info = os.lstat(source_root)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise GrokSourceRestoreError(
+                f"Grok classified root is not a real directory: {root}"
+            )
+        for directory, dirnames, filenames in os.walk(
+            source_root, followlinks=False, onerror=_raise_grok_walk_error
+        ):
+            for name in dirnames + filenames:
+                path = os.path.join(directory, name)
+                rel = os.path.relpath(path, source_root).replace(os.sep, "/")
+                matches = [
+                    entry.get("id", "<unknown>")
+                    for entry in root_entries
+                    if _entry_matches_path(entry, rel)
+                    and not entry_excludes_path(entry, rel)
+                ]
+                if len(matches) != 1:
+                    disposition = "unclassified" if not matches else "multiply classified"
+                    raise GrokSourceRestoreError(
+                        f"Grok source path is {disposition}: {root}/{rel}"
+                    )
+
+
 def _rendered_source_bytes(path, home):
     with open(path, "rb") as fh:
         data = fh.read()
@@ -207,7 +260,9 @@ def _grok_expected_tree(repo, home, entry):
                 f"Grok public backup is missing allowlisted path: {rel}"
             )
 
-    for dp, dns, fns in os.walk(source_root, followlinks=False):
+    for dp, dns, fns in os.walk(
+        source_root, followlinks=False, onerror=_raise_grok_walk_error
+    ):
         rel_dir = os.path.relpath(dp, source_root)
         rel_dir = "" if rel_dir == "." else rel_dir
         kept_dirs = []
@@ -253,7 +308,9 @@ def _grok_actual_tree(target_root, entry):
     root_info = os.lstat(target_root)
     if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
         return files, directories, ["authoring root is not a real directory"]
-    for dp, dns, fns in os.walk(target_root, followlinks=False):
+    for dp, dns, fns in os.walk(
+        target_root, followlinks=False, onerror=_raise_grok_walk_error
+    ):
         rel_dir = os.path.relpath(dp, target_root)
         rel_dir = "" if rel_dir == "." else rel_dir
         kept_dirs = []
@@ -631,7 +688,9 @@ def _populate_grok_source(target_root, files, directories, entry):
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-        for directory, _dirnames, _filenames in os.walk(stage, topdown=False):
+        for directory, _dirnames, _filenames in os.walk(
+            stage, topdown=False, onerror=_raise_grok_walk_error
+        ):
             _fsync_restore_directory(directory)
 
         anchored_root = f"/proc/self/fd/{root_fd}/."
@@ -790,6 +849,175 @@ def _capture_diagnostic(stdout_stream, stderr_stream):
     )
 
 
+def _trusted_snapshot(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _open_trusted_absolute_directory(path):
+    """Open a fixed root-owned directory without following mutable ancestry."""
+    if not os.path.isabs(path):
+        raise GrokReleaseInstallError("bootstrap directory is not absolute")
+    parts = tuple(part for part in path.split(os.sep) if part)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(os.sep, flags)
+    try:
+        for part in (None, *parts):
+            if part is not None:
+                child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or info.st_gid != 0
+                or info.st_mode & 0o022
+            ):
+                raise GrokReleaseInstallError(
+                    "bootstrap directory ancestry is not trusted"
+                )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_trusted_selector(directory_fd, *, trusted_uid=0, trusted_gid=0):
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        named = os.stat(
+            GROK_BOOTSTRAP_SELECTOR,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        descriptor = os.open(
+            GROK_BOOTSTRAP_SELECTOR,
+            flags,
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        raise GrokReleaseInstallError("trusted bootstrap selector is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != trusted_uid
+            or opened.st_gid != trusted_gid
+            or stat.S_IMODE(opened.st_mode) != 0o444
+            or opened.st_nlink != 1
+            or opened.st_size != 65
+            or _trusted_snapshot(named) != _trusted_snapshot(opened)
+        ):
+            raise GrokReleaseInstallError("trusted bootstrap selector is unsafe")
+        raw = b""
+        while len(raw) <= 65:
+            chunk = os.read(descriptor, 66 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+        current = os.stat(
+            GROK_BOOTSTRAP_SELECTOR,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if _trusted_snapshot(opened) != _trusted_snapshot(current):
+            raise GrokReleaseInstallError("trusted bootstrap selector changed")
+    finally:
+        os.close(descriptor)
+    if re.fullmatch(rb"[0-9a-f]{64}\n", raw) is None:
+        raise GrokReleaseInstallError("trusted bootstrap selector is invalid")
+    return raw[:-1].decode("ascii")
+
+
+def _verify_trusted_bootstrap_lock(directory_fd, *, trusted_uid=0, trusted_gid=0):
+    try:
+        information = os.stat(
+            GROK_BOOTSTRAP_UPDATE_LOCK,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise GrokReleaseInstallError(
+            "trusted bootstrap update lock is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISREG(information.st_mode)
+        or information.st_uid != trusted_uid
+        or information.st_gid != trusted_gid
+        or stat.S_IMODE(information.st_mode) != 0o600
+        or information.st_nlink != 1
+        or information.st_size != 0
+    ):
+        raise GrokReleaseInstallError("trusted bootstrap update lock is unsafe")
+
+
+def _verify_trusted_bootstrap_binary(directory_fd, *, trusted_uid=0, trusted_gid=0):
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        named = os.stat(
+            GROK_BOOTSTRAP_BINARY,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        descriptor = os.open(GROK_BOOTSTRAP_BINARY, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise GrokReleaseInstallError("trusted bootstrap executable is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        current = os.stat(
+            GROK_BOOTSTRAP_BINARY,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != trusted_uid
+            or opened.st_gid != trusted_gid
+            or stat.S_IMODE(opened.st_mode) != 0o555
+            or opened.st_nlink != 1
+            or opened.st_size <= 0
+            or _trusted_snapshot(named) != _trusted_snapshot(opened)
+            or _trusted_snapshot(opened) != _trusted_snapshot(current)
+        ):
+            raise GrokReleaseInstallError("trusted bootstrap executable is unsafe")
+    finally:
+        os.close(descriptor)
+
+
+def _trusted_bootstrap_prefix():
+    directory_fd = _open_trusted_absolute_directory(GROK_BOOTSTRAP_DIRECTORY)
+    try:
+        _verify_trusted_bootstrap_lock(directory_fd)
+        release_id = _read_trusted_selector(directory_fd)
+        _verify_trusted_bootstrap_binary(directory_fd)
+    finally:
+        os.close(directory_fd)
+    executable = os.path.join(GROK_BOOTSTRAP_DIRECTORY, GROK_BOOTSTRAP_BINARY)
+    release_dir = os.path.join(GROK_BOOTSTRAP_RELEASE_ROOT, release_id)
+    return [
+        "/usr/bin/sudo",
+        "-n",
+        "--",
+        executable,
+        "--release-dir",
+        release_dir,
+        "--",
+    ]
+
+
 def _run_release_command(command, label):
     with tempfile.TemporaryFile(mode="w+b") as stdout_stream, tempfile.TemporaryFile(
         mode="w+b"
@@ -843,25 +1071,14 @@ def _run_release_command(command, label):
 def install_grok_proxy_release(repo, home):
     """Install and independently validate one coherent user/root release pair."""
     source = os.path.join(home, "grok-proxy")
-    installer = os.path.join(repo, "system", "grok-proxy", "install-release.py")
-    if not os.path.isfile(installer):
-        raise GrokReleaseInstallError(f"missing release installer: {installer}")
+    del repo
     if not os.path.isfile(os.path.join(source, "install-release.py")):
         raise GrokReleaseInstallError(
             f"missing canonical Grok authoring source: {source}"
         )
-    common = ["--source", source, "--home", home]
-    prefix = [
-        "/usr/bin/sudo",
-        "-n",
-        "--",
-        "/usr/bin/python3",
-        "-I",
-        "-B",
-        installer,
-    ]
+    prefix = _trusted_bootstrap_prefix()
     installed = _run_release_command(
-        [*prefix, "install", *common, "--apply"],
+        [*prefix, "install", "--apply"],
         "grok-proxy release install",
     )
     release_id = installed.get("release_id")
@@ -874,8 +1091,22 @@ def install_grok_proxy_release(repo, home):
     ):
         raise GrokReleaseInstallError("grok-proxy release install returned an invalid result")
 
+    installed_dispatcher = os.path.join(
+        "/usr/local/libexec/grok-proxy/releases",
+        release_id,
+        "install-release.py",
+    )
+    status_prefix = [
+        "/usr/bin/sudo",
+        "-n",
+        "--",
+        "/usr/bin/python3",
+        "-I",
+        "-B",
+        installed_dispatcher,
+    ]
     status = _run_release_command(
-        [*prefix, "status", *common],
+        [*status_prefix, "status"],
         "grok-proxy release status",
     )
     if (
@@ -915,6 +1146,18 @@ def main():
     # install target.  Reconcile it before any other render: create only when
     # the managed surface is absent, accept exact equality, and otherwise fail
     # without writing previews, partial files, or invoking the release installer.
+    grok_classification_entries = [
+        entry for entry in manifest["entries"]
+        if str(entry.get("id", "")).startswith("grokproxy-")
+    ]
+    try:
+        validate_grok_source_classification(
+            home, grok_classification_entries
+        )
+    except (OSError, GrokSourceRestoreError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
     grok_entries = [
         entry for entry in manifest["entries"]
         if entry.get("id") == GROK_PROXY_ENTRY_ID

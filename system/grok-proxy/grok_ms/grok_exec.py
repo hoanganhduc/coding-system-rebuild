@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Mapping, NoReturn, Sequence
+from typing import AbstractSet, Mapping, NoReturn, Sequence
 
 
 _RELEASE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -60,12 +60,27 @@ def _fixture_script_exec(
         os.close(inherited)
 
 
-def _digest_fd(descriptor: int) -> tuple[str, os.stat_result]:
+def _normalize_allowed_owner_uids(
+    allowed_owner_uids: AbstractSet[int] | None,
+) -> frozenset[int]:
+    if allowed_owner_uids is None:
+        return frozenset((0, os.getuid()))
+    if not allowed_owner_uids or any(
+        type(uid) is not int or uid < 0 for uid in allowed_owner_uids
+    ):
+        raise GrokExecutableError("allowed Grok executable owners are invalid")
+    return frozenset(allowed_owner_uids)
+
+
+def _digest_fd(
+    descriptor: int,
+    allowed_owner_uids: frozenset[int],
+) -> tuple[str, os.stat_result]:
     before = os.fstat(descriptor)
     mode = stat.S_IMODE(before.st_mode)
     if not stat.S_ISREG(before.st_mode):
         raise GrokExecutableError("Grok executable is not a regular file")
-    if before.st_uid not in {0, os.getuid()}:
+    if before.st_uid not in allowed_owner_uids:
         raise GrokExecutableError("Grok executable has an unexpected owner")
     if mode & 0o022:
         raise GrokExecutableError("Grok executable is group/world writable")
@@ -109,9 +124,16 @@ class VerifiedGrokExecutable:
     descriptor: int
     path: Path
     release_id: str
+    allowed_owner_uids: frozenset[int]
 
     @classmethod
-    def open(cls, path: Path) -> "VerifiedGrokExecutable":
+    def open(
+        cls,
+        path: Path,
+        *,
+        allowed_owner_uids: AbstractSet[int] | None = None,
+    ) -> "VerifiedGrokExecutable":
+        owners = _normalize_allowed_owner_uids(allowed_owner_uids)
         if not path.is_absolute():
             raise GrokExecutableError("GROK_BIN must be an absolute path")
         try:
@@ -124,9 +146,9 @@ class VerifiedGrokExecutable:
         except OSError as exc:
             raise GrokExecutableError(f"cannot open Grok executable: {exc}") from exc
         try:
-            release_id, _ = _digest_fd(descriptor)
+            release_id, _ = _digest_fd(descriptor, owners)
             os.set_inheritable(descriptor, False)
-            return cls(descriptor, resolved, release_id)
+            return cls(descriptor, resolved, release_id, owners)
         except BaseException:
             os.close(descriptor)
             raise
@@ -138,11 +160,13 @@ class VerifiedGrokExecutable:
         expected_release_id: str,
         *,
         display_path: Path | None = None,
+        allowed_owner_uids: AbstractSet[int] | None = None,
     ) -> "VerifiedGrokExecutable":
         if type(expected_release_id) is not str or _RELEASE_ID.fullmatch(expected_release_id) is None:
             raise GrokExecutableError("invalid expected Grok executable identity")
+        owners = _normalize_allowed_owner_uids(allowed_owner_uids)
         os.set_inheritable(descriptor, False)
-        actual, _ = _digest_fd(descriptor)
+        actual, _ = _digest_fd(descriptor, owners)
         if actual != expected_release_id:
             raise GrokExecutableError("Grok executable descriptor does not match the contract")
         if display_path is None:
@@ -153,10 +177,10 @@ class VerifiedGrokExecutable:
             if not candidate.is_absolute():
                 candidate = Path("/proc/self/fd/grok")
             display_path = candidate
-        return cls(descriptor, display_path, actual)
+        return cls(descriptor, display_path, actual, owners)
 
     def verify(self) -> None:
-        actual, _ = _digest_fd(self.descriptor)
+        actual, _ = _digest_fd(self.descriptor, self.allowed_owner_uids)
         if actual != self.release_id:
             raise GrokExecutableError("Grok executable changed after contract construction")
 

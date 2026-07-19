@@ -27,8 +27,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from grok_ms.contract import (
+    CONTRACT_SCHEMA_VERSION,
     Endpoint,
     HomeEndpoint,
+    IosEndpoint,
+    PROTOCOL_VERSION,
     ResourceLimits,
     RouteContract,
     RouteMode,
@@ -178,16 +181,21 @@ def request(port: int, *, rung: str = "direct", generation: int = 1) -> Provider
         if rung == "home:arch"
         else ()
     )
-    phone_id = "n-stable-iphone" if rung == "iphone" else None
+    ios_endpoints = (
+        (IosEndpoint("iphone-xr", "n-stable-iphone"),)
+        if rung == "ios:iphone-xr"
+        else ()
+    )
     contract = RouteContract(
-        schema_version=1,
-        protocol_version=1,
+        schema_version=CONTRACT_SCHEMA_VERSION,
+        protocol_version=PROTOCOL_VERSION,
         release_id="test-release-1",
         model_id="grok-4.5",
         route_mode=RouteMode.AUTO,
         forced_host=None,
         home_endpoints=home_endpoints,
-        phone_node_id=phone_id,
+        ios_endpoints=ios_endpoints,
+        forced_ios_key=None,
         allow_direct=rung == "direct",
         ladder=(rung,),
         routing_config_digest="a" * 64,
@@ -357,11 +365,12 @@ class FrozenProviderInputTests(unittest.TestCase):
         self.assertNotIn("GROK_PROVIDER_IPHONE_NODE_ID", home_env)
         self.assertNotIn("VPNGATE_COUNTRIES", home_env)
 
-        iphone = request(11882, rung="iphone")
+        iphone = request(11882, rung="ios:iphone-xr")
         iphone_env = LegacyShellProvider._environment(iphone, workspace)
         self.assertEqual(
-            iphone_env["GROK_PROVIDER_IPHONE_NODE_ID"], "n-stable-iphone"
+            iphone_env["GROK_PROVIDER_IOS_NODE_ID"], "n-stable-iphone"
         )
+        self.assertEqual(iphone_env["GROK_PROVIDER_IOS_KEY"], "iphone-xr")
         self.assertNotIn("GROK_PROVIDER_HOME_HOST", iphone_env)
 
         vpn = request(11884, rung="vpn")
@@ -1048,16 +1057,21 @@ PY
 write_inventory(){
     pid="$1"
     privileged='[]'
+    ios_node_id_sha256=null
     if [[ "$rung" == vpn ]]; then
       privileged='[{"kind":"namespace","name":"grokvpn","broker_instance":"broker-test"},{"kind":"tun","name":"tun-grok","broker_instance":"broker-test"},{"kind":"vpn_daemon","name":"openvpn","broker_instance":"broker-test"}]'
+    elif [[ "$rung" == ios:* ]]; then
+      ios_node_id_sha256=\"$(printf '%s' "$GROK_PROVIDER_IOS_NODE_ID" | sha256sum | awk '{print $1}')\"
+      [[ ! -e "$(dirname "$0")/wrong-ios-digest" ]] \
+        || ios_node_id_sha256=\"$(printf '0%.0s' {1..64})\"
     fi
     actual_rung="$rung"
     [[ ! -e "$(dirname "$0")/malformed" ]] || actual_rung=wrong
     tmp="$GROK_PROVIDER_INVENTORY.tmp"
     ( umask 077
-      printf '{"schema_version":1,"owner_epoch":"%s","transition_id":"%s","generation":%s,"rung":"%s","pids":[%s],"paths":[{"path":"%s","kind":"pid"}],"privileged":%s}\n' \
+      printf '{"schema_version":1,"owner_epoch":"%s","transition_id":"%s","generation":%s,"ios_node_id_sha256":%s,"rung":"%s","pids":[%s],"paths":[{"path":"%s","kind":"pid"}],"privileged":%s}\n' \
         "$GROK_PROVIDER_OWNER_EPOCH" "$GROK_PROVIDER_TRANSITION_ID" \
-        "$GROK_PROVIDER_GENERATION" "$actual_rung" "$pid" "$pidfile" \
+        "$GROK_PROVIDER_GENERATION" "$ios_node_id_sha256" "$actual_rung" "$pid" "$pidfile" \
         "$privileged" > "$tmp"
     )
     mv "$tmp" "$GROK_PROVIDER_INVENTORY"
@@ -2229,7 +2243,7 @@ print(json.dumps({"provider_records": outcome.provider_records, "recovered": out
             (release / "malformed").touch()
             runtime = root / "runtime"
             adapter = LegacyShellProvider(runtime, release)
-            wanted = request(unused_port(), rung="iphone", generation=4)
+            wanted = request(unused_port(), rung="ios:iphone-xr", generation=4)
 
             with self.assertRaisesRegex(ProviderProtocolError, "rung mismatch"):
                 adapter.start(
@@ -2242,6 +2256,31 @@ print(json.dumps({"provider_records": outcome.provider_records, "recovered": out
                         (wanted.private_endpoint.host, wanted.private_endpoint.port)
                     ),
                     0,
+                )
+            self.assertFalse(runtime.joinpath("p").exists())
+
+    def test_ios_inventory_must_bind_the_frozen_stable_node_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            os.chmod(root, 0o700)
+            release = self._release(root)
+            (release / "wrong-ios-digest").touch()
+            runtime = root / "runtime"
+            adapter = LegacyShellProvider(runtime, release)
+            wanted = request(
+                unused_port(),
+                rung="ios:iphone-xr",
+                generation=4,
+            )
+
+            with self.assertRaisesRegex(
+                ProviderProtocolError,
+                "ios_node_id_sha256 mismatch",
+            ):
+                adapter.start(
+                    wanted,
+                    TransitionDeadline.after_ms(5_000),
+                    evidence,
                 )
             self.assertFalse(runtime.joinpath("p").exists())
 

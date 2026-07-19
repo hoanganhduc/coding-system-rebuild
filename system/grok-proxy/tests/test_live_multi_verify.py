@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import inspect
 import os
+from dataclasses import replace
 from pathlib import Path
 import signal
 import socket
@@ -28,20 +29,29 @@ from grok_ms import qualification_verifier as VERIFY
 from grok_ms import providers as PROVIDERS
 from grok_ms import supervisor as SUPERVISOR
 from grok_ms.contract import (
+    CONTRACT_SCHEMA_VERSION,
     Endpoint,
     HomeEndpoint,
+    IosEndpoint,
+    PROTOCOL_VERSION,
     ResourceLimits,
     RouteContract,
     RouteMode,
     StabilityPolicy,
     TimeoutPolicy,
     VpnPolicy,
+    reconstruct_original_contract,
 )
 from grok_ms.providers import (
     ListenerIdentity,
     PrivilegedResourceIdentity,
     ProviderRequest,
     ProviderResourceGraph,
+)
+from grok_ms.managed_profile import (
+    ManagedProfile,
+    ReadinessPolicy,
+    write_content_addressed_profile,
 )
 from grok_ms.runtime import current_process_identity as runtime_process_identity
 
@@ -66,31 +76,32 @@ class LiveVerifierHelperTests(unittest.TestCase):
             mode = RouteMode.DIRECT
             forced_host = None
             homes: tuple[HomeEndpoint, ...] = ()
-            phone = None
-        elif rung == "iphone":
-            mode = RouteMode.IPHONE
+            ios_endpoints: tuple[IosEndpoint, ...] = ()
+        elif rung == "ios:iphone-xr":
+            mode = RouteMode.IOS
             forced_host = None
             homes = ()
-            phone = "node-phone-1"
+            ios_endpoints = (IosEndpoint("iphone-xr", "node-phone-1"),)
         elif rung == "vpn":
             mode = RouteMode.VPN
             forced_host = None
             homes = ()
-            phone = None
+            ios_endpoints = ()
         else:
             mode = RouteMode.HOME
             forced_host = rung.removeprefix("home:")
             homes = (HomeEndpoint(forced_host, "host.example", "alice", 22),)
-            phone = None
+            ios_endpoints = ()
         return RouteContract(
-            schema_version=1,
-            protocol_version=1,
+            schema_version=CONTRACT_SCHEMA_VERSION,
+            protocol_version=PROTOCOL_VERSION,
             release_id="release-test-1",
             model_id="xai/grok-4.5",
             route_mode=mode,
             forced_host=forced_host,
             home_endpoints=homes,
-            phone_node_id=phone,
+            ios_endpoints=ios_endpoints,
+            forced_ios_key="iphone-xr" if mode is RouteMode.IOS else None,
             allow_direct=True,
             ladder=(rung,),
             routing_config_digest="a" * 64,
@@ -109,7 +120,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
 
     def test_provider_authority_graph_is_route_specific(self) -> None:
         identity = runtime_process_identity()
-        for rung in ("direct", "home:lab-phone", "iphone", "vpn"):
+        for rung in ("direct", "home:lab-phone", "ios:iphone-xr", "vpn"):
             with self.subTest(rung=rung):
                 contract = self._route_contract(rung)
                 request = ProviderRequest(
@@ -1468,10 +1479,17 @@ class LiveVerifierHelperTests(unittest.TestCase):
                     return_value=VERIFY._default_observations("load32"),
                 ),
                 mock.patch.object(VERIFY, "assert_resource_sampler"),
-                mock.patch.object(VERIFY.os, "write", return_value=1),
+                mock.patch.object(
+                    VERIFY.os, "write", return_value=1
+                ) as write_output,
             ):
                 self.assertEqual(VERIFY.main(), 0)
             self.assertEqual(workload.call_args.args[0], gate)
+            qualification_record = json.loads(
+                write_output.call_args.args[1]
+            )
+            self.assertEqual(qualification_record["schema_version"], 5)
+            self.assertIsNone(qualification_record["profile_sha256"])
 
             os.chmod(selection_path, 0o644)
             selected["entrypoint_sha256"] = VERIFY._sha256_file(
@@ -1512,16 +1530,26 @@ class LiveVerifierHelperTests(unittest.TestCase):
                 "GROK_RELEASE_CANARY_NONCE": "c" * 64,
                 "GROK_RELEASE_CANARY_KIND": "rung",
                 "GROK_RELEASE_CANARY_MODEL": "xai/grok-4.5",
+                "GROK_RELEASE_CANARY_PROFILE_SHA256": "d" * 64,
             }
             with mock.patch.dict(os.environ, selected, clear=True):
                 context = VERIFY.QualificationContext.from_environment()
             self.assertEqual(context.model_id, "xai/grok-4.5")
             self.assertEqual(context.rung, "home:lab-phone")
             self.assertEqual(context.route_profile, "home:lab-phone")
+            self.assertEqual(context.profile_sha256, "d" * 64)
 
             invalid = dict(selected)
             invalid["GROK_RELEASE_CANARY_GROK_RELEASE"] = "vendor/grok-cli"
             with mock.patch.dict(os.environ, invalid, clear=True):
+                with self.assertRaisesRegex(
+                    VERIFY.VerificationBlocked, "authorization values"
+                ):
+                    VERIFY.QualificationContext.from_environment()
+
+            invalid_profile = dict(selected)
+            invalid_profile["GROK_RELEASE_CANARY_PROFILE_SHA256"] = "not-a-digest"
+            with mock.patch.dict(os.environ, invalid_profile, clear=True):
                 with self.assertRaisesRegex(
                     VERIFY.VerificationBlocked, "authorization values"
                 ):
@@ -1558,8 +1586,133 @@ class LiveVerifierHelperTests(unittest.TestCase):
             )
         )
 
+    def test_real_iphone_contract_narrows_runtime_to_qualified_device(self) -> None:
+        first = IosEndpoint("iphone-xr", "node-phone-1")
+        second = IosEndpoint("ipad-pro", "node-tablet-2")
+        original = self._route_contract("ios:iphone-xr")
+        original = RouteContract.from_dict(
+            {
+                **original.to_dict(),
+                "forced_ios_key": None,
+                "ios_endpoints": [first.to_dict(), second.to_dict()],
+                "ladder": ["ios:iphone-xr", "ios:ipad-pro"],
+            }
+        )
+        context = VERIFY.QualificationContext(
+            release_id=original.release_id,
+            nonce="a" * 64,
+            canary_kind="rung",
+            rung="ios:ipad-pro",
+            route_profile="iphone",
+            contract_sha256=original.digest(),
+            grok_release_id=original.grok_release_id,
+            model_id=original.model_id,
+            auth_fd=-1,
+        )
+        with mock.patch.object(VERIFY, "build_contract", return_value=original):
+            reproduced, runtime = VERIFY._real_contracts(context, {})
+        self.assertEqual(reproduced, original)
+        self.assertEqual(runtime.ladder, ("ios:ipad-pro",))
+        self.assertEqual(runtime.ios_endpoints, (first, second))
+        self.assertEqual(reconstruct_original_contract(runtime), original)
+
+    def test_profile_bound_real_contract_uses_frozen_nondefault_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            profile_root = home / ".local/state/grok-proxy/profiles"
+            profile_root.mkdir(parents=True, mode=0o700)
+            profile_root.chmod(0o700)
+            grok = home / "grok-profile-v1"
+            grok.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+            grok.chmod(0o700)
+            grok_identity = VERIFY.grok_release_id(grok)
+            contract = replace(
+                self._route_contract("direct"),
+                release_id="a" * 64,
+                grok_release_id=grok_identity,
+                public_endpoint=Endpoint("127.0.0.1", 19080),
+                private_ports=(19081, 19082),
+                timeout_policy=TimeoutPolicy(12_345, 23_456, 234_567, 34_567),
+                limits=ResourceLimits(
+                    7, 13, 29, 32_768, 131_072, 9_437_184
+                ),
+            )
+            profile = ManagedProfile.create(
+                contract,
+                grok,
+                ReadinessPolicy(1, ()),
+            )
+            write_content_addressed_profile(
+                profile_root,
+                profile,
+                owner_uid=os.getuid(),
+                owner_gid=os.getgid(),
+            )
+            context = VERIFY.QualificationContext(
+                release_id=contract.release_id,
+                nonce="b" * 64,
+                canary_kind="rung",
+                rung="direct",
+                route_profile="direct",
+                contract_sha256=contract.digest(),
+                grok_release_id=contract.grok_release_id,
+                model_id=contract.model_id,
+                auth_fd=-1,
+                profile_sha256=profile.digest(),
+            )
+            account = SimpleNamespace(
+                pw_dir=str(home),
+                pw_name="qualification-user",
+            )
+            hostile_ambient = {
+                "GROK_PROXY_PORT": "1080",
+                "GROK_PRIVATE_PORTS": "11080 11081",
+                "GROK_MAX_LEASES": "1",
+                "GROK_CONNECT_TIMEOUT_MS": "1",
+                "VPNGATE_COUNTRIES": "ZZ",
+            }
+            with (
+                mock.patch.object(VERIFY.pwd, "getpwuid", return_value=account),
+                mock.patch.object(
+                    VERIFY,
+                    "build_contract",
+                    side_effect=AssertionError(
+                        "profile qualification consulted ambient configuration"
+                    ),
+                ),
+            ):
+                reproduced, runtime = VERIFY._real_contracts(
+                    context, hostile_ambient
+                )
+            self.assertEqual(reproduced, contract)
+            self.assertEqual(runtime.ladder, ("direct",))
+            self.assertEqual(runtime.public_endpoint.port, 19080)
+            self.assertEqual(runtime.limits.max_leases, 7)
+            self.assertEqual(runtime.timeout_policy.connect_ms, 12_345)
+
+            mismatched = replace(context, contract_sha256="c" * 64)
+            with (
+                mock.patch.object(VERIFY.pwd, "getpwuid", return_value=account),
+                self.assertRaisesRegex(
+                    VERIFY.VerificationBlocked,
+                    "profile-bound qualification identity is mismatched",
+                ),
+            ):
+                VERIFY._real_contracts(mismatched, hostile_ambient)
+
+            grok.write_text("#!/bin/sh\nexit 9\n", encoding="ascii")
+            grok.chmod(0o700)
+            with (
+                mock.patch.object(VERIFY.pwd, "getpwuid", return_value=account),
+                self.assertRaisesRegex(
+                    VERIFY.VerificationBlocked,
+                    "profile-bound qualification profile is invalid",
+                ),
+            ):
+                VERIFY._real_contracts(context, hostile_ambient)
+
     def test_fixed_observation_schemas_are_exact(self) -> None:
-        self.assertEqual(VERIFY.EVIDENCE_SCHEMA_VERSION, 3)
+        self.assertEqual(VERIFY.EVIDENCE_SCHEMA_VERSION, 5)
         self.assertEqual(
             set(VERIFY._default_observations("load32")),
             {
@@ -1585,6 +1738,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
             set(VERIFY._default_observations("real-pair")),
             {
                 "sessions_requested", "sessions_completed", "active_rung",
+                "rung_qualification_sha256",
                 "model_id", "shared_owner_epoch", "shared_generation",
                 "shared_contract", "independent_grok_units",
                 "shared_leader_disabled", "leader_socket_count",
@@ -2404,7 +2558,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
             owner_epoch = "epoch-a"
             ready = {
                 "schema_version": 1,
-                "protocol_version": 1,
+                "protocol_version": PROTOCOL_VERSION,
                 "release_id": release_id,
                 "owner_epoch": owner_epoch,
                 **identity.to_dict(),
@@ -2433,7 +2587,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
             )
             self.assertEqual(authority.supervisor, identity)
 
-            publish(control / "supervisor.ready", {**ready, "protocol_version": 2})
+            publish(control / "supervisor.ready", {**ready, "protocol_version": 1})
             with self.assertRaisesRegex(VERIFY.VerificationError, "disagree"):
                 VERIFY.capture_cleanup_authority(
                     control, snapshot, {"release_id": release_id}

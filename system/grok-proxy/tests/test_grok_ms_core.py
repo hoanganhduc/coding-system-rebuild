@@ -17,11 +17,17 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import grok_ms.contract as contract_module
 from grok_ms.contract import (
+    CONTRACT_SCHEMA_VERSION,
     ContractValidationError,
     Endpoint,
     HomeEndpoint,
+    IosEndpoint,
+    PROTOCOL_VERSION,
+    RUNG_QUALIFICATION_SCHEMA_VERSION,
     ResourceLimits,
+    RungQualificationContract,
     RouteContract,
     RouteMode,
     StabilityPolicy,
@@ -57,8 +63,8 @@ def mode(path: Path) -> int:
 
 def base_contract() -> RouteContract:
     return RouteContract(
-        schema_version=1,
-        protocol_version=1,
+        schema_version=CONTRACT_SCHEMA_VERSION,
+        protocol_version=PROTOCOL_VERSION,
         release_id="test-release-1",
         model_id="grok-4.5",
         route_mode=RouteMode.AUTO,
@@ -67,9 +73,19 @@ def base_contract() -> RouteContract:
             HomeEndpoint("arch", "100.64.0.10", "alice", 22),
             HomeEndpoint("win", "100.64.0.11", "bob", 2200),
         ),
-        phone_node_id="n-test-phone",
+        ios_endpoints=(
+            IosEndpoint("iphone-xr", "n-test-phone"),
+            IosEndpoint("ipad-pro", "n-test-ipad"),
+        ),
+        forced_ios_key=None,
         allow_direct=True,
-        ladder=("home:arch", "home:win", "iphone", "vpn"),
+        ladder=(
+            "home:arch",
+            "home:win",
+            "ios:iphone-xr",
+            "ios:ipad-pro",
+            "vpn",
+        ),
         routing_config_digest="a" * 64,
         probe_policy_version="probe-v1",
         timeout_policy=TimeoutPolicy(
@@ -111,10 +127,192 @@ def base_contract() -> RouteContract:
 
 
 class ContractTests(unittest.TestCase):
+    def test_rung_qualification_projection_matches_for_forced_and_auto(self) -> None:
+        automatic = base_contract()
+        forced_home = dataclasses.replace(
+            automatic,
+            route_mode=RouteMode.HOME,
+            forced_host="arch",
+            ladder=("home:arch",),
+            routing_config_digest="b" * 64,
+        )
+        forced_ios = dataclasses.replace(
+            automatic,
+            route_mode=RouteMode.IOS,
+            forced_ios_key="iphone-xr",
+            ios_endpoints=(automatic.ios_endpoints[0],),
+            ladder=("ios:iphone-xr",),
+            routing_config_digest="c" * 64,
+        )
+        forced_vpn = dataclasses.replace(
+            automatic,
+            route_mode=RouteMode.VPN,
+            ladder=("vpn",),
+            routing_config_digest="d" * 64,
+        )
+        forced_direct = dataclasses.replace(
+            automatic,
+            route_mode=RouteMode.DIRECT,
+            ios_endpoints=(),
+            ladder=("direct",),
+            routing_config_digest="e" * 64,
+        )
+
+        pairs = (
+            (automatic, forced_home, "home:arch"),
+            (automatic, forced_ios, "ios:iphone-xr"),
+            (automatic, forced_vpn, "vpn"),
+            (automatic, forced_direct, "direct"),
+        )
+        for left, right, rung in pairs:
+            with self.subTest(rung=rung):
+                self.assertNotEqual(left.digest(), right.digest())
+                self.assertEqual(
+                    left.rung_qualification_contract(rung),
+                    right.rung_qualification_contract(rung),
+                )
+                self.assertEqual(
+                    left.rung_qualification_digest(rung),
+                    right.rung_qualification_digest(rung),
+                )
+
+    def test_rung_qualification_projection_normalizes_only_route_selection(self) -> None:
+        contract = base_contract()
+        baseline = contract.rung_qualification_digest("home:arch")
+        unrelated = dataclasses.replace(
+            contract,
+            home_endpoints=(
+                contract.home_endpoints[0],
+                dataclasses.replace(
+                    contract.home_endpoints[1], host="100.64.0.99"
+                ),
+            ),
+            ios_endpoints=(
+                dataclasses.replace(
+                    contract.ios_endpoints[0], stable_node_id="n-other-phone"
+                ),
+                contract.ios_endpoints[1],
+            ),
+            routing_config_digest="e" * 64,
+        )
+        selected_endpoint_changed = dataclasses.replace(
+            contract,
+            home_endpoints=(
+                dataclasses.replace(
+                    contract.home_endpoints[0], host="100.64.0.12"
+                ),
+                contract.home_endpoints[1],
+            ),
+        )
+
+        self.assertEqual(
+            unrelated.rung_qualification_digest("home:arch"), baseline
+        )
+        self.assertNotEqual(
+            selected_endpoint_changed.rung_qualification_digest("home:arch"),
+            baseline,
+        )
+
+    def test_rung_qualification_projection_binds_common_behavior_fields(self) -> None:
+        contract = base_contract()
+        baseline = contract.rung_qualification_digest("home:arch")
+        variants = (
+            dataclasses.replace(contract, release_id="test-release-2"),
+            dataclasses.replace(contract, model_id="grok-4.5-fast"),
+            dataclasses.replace(contract, probe_policy_version="probe-v2"),
+            dataclasses.replace(
+                contract,
+                timeout_policy=dataclasses.replace(
+                    contract.timeout_policy, probe_ms=91_000
+                ),
+            ),
+            dataclasses.replace(
+                contract,
+                stability_policy=dataclasses.replace(
+                    contract.stability_policy, sample_count=4
+                ),
+            ),
+            dataclasses.replace(
+                contract,
+                vpn_policy=dataclasses.replace(
+                    contract.vpn_policy, blocked_countries=("CN", "FR")
+                ),
+            ),
+            dataclasses.replace(
+                contract,
+                helper_release_ids=(
+                    ("relay", "relay-release-2"),
+                    ("socks", "socks-release-1"),
+                    ("vpn-broker", "broker-release-1"),
+                ),
+            ),
+            dataclasses.replace(contract, grok_release_id="grok-0.2.94"),
+            dataclasses.replace(
+                contract, public_endpoint=Endpoint("127.0.0.1", 1081)
+            ),
+            dataclasses.replace(
+                contract, private_ports=(11880, 11881, 11882, 11884)
+            ),
+            dataclasses.replace(
+                contract,
+                limits=dataclasses.replace(contract.limits, max_leases=33),
+            ),
+        )
+
+        for variant in variants:
+            with self.subTest(difference=contract.semantic_differences(variant)):
+                self.assertNotEqual(
+                    variant.rung_qualification_digest("home:arch"), baseline
+                )
+
+    def test_rung_qualification_contract_is_closed_and_round_trips(self) -> None:
+        projection = base_contract().rung_qualification_contract("ios:iphone-xr")
+        self.assertEqual(
+            projection.schema_version, RUNG_QUALIFICATION_SCHEMA_VERSION
+        )
+        self.assertEqual(
+            RungQualificationContract.from_dict(projection.to_dict()), projection
+        )
+        self.assertEqual(
+            RungQualificationContract.from_dict(projection.to_dict()).digest(),
+            projection.digest(),
+        )
+
+        unexpected = projection.to_dict()
+        unexpected["unexpected"] = True
+        with self.assertRaises(ContractValidationError):
+            RungQualificationContract.from_dict(unexpected)
+        malformed = projection.to_dict()
+        malformed["private_ports"][0] = True
+        with self.assertRaises(ContractValidationError):
+            RungQualificationContract.from_dict(malformed)
+        with self.assertRaisesRegex(ContractValidationError, "authorized rung"):
+            base_contract().rung_qualification_contract("home:missing")
+
+    def test_rung_qualification_field_classification_is_exhaustive(self) -> None:
+        partitions = (
+            contract_module._RUNG_QUALIFICATION_INCLUDED_ROUTE_FIELDS,
+            contract_module._RUNG_QUALIFICATION_SELECTED_ENDPOINT_FIELDS,
+            contract_module._RUNG_QUALIFICATION_NORMALIZED_ROUTE_FIELDS,
+        )
+        actual = {field.name for field in dataclasses.fields(RouteContract)}
+        self.assertEqual(set().union(*partitions), actual)
+        for field_name in actual:
+            self.assertEqual(
+                sum(field_name in partition for partition in partitions), 1
+            )
+
     def test_filtered_auto_ladder_preserves_frozen_order_and_reconstructs(self) -> None:
         original = dataclasses.replace(
             base_contract(),
-            ladder=("home:arch", "home:win", "iphone", "vpn", "direct"),
+            ladder=(
+                "home:arch",
+                "home:win",
+                "ios:iphone-xr",
+                "ios:ipad-pro",
+                "vpn",
+                "direct",
+            ),
         )
         filtered = dataclasses.replace(
             original,
@@ -140,6 +338,28 @@ class ContractTests(unittest.TestCase):
             reconstruct_original_contract(
                 dataclasses.replace(original, ladder=("direct", "vpn"))
             )
+
+    def test_filtered_ios_family_keeps_frozen_endpoints_and_reconstructs(self) -> None:
+        original = dataclasses.replace(
+            base_contract(),
+            route_mode=RouteMode.IOS,
+            forced_host=None,
+            home_endpoints=(),
+            forced_ios_key=None,
+            allow_direct=True,
+            ladder=("ios:iphone-xr", "ios:ipad-pro"),
+        )
+        filtered = dataclasses.replace(original, ladder=("ios:ipad-pro",))
+        self.assertEqual(filtered.ios_endpoints, original.ios_endpoints)
+        self.assertEqual(reconstruct_original_contract(filtered), original)
+        self.assertTrue(
+            qualification_route_profile_matches(filtered, "iphone", "ios:ipad-pro")
+        )
+        with self.assertRaisesRegex(
+            ContractValidationError,
+            "only frozen iOS devices",
+        ):
+            dataclasses.replace(filtered, ladder=("direct",))
 
     def test_home_label_character_set_excludes_model_namespace_separator(self) -> None:
         with self.assertRaisesRegex(ContractValidationError, "unsupported characters"):
@@ -186,8 +406,14 @@ class ContractTests(unittest.TestCase):
                 ),
             ),
             (
-                "phone_node_id",
-                dataclasses.replace(contract, phone_node_id="n-other-phone"),
+                "ios_endpoints",
+                dataclasses.replace(
+                    contract,
+                    ios_endpoints=(
+                        IosEndpoint("iphone-xr", "n-other-phone"),
+                        contract.ios_endpoints[1],
+                    ),
+                ),
             ),
             (
                 "timeout_policy.probe_ms",
@@ -276,8 +502,25 @@ class ContractTests(unittest.TestCase):
                 forced_host="unknown",
                 ladder=("home:unknown",),
             )
-        with self.assertRaisesRegex(ContractValidationError, "iPhone ladder rung"):
-            dataclasses.replace(base_contract(), phone_node_id=None)
+        with self.assertRaisesRegex(ContractValidationError, "iOS endpoint"):
+            dataclasses.replace(base_contract(), ios_endpoints=())
+        exact_ios = dataclasses.replace(
+            base_contract(),
+            route_mode=RouteMode.IOS,
+            forced_ios_key="iphone-xr",
+            ios_endpoints=(base_contract().ios_endpoints[0],),
+            ladder=("ios:iphone-xr",),
+        )
+        with self.assertRaisesRegex(ContractValidationError, "only its selected"):
+            dataclasses.replace(
+                exact_ios,
+                ios_endpoints=base_contract().ios_endpoints,
+            )
+        with self.assertRaisesRegex(ContractValidationError, "exactly its frozen"):
+            dataclasses.replace(
+                exact_ios,
+                ladder=("ios:iphone-xr", "vpn"),
+            )
         with self.assertRaisesRegex(ContractValidationError, "preserve frozen"):
             dataclasses.replace(
                 base_contract(),

@@ -14,10 +14,11 @@ import tomllib
 from typing import Mapping, Sequence
 
 from .contract import (
+    CONTRACT_SCHEMA_VERSION,
     PROTOCOL_VERSION,
-    SCHEMA_VERSION,
     Endpoint,
     HomeEndpoint,
+    IosEndpoint,
     ResourceLimits,
     RouteContract,
     RouteMode,
@@ -27,6 +28,7 @@ from .contract import (
     canonical_json_bytes,
 )
 from .grok_exec import GrokExecutableError, grok_release_id
+from .ios_registry import IosRegistryError, load_effective_registry
 from .secure_files import SecureFileError, read_secure_json
 
 
@@ -58,6 +60,7 @@ class Classification:
     control: str | None = None
     route_mode: RouteMode = RouteMode.AUTO
     forced_host: str | None = None
+    forced_ios_key: str | None = None
     allow_direct: bool = True
     force_pick: bool = False
 
@@ -76,6 +79,12 @@ def _token(value: str, label: str) -> str:
 
 def _home_label(value: str, label: str) -> str:
     if _HOME_LABEL_RE.fullmatch(value) is None:
+        raise ConfigurationError(f"{label} contains unsupported characters")
+    return value
+
+
+def _ios_key(value: str, label: str) -> str:
+    if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", value) is None:
         raise ConfigurationError(f"{label} contains unsupported characters")
     return value
 
@@ -99,9 +108,13 @@ def classify(argv: Sequence[str]) -> Classification:
     args = tuple(argv)
     if args and args[0] in {"-h", "--help", "help"}:
         return Classification(CommandKind.USAGE, args)
+    if args and args[0] in {"doctor", "profile-create"}:
+        raise ConfigurationError(
+            f"{args[0]} accepts only the exact --json form"
+        )
     if args and args[0] in {"inspect", "--version", "version"}:
         return Classification(CommandKind.BARE, args)
-    if args and args[0] in {"status", "ip"}:
+    if args and args[0] in {"status", "ip", "iphone-list"}:
         if len(args) != 1:
             raise ConfigurationError(f"{args[0]} takes no operands")
         return Classification(CommandKind.CONTROL, (), control=args[0])
@@ -109,12 +122,13 @@ def classify(argv: Sequence[str]) -> Classification:
         if len(args) != 1:
             raise ConfigurationError("recover takes no operands")
         return Classification(CommandKind.RECOVERY, (), control="recover")
-    if args and args[0] in {"stop", "iphone-setup"}:
+    if args and args[0] in {"stop", "iphone-setup", "iphone-remove", "iphone-reorder"}:
         return Classification(CommandKind.MAINTENANCE, args, control=args[0])
 
     index = 0
     forced_host: str | None = None
     force_iphone = False
+    forced_ios_key: str | None = None
     force_vpn = False
     force_direct = False
     allow_direct = True
@@ -129,6 +143,11 @@ def classify(argv: Sequence[str]) -> Classification:
         elif item == "--iphone":
             force_iphone = True
             index += 1
+        elif item == "--ios":
+            if index + 1 >= len(args) or not args[index + 1]:
+                raise ConfigurationError("--ios requires a key")
+            forced_ios_key = _ios_key(args[index + 1], "iOS device key")
+            index += 2
         elif item == "--vpn":
             force_vpn = True
             index += 1
@@ -147,11 +166,21 @@ def classify(argv: Sequence[str]) -> Classification:
         else:
             break
 
-    forced = sum((forced_host is not None, force_iphone, force_vpn, force_direct))
+    forced = sum(
+        (
+            forced_host is not None,
+            force_iphone,
+            forced_ios_key is not None,
+            force_vpn,
+            force_direct,
+        )
+    )
     if forced > 1:
         raise ConfigurationError(
-            "choose only one of --host, --iphone, --vpn, or --direct"
+            "choose only one of --host, --iphone, --ios, --vpn, or --direct"
         )
+    if force_direct and not allow_direct:
+        raise ConfigurationError("--direct and --no-direct are contradictory")
     remaining = args[index:]
     if remaining and remaining[0] in {"completions", "worktree", "leader"}:
         return Classification(CommandKind.BARE, remaining)
@@ -166,7 +195,9 @@ def classify(argv: Sequence[str]) -> Classification:
     if forced_host is not None:
         route_mode = RouteMode.HOME
     elif force_iphone:
-        route_mode = RouteMode.IPHONE
+        route_mode = RouteMode.IOS
+    elif forced_ios_key is not None:
+        route_mode = RouteMode.IOS
     elif force_vpn:
         route_mode = RouteMode.VPN
     elif force_direct:
@@ -176,6 +207,7 @@ def classify(argv: Sequence[str]) -> Classification:
         remaining,
         route_mode=route_mode,
         forced_host=forced_host,
+        forced_ios_key=forced_ios_key,
         allow_direct=allow_direct,
         force_pick=force_pick,
     )
@@ -268,14 +300,6 @@ def parse_hosts(path: Path) -> tuple[tuple[str, str, str, int], ...]:
         labels.add(label)
         records.append((label, host, user, port))
     return tuple(records)
-
-
-def _phone_id(path: Path) -> str | None:
-    try:
-        value = path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    return _token(value, "iPhone node ID") if value else None
 
 
 def _account_home() -> Path:
@@ -381,7 +405,20 @@ def build_contract(
         for label, host, user, port in hosts
     )
     iphone_root = _iphone_state_root(env, home)
-    phone_id = _phone_id(iphone_root / "exit-node")
+    ios_endpoints: tuple[IosEndpoint, ...] = ()
+    if classification.route_mode in {RouteMode.AUTO, RouteMode.IOS}:
+        try:
+            registry = load_effective_registry(
+                iphone_root / "devices.json",
+                iphone_root / "exit-node",
+                iphone_root / "ready",
+            )
+        except (IosRegistryError, OSError) as exc:
+            raise ConfigurationError(f"invalid iOS device registry: {exc}") from exc
+        ios_endpoints = tuple(
+            IosEndpoint(device.key, device.stable_node_id)
+            for device in registry.devices
+        )
     if classification.route_mode is RouteMode.DIRECT:
         ladder = ("direct",)
     elif classification.route_mode is RouteMode.HOME:
@@ -389,16 +426,31 @@ def build_contract(
         if classification.forced_host not in {record[0] for record in hosts}:
             raise ConfigurationError(f"unknown home host {classification.forced_host!r}")
         ladder = (f"home:{classification.forced_host}",)
-    elif classification.route_mode is RouteMode.IPHONE:
-        if phone_id is None:
-            raise ConfigurationError("the iPhone route is not configured")
-        ladder = ("iphone",)
+    elif classification.route_mode is RouteMode.IOS:
+        if not ios_endpoints:
+            raise ConfigurationError("no iOS exit node is registered")
+        if classification.forced_ios_key is not None:
+            selected_ios = next(
+                (
+                    endpoint
+                    for endpoint in ios_endpoints
+                    if endpoint.key == classification.forced_ios_key
+                ),
+                None,
+            )
+            if selected_ios is None:
+                raise ConfigurationError(
+                    f"unknown iOS device {classification.forced_ios_key!r}"
+                )
+            ios_endpoints = (selected_ios,)
+            ladder = (f"ios:{classification.forced_ios_key}",)
+        else:
+            ladder = tuple(f"ios:{endpoint.key}" for endpoint in ios_endpoints)
     elif classification.route_mode is RouteMode.VPN:
         ladder = ("vpn",)
     else:
         mutable = [f"home:{endpoint.label}" for endpoint in home_endpoints]
-        if phone_id is not None:
-            mutable.append("iphone")
+        mutable.extend(f"ios:{endpoint.key}" for endpoint in ios_endpoints)
         mutable.append("vpn")
         if classification.allow_direct:
             mutable.append("direct")
@@ -425,7 +477,7 @@ def build_contract(
     release_id = _release_id(release_dir, env)
     routing_snapshot = {
         "hosts": [endpoint.to_dict() for endpoint in home_endpoints],
-        "phone_node_id": phone_id,
+        "ios_endpoints": [endpoint.to_dict() for endpoint in ios_endpoints],
         "ladder": list(ladder),
         "blocked_countries": list(blocked),
         "allowed_countries": list(allowed),
@@ -452,14 +504,15 @@ def build_contract(
     if limits.total_buffer_bytes < limits.per_stream_buffer_bytes:
         raise ConfigurationError("total buffer limit is smaller than one stream buffer")
     return RouteContract(
-        schema_version=SCHEMA_VERSION,
+        schema_version=CONTRACT_SCHEMA_VERSION,
         protocol_version=PROTOCOL_VERSION,
         release_id=release_id,
         model_id=model_id,
         route_mode=classification.route_mode,
         forced_host=classification.forced_host,
         home_endpoints=home_endpoints,
-        phone_node_id=phone_id,
+        ios_endpoints=ios_endpoints,
+        forced_ios_key=classification.forced_ios_key,
         allow_direct=classification.allow_direct,
         ladder=ladder,
         routing_config_digest=routing_digest,

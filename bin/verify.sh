@@ -109,7 +109,45 @@ fi
 echo "--- components ---"
 for c in openclaw-bot ai-agents-skills; do
   if [[ "$c" == "ai-agents-skills" ]]; then
-    [[ -d "$HOME/$c/.git" ]] && ok "component present: ~/$c" || skp "component absent: ~/$c (run make components)"
+    pin=$(/usr/bin/sed -n 's|^ai-agents-skills=.*@\([0-9a-f]\{40\}\)$|\1|p' "$REPO/components.lock")
+    if [[ -d "$HOME/$c/.git" && "$pin" =~ ^[0-9a-f]{40}$ ]] \
+      && /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C HOME=/nonexistent \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 \
+        /usr/bin/git --no-replace-objects --no-optional-locks \
+          -C "$HOME/$c" cat-file -e "$pin^{commit}" 2>/dev/null; then
+      ok "component object present: ~/$c@${pin:0:12}"
+    else
+      skp "component object absent: ~/$c (run make components)"
+    fi
+    helper_digest=$(/usr/bin/sed -n 's/^  AAS_HELPER_SHA256="\([0-9a-f]\{64\}\)"$/\1/p' "$REPO/bin/install.sh")
+    helper="/usr/local/libexec/coding-system/install-helpers/aas-component-$helper_digest.py"
+    immutable="/usr/local/libexec/coding-system/components/ai-agents-skills/$pin"
+    if [[ "$helper_digest" =~ ^[0-9a-f]{64}$ && -e "$helper" ]]; then
+      helper_hash=$(/usr/bin/sha256sum "$helper" 2>/dev/null | /usr/bin/cut -d' ' -f1 || true)
+      if [[ -f "$helper" && ! -L "$helper" \
+          && "$(/usr/bin/stat -c '%u:%g:%a:%h' "$helper" 2>/dev/null)" == "0:0:444:1" \
+          && "$helper_hash" == "$helper_digest" ]]; then
+        ok "component materializer bound: ${helper_digest:0:12}"
+      else
+        bad "component materializer authority/hash invalid"
+      fi
+    else
+      skp "component materializer not installed"
+    fi
+    if [[ "$pin" =~ ^[0-9a-f]{40}$ && -e "$immutable" ]]; then
+      if [[ -d "$immutable" && ! -L "$immutable" \
+          && "$(/usr/bin/stat -c '%u:%g:%a' "$immutable" 2>/dev/null)" == "0:0:555" \
+          && -f "$immutable/installer/bootstrap.sh" \
+          && ! -L "$immutable/installer/bootstrap.sh" \
+          && "$(/usr/bin/stat -c '%u:%g:%a:%h' "$immutable/installer/bootstrap.sh" 2>/dev/null)" == "0:0:555:1" ]]; then
+        ok "component immutable authority: ${pin:0:12}"
+      else
+        bad "component immutable authority invalid: ${pin:0:12}"
+      fi
+    else
+      skp "component immutable authority not installed"
+    fi
   else
     [[ -d "$REPO/external/$c/.git" ]] && ok "component present: external/$c" || skp "component absent: external/$c (run make components)"
   fi

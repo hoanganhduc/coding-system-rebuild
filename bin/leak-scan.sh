@@ -59,6 +59,10 @@ scan_pattern "telegram bot token"         '[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}'
 scan_pattern "google api key"             'AIza[0-9A-Za-z_-]{35}'
 scan_pattern "gcp/firebase oauth client"  '[0-9]+-[0-9a-z]{32}\.apps\.googleusercontent\.com'
 scan_pattern "openai rt/st token"         '\b[rs]t_[A-Za-z0-9_-]{20,}\b'
+# Stable Tailscale node IDs expose private tailnet topology even though they are
+# not bearer credentials.  Keep them out of the public source tree alongside
+# the private devices.json registry that stores them.
+scan_pattern "tailscale stable node id"   '\bn[A-Za-z0-9]{8,}CNTRL\b'
 # credential stored as the JSON value of a secret-ish field (the blind spot that
 # leaked the Google + Z.AI keys). The field set here MUST stay a superset of the
 # redactor's SECRET_FIELD_NAMES + SENSITIVE_KEY_RE (tests/field_set_sync.sh enforces

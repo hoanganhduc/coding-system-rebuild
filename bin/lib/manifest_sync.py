@@ -47,6 +47,13 @@ class SyncError(Exception):
     pass
 
 
+def _raise_sync_walk_error(error):
+    raise SyncError(
+        "cannot inspect authoritative tree %s: %s"
+        % (error.filename, error.strerror)
+    ) from error
+
+
 class AuthoritativeRecoveryRequired(SyncError):
     """Publication failed after exchange and the old tree must be retained."""
 
@@ -70,7 +77,9 @@ def _fsync_directory(path):
 
 def _fsync_real_tree(path):
     """Persist a staged real tree before it becomes the public snapshot."""
-    for directory, dirnames, filenames in os.walk(path, topdown=False):
+    for directory, dirnames, filenames in os.walk(
+        path, topdown=False, onerror=_raise_sync_walk_error
+    ):
         for name in filenames:
             child = os.path.join(directory, name)
             flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
@@ -493,7 +502,12 @@ def validate_real_tree(path, label, errors):
     if not stat.S_ISDIR(info.st_mode):
         errors.append("%s must be a regular file or directory" % label)
         return
-    for dp, dns, fns in os.walk(path, followlinks=False):
+    def record_walk_error(error):
+        errors.append("cannot inspect authoritative tree: %s" % error)
+
+    for dp, dns, fns in os.walk(
+        path, followlinks=False, onerror=record_walk_error
+    ):
         for name in dns + fns:
             child = os.path.join(dp, name)
             try:
@@ -561,6 +575,58 @@ def preflight_authoritative_entries(entries):
     return errors
 
 
+def preflight_authoritative_classification(entries):
+    """Require one effective class for every path under authoritative roots."""
+    errors = []
+    roots = {
+        entry.get("root")
+        for entry in entries
+        if entry.get("authoritative")
+    }
+    for root in sorted(value for value in roots if isinstance(value, str)):
+        root_abs = os.path.join(HOME, root)
+        if not os.path.isdir(root_abs) or os.path.islink(root_abs):
+            continue
+        root_entries = [entry for entry in entries if entry.get("root") == root]
+        def record_classification_walk_error(error):
+            errors.append(
+                "cannot classify authoritative source tree %s: %s"
+                % (root_abs, error)
+            )
+
+        for directory, dirnames, filenames in os.walk(
+            root_abs,
+            followlinks=False,
+            onerror=record_classification_walk_error,
+        ):
+            for name in dirnames + filenames:
+                rel = os.path.relpath(
+                    os.path.join(directory, name), root_abs
+                ).replace(os.sep, "/")
+                matches = []
+                for entry in root_entries:
+                    if not any(
+                        match_glob(rel, pattern)
+                        for pattern in entry.get("match", [])
+                    ):
+                        continue
+                    if any(
+                        match_glob(rel, pattern)
+                        for pattern in entry.get("exclude", []) or []
+                    ):
+                        continue
+                    matches.append(entry.get("id", "<unknown>"))
+                if len(matches) != 1:
+                    disposition = (
+                        "unclassified" if not matches else "multiply classified"
+                    )
+                    errors.append(
+                        "authoritative source path is %s: %s/%s"
+                        % (disposition, root, rel)
+                    )
+    return errors
+
+
 def _stable_regular_bytes(path):
     """Read one path without accepting replacement or mutation during the read."""
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
@@ -615,7 +681,9 @@ def _authoritative_source_records(entry, placeholder):
             continue
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise SyncError("authoritative source path is unsafe: %s" % source)
-        for directory, dirnames, filenames in os.walk(source, followlinks=False):
+        for directory, dirnames, filenames in os.walk(
+            source, followlinks=False, onerror=_raise_sync_walk_error
+        ):
             for name in dirnames:
                 child = os.path.join(directory, name)
                 child_info = os.lstat(child)
@@ -651,7 +719,9 @@ def _authoritative_stage_records(stage_root, entry):
         raise SyncError("unsafe authoritative destination")
     root = os.path.join(stage_root, dest_rel)
     records = {}
-    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+    for directory, dirnames, filenames in os.walk(
+        root, followlinks=False, onerror=_raise_sync_walk_error
+    ):
         for name in dirnames:
             child = os.path.join(directory, name)
             info = os.lstat(child)
@@ -890,6 +960,7 @@ def main():
     # Exact mirrors are a backup authority boundary.  Validate every literal
     # source path before ordinary entries can write into the repository.
     errors.extend(preflight_authoritative_entries(entries))
+    errors.extend(preflight_authoritative_classification(entries))
     if errors:
         report["symlinks"] = 0
         report["warnings"] = warnings

@@ -9,9 +9,11 @@ broker — alongside (not replacing) Modal and local. The "free public‑repo co
 ## Implementation outcome (2026-06-13)
 
 Built and verified live. Key deviations from this plan, found during implementation:
-- **Single source of truth**: ai-agents-skills is cloned to `~/ai-agents-skills` (the `external/`
-  vendoring is dropped for it); the installer creates the skill `SKILL.md` symlinks pointing
-  back at it, so the install source and the symlinks always agree.
+- **Pinned source authority**: `~/ai-agents-skills` remains the fetch/object and
+  compatibility repository, but phase 5 does not change an existing development
+  worktree. Phase 8 verifies the exact pinned Git closure and publishes raw blobs at
+  `/usr/local/libexec/coding-system/components/ai-agents-skills/<sha>`; installer
+  references and symlinks bind to that stable root-owned tree.
 - **Run model**: the broker installs to each target's **runtime root** and runs via
   `run_skill.sh`; the documented `~/.claude/skills/_run.sh skills/modal-research-compute/…` call
   is forwarded there by a **broker-scoped `_run.sh` shim**. Migrating the *other* skills to this
@@ -19,7 +21,7 @@ Built and verified live. Key deviations from this plan, found during implementat
 - **`bootstrap`**: a broker subcommand generates `research-compute.toml`, authenticates `gh`,
   checks deps, and runs `doctor` — one command to set up a host.
 - **Phase 8 applies**: the restore installs the broker with
-  `install --apply --real-system --backup-replace` from `~/ai-agents-skills` (a plain
+  `install --apply --real-system --backup-replace` from the immutable pinned SHA tree (a plain
   `make install` is only a dry-run); the per-install config rides the secrets zip and the legacy
   in-`~/.claude` snapshot is delegated/removed.
 - **Verified live**: an end-to-end `submit --wait` of a parameter sweep on a private research

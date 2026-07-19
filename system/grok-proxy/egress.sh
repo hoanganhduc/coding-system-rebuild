@@ -3,7 +3,7 @@
 #
 #   direct        no proxy at all
 #   local:<label> ssh -D SOCKS through a home PC over Tailscale (hosts.conf order)
-#   iphone        a dedicated userspace Tailscale client using the iPhone as exit node
+#   ios:<key>     a dedicated userspace Tailscale client using one registered iOS exit node
 #   vpn           a VPN Gate server in an allowed region, isolated in netns 'grokvpn'
 #
 # Every rung presents grok with the SAME endpoint -- a SOCKS5 proxy on 127.0.0.1:$PORT --
@@ -51,7 +51,8 @@ require_frozen_egress_release(){
               GROK_RELEASE_CANARY_RUNG GROK_RELEASE_CANARY_ROUTE_PROFILE \
               GROK_RELEASE_CANARY_CONTRACT GROK_RELEASE_CANARY_GROK_RELEASE \
               GROK_RELEASE_CANARY_KIND GROK_RELEASE_CANARY_MODEL \
-              GROK_RELEASE_CANARY_NONCE; do
+              GROK_RELEASE_CANARY_NONCE \
+              GROK_RELEASE_CANARY_PROFILE_SHA256; do
     [[ -v $name ]] && canary_extra=1
   done
   if (( canary_binding == 1 || canary_extra == 1 )); then
@@ -123,7 +124,7 @@ if [[ "${GROK_PROVIDER_MODE:-}" == 1 ]]; then
       return 1 2>/dev/null || exit 1
     }
   done
-elif [[ -n "${GROK_EGRESS_RUNTIME_DIR:-}${GROK_PROVIDER_OWNER_EPOCH:-}${GROK_PROVIDER_TRANSITION_ID:-}${GROK_PROVIDER_GENERATION:-}${GROK_PROVIDER_INVENTORY:-}${GROK_PROVIDER_CONTRACT_DIGEST:-}${GROK_ACTIVE_RELEASE_ID:-}${GROK_PROVIDER_DEADLINE_NS:-}${GROK_PROVIDER_HOME_LABEL:-}${GROK_PROVIDER_HOME_HOST:-}${GROK_PROVIDER_HOME_USER:-}${GROK_PROVIDER_HOME_PORT:-}${GROK_PROVIDER_IPHONE_NODE_ID:-}${GROK_PROVIDER_VPN_NAMESPACE:-}${GROK_PROVIDER_VPN_MAX_TRIES:-}${GROK_PROVIDER_VPN_RANKING_VERSION:-}${GROK_PROVIDER_VPN_COUNTRIES:-}${GROK_PROVIDER_VPN_BLOCKED_COUNTRIES:-}" ]]; then
+elif [[ -n "${GROK_EGRESS_RUNTIME_DIR:-}${GROK_PROVIDER_OWNER_EPOCH:-}${GROK_PROVIDER_TRANSITION_ID:-}${GROK_PROVIDER_GENERATION:-}${GROK_PROVIDER_INVENTORY:-}${GROK_PROVIDER_CONTRACT_DIGEST:-}${GROK_ACTIVE_RELEASE_ID:-}${GROK_PROVIDER_DEADLINE_NS:-}${GROK_PROVIDER_HOME_LABEL:-}${GROK_PROVIDER_HOME_HOST:-}${GROK_PROVIDER_HOME_USER:-}${GROK_PROVIDER_HOME_PORT:-}${GROK_PROVIDER_IOS_KEY:-}${GROK_PROVIDER_IOS_NODE_ID:-}${GROK_PROVIDER_IPHONE_NODE_ID:-}${GROK_PROVIDER_VPN_NAMESPACE:-}${GROK_PROVIDER_VPN_MAX_TRIES:-}${GROK_PROVIDER_VPN_RANKING_VERSION:-}${GROK_PROVIDER_VPN_COUNTRIES:-}${GROK_PROVIDER_VPN_BLOCKED_COUNTRIES:-}" ]]; then
   printf '[egress] provider runtime variables require GROK_PROVIDER_MODE=1\n' >&2
   return 1 2>/dev/null || exit 1
 fi
@@ -211,8 +212,16 @@ IPHONE_PID_IDENTITY="$IPHONE_RUNTIME_DIR/tailscaled.identity.json"
 IPHONE_LOG="$IPHONE_RUNTIME_DIR/tailscaled.log"
 IPHONE_NODE_FILE="$IPHONE_STATE_DIR/exit-node"
 IPHONE_READY_FILE="$IPHONE_STATE_DIR/ready"
+IPHONE_REGISTRY_FILE="$IPHONE_STATE_DIR/devices.json"
+IOS_REGISTRY_PY="$EG_DIR/grok_ms/ios_registry.py"
 IPHONE_HOSTNAME="${GROK_IPHONE_HOSTNAME:-grok-iphone-relay}"
 IPHONE_AUTHKEY_FILE="${GROK_IPHONE_AUTHKEY_FILE:-}"
+IOS_SELECTED_KEY=""
+IOS_SELECTED_NODE_ID=""
+IOS_ONLY=0
+IOS_EXACT_KEY=""
+IOS_ATTEMPT_DEADLINE_SECONDS=0
+IOS_FAMILY_DEADLINE_SECONDS=0
 
 # Clear protocol-specific proxy variables before setting the one intended route.
 # curl prefers HTTPS_PROXY over ALL_PROXY, so inheriting a caller's environment
@@ -257,6 +266,66 @@ model_id_valid(){
 home_label_valid(){
   local value="${1-}"
   ( export LC_ALL=C; [[ "$value" =~ ^[A-Za-z0-9._:+@-]{1,120}$ ]] )
+}
+
+ios_key_valid(){
+  local value="${1-}"
+  ( export LC_ALL=C; [[ "$value" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] )
+}
+
+ios_registry_command(){
+  [[ -f "$IOS_REGISTRY_PY" && ! -L "$IOS_REGISTRY_PY" ]] || return 1
+  python3 -I "$IOS_REGISTRY_PY" "$@" \
+    --registry "$IPHONE_REGISTRY_FILE" \
+    --legacy-node "$IPHONE_NODE_FILE" \
+    --legacy-ready "$IPHONE_READY_FILE"
+}
+
+ios_devices(){
+  ios_registry_command migrate >/dev/null && ios_registry_command devices
+}
+
+ios_node_for_key(){
+  ios_key_valid "$1" || return 1
+  ios_registry_command node "$1"
+}
+
+ios_select_context(){
+  local key="$1" node=""
+  ios_key_valid "$key" || return 1
+  if (( PROVIDER_MODE == 1 )); then
+    [[ "${GROK_PROVIDER_IOS_KEY:-}" == "$key" ]] || return 1
+    node="${GROK_PROVIDER_IOS_NODE_ID:-}"
+  else
+    node="$(ios_node_for_key "$key")" || return 1
+  fi
+  route_token_valid "$node" || return 1
+  IOS_SELECTED_KEY="$key"
+  IOS_SELECTED_NODE_ID="$node"
+}
+
+ios_attempt_begin(){
+  local deadline=$((SECONDS + 10))
+  if (( IOS_FAMILY_DEADLINE_SECONDS > 0 \
+        && IOS_FAMILY_DEADLINE_SECONDS < deadline )); then
+    deadline="$IOS_FAMILY_DEADLINE_SECONDS"
+  fi
+  (( deadline > SECONDS )) || return 1
+  IOS_ATTEMPT_DEADLINE_SECONDS="$deadline"
+}
+
+ios_attempt_end(){ IOS_ATTEMPT_DEADLINE_SECONDS=0; }
+
+ios_attempt_remaining(){
+  local remaining
+  (( IOS_ATTEMPT_DEADLINE_SECONDS > 0 )) || return 1
+  remaining=$((IOS_ATTEMPT_DEADLINE_SECONDS - SECONDS))
+  (( remaining > 0 )) || return 1
+  printf '%s' "$remaining"
+}
+
+ios_attempt_check(){
+  (( IOS_ATTEMPT_DEADLINE_SECONDS == 0 )) || ios_attempt_remaining >/dev/null
 }
 
 route_token_valid(){
@@ -564,6 +633,19 @@ provider_validate_frozen_rung(){
           || { eg_err "frozen provider iPhone state no longer matches"; return 1; }
       fi
       ;;
+    ios:*)
+      label="${rung#ios:}"
+      ios_key_valid "$label" \
+        && [[ "${GROK_PROVIDER_IOS_KEY:-}" == "$label" ]] \
+        && route_token_valid "${GROK_PROVIDER_IOS_NODE_ID:-}" \
+        || { eg_err "invalid frozen provider iOS identity"; return 1; }
+      IOS_SELECTED_KEY="$label"
+      IOS_SELECTED_NODE_ID="$GROK_PROVIDER_IOS_NODE_ID"
+      if (( require_state == 1 )); then
+        iphone_configured \
+          || { eg_err "frozen provider iOS registry no longer matches"; return 1; }
+      fi
+      ;;
     vpn)
       for required in GROK_PROVIDER_VPN_NAMESPACE GROK_PROVIDER_VPN_MAX_TRIES \
                       GROK_PROVIDER_VPN_RANKING_VERSION; do
@@ -613,6 +695,7 @@ fi
 set_active(){
   case "$1" in
     direct|iphone|vpn) ;;
+    ios:*) ios_key_valid "${1#ios:}" && [[ -n "${2:-}" ]] || return 1 ;;
     local:*) home_label_valid "${1#local:}" && [[ -n "${2:-}" ]] || return 1 ;;
     *) return 1 ;;
   esac
@@ -673,8 +756,12 @@ rung, destination, sport_raw = (
 )
 token = re.compile(r"[A-Za-z0-9._:+/@-]{1,256}\Z")
 label = re.compile(r"[A-Za-z0-9._:+@-]{1,120}\Z")
+ios_key = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 if rung.startswith("local:"):
     if label.fullmatch(rung[6:]) is None or token.fullmatch(destination) is None:
+        raise SystemExit(1)
+elif rung.startswith("ios:"):
+    if ios_key.fullmatch(rung[4:]) is None or token.fullmatch(destination) is None:
         raise SystemExit(1)
 elif rung not in {"direct", "iphone", "vpn"}:
     raise SystemExit(1)
@@ -691,6 +778,7 @@ active_rung(){
   local value; value="$(state_value RUNG)" || return 1
   case "$value" in
     direct|iphone|vpn) ;;
+    ios:*) ios_key_valid "${value#ios:}" || return 1 ;;
     local:*) home_label_valid "${value#local:}" || return 1 ;;
     *) return 1 ;;
   esac
@@ -785,6 +873,11 @@ tcp_ok(){ [[ "$2" =~ ^[0-9]+$ ]] && timeout 5 bash -c 'exec 3<>/dev/tcp/"$1"/"$2
 # "" so the request leaves untunneled.
 eg_curl(){
   local proxy="$1" url="$2" tmax="${3:-20}"
+  if (( IOS_ATTEMPT_DEADLINE_SECONDS > 0 )); then
+    local ios_remaining=""
+    ios_remaining="$(ios_attempt_remaining)" || return 1
+    (( ios_remaining < tmax )) && tmax="$ios_remaining"
+  fi
   if [[ -n "$proxy" ]]; then
     "${CLEAN_PROXY_ENV[@]}" ALL_PROXY="$proxy" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
       curl -s --max-time "$tmax" "$url" 2>/dev/null
@@ -828,13 +921,17 @@ country_allowed(){ [[ -n "$1" && " $GROK_BLOCKED_CC " != *" $1 "* ]]; }
 # One API round-trip, no inference tokens. GROK_MODELS_CMD overrides it for the tests.
 GROK_MODELS_CACHE="${GROK_MODELS_CACHE:-$HOME/.grok/models_cache.json}"
 models_via(){
-  local proxy="${1-$PROXY}" out
+  local proxy="${1-$PROXY}" rung="${2:-}" out probe_timeout=90
+  if [[ "$rung" == ios:* ]]; then
+    probe_timeout="$(ios_attempt_remaining)" || return 1
+  fi
   # Grok recreates its shared model cache during this probe.  Watchdog probes
   # run in a child forked before the interactive launch path, so protect the
   # cache here as well as in launch() instead of relying on the caller's umask.
   umask 077
   if [[ -n "${GROK_MODELS_CMD:-}" ]]; then
-    out="$(GROK_PROBE_RUNG="${2:-}" bash -c "$GROK_MODELS_CMD" 2>/dev/null | head -c 1048577)"
+    out="$(GROK_PROBE_RUNG="$rung" timeout "$probe_timeout" \
+      bash -c "$GROK_MODELS_CMD" 2>/dev/null | head -c 1048577)"
     (( ${#out} <= 1048576 )) || return 1
     printf '%s\n' "$out" | filter_model_ids
     return
@@ -842,9 +939,9 @@ models_via(){
   rm -f "$GROK_MODELS_CACHE"   # force a fresh fetch through THIS egress, not grok's cached list
   if [[ -n "$proxy" ]]; then
     out="$("${CLEAN_PROXY_ENV[@]}" ALL_PROXY="$proxy" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
-      timeout 90 "$GROK_BIN" models 2>/dev/null | head -c 1048577)"
+      timeout "$probe_timeout" "$GROK_BIN" models 2>/dev/null | head -c 1048577)"
   else
-    out="$("${CLEAN_PROXY_ENV[@]}" timeout 90 "$GROK_BIN" models 2>/dev/null | head -c 1048577)"
+    out="$("${CLEAN_PROXY_ENV[@]}" timeout "$probe_timeout" "$GROK_BIN" models 2>/dev/null | head -c 1048577)"
   fi
   (( ${#out} <= 1048576 )) || return 1
   grep -oE '^[[:space:]]+[-*][[:space:]]+[^[:space:]]+' <<<"$out" \
@@ -1099,7 +1196,9 @@ iphone_prepare_state(){
 iphone_node(){
   local value=""
   if (( PROVIDER_MODE == 1 )); then
-    value="$GROK_PROVIDER_IPHONE_NODE_ID"
+    value="${GROK_PROVIDER_IOS_NODE_ID:-${GROK_PROVIDER_IPHONE_NODE_ID:-}}"
+  elif [[ -n "$IOS_SELECTED_NODE_ID" ]]; then
+    value="$IOS_SELECTED_NODE_ID"
   elif [[ -s "$IPHONE_NODE_FILE" ]]; then
     value="$(head -1 "$IPHONE_NODE_FILE")"
   elif [[ -n "${GROK_IPHONE_EXIT_NODE:-}" ]]; then
@@ -1111,32 +1210,14 @@ iphone_node(){
 
 iphone_configured(){
   if (( PROVIDER_MODE == 1 )); then
-    python3 - "$GROK_PROVIDER_IPHONE_NODE_ID" "$IPHONE_NODE_FILE" "$IPHONE_READY_FILE" <<'PY'
-import os, pathlib, stat, sys
-
-expected = sys.argv[1].encode("ascii")
-for raw in sys.argv[2:]:
-    path = pathlib.Path(raw)
-    try:
-        info = path.lstat()
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.getuid()
-            or stat.S_IMODE(info.st_mode) & 0o077
-            or not 1 <= info.st_size <= 512
-        ):
-            raise ValueError("unsafe state")
-        data = path.read_bytes()
-    except (OSError, ValueError):
-        raise SystemExit(1)
-    if data not in {expected, expected + b"\n"}:
-        raise SystemExit(1)
-PY
+    local configured=""
+    [[ -n "${GROK_PROVIDER_IOS_KEY:-}" && -n "${GROK_PROVIDER_IOS_NODE_ID:-}" ]] \
+      || return 1
+    configured="$(ios_registry_command node "$GROK_PROVIDER_IOS_KEY")" || return 1
+    [[ "$configured" == "$GROK_PROVIDER_IOS_NODE_ID" ]]
     return
   fi
-  [[ -s "$IPHONE_NODE_FILE" && -s "$IPHONE_READY_FILE" ]] || return 1
-  [[ "$(head -1 "$IPHONE_NODE_FILE")" == "$(head -1 "$IPHONE_READY_FILE")" ]]
+  [[ -n "$(ios_devices 2>/dev/null)" ]]
 }
 iphone_cli(){ "$TAILSCALE_BIN" --socket="$IPHONE_SOCKET" "$@"; }
 
@@ -1448,6 +1529,7 @@ iphone_selected_exit_id(){
 iphone_wait_backend(){
   local i st=""
   for i in $(seq 1 20); do
+    ios_attempt_check || break
     st="$(iphone_status_json | jq -r '.BackendState // ""' 2>/dev/null)"
     case "$st" in Running|NeedsLogin|NeedsMachineAuth|Stopped) break ;; esac
     sleep 0.25
@@ -1563,6 +1645,7 @@ iphone_start(){
   local recorded=0
   local i
   for i in $(seq 1 40); do
+    ios_attempt_check || break
     if iphone_process_identity recorded "$pid"; then recorded=1; break; fi
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.025
@@ -1575,6 +1658,7 @@ iphone_start(){
   ( umask 077; printf '%s\n' "$pid" > "$IPHONE_PID" )
   chmod 600 "$IPHONE_PID" "$IPHONE_LOG" 2>/dev/null || true
   for i in $(seq 1 40); do
+    ios_attempt_check || break
     if [[ -S "$IPHONE_SOCKET" ]] && iphone_listener_alive; then return 0; fi
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.25
@@ -1590,23 +1674,36 @@ iphone_select_exit(){
   [[ -n "$node" ]] || { eg_warn "  no iPhone exit node configured — run: grok-remote iphone-setup"; return 1; }
   # The pin is usually a StableNodeID, which `set --exit-node` rejects ("must be IP or hostname"). Resolve
   # it to the peer's Tailscale IP, retrying briefly so a just-started sidecar can sync the netmap first.
-  for i in $(seq 1 20); do ip="$(iphone_exit_ip_for "$node")"; [[ -n "$ip" ]] && break; sleep 0.25; done
+  for i in $(seq 1 20); do
+    ios_attempt_check || break
+    ip="$(iphone_exit_ip_for "$node")"
+    [[ -n "$ip" ]] && break
+    sleep 0.25
+  done
   [[ -n "$ip" ]] || { eg_warn "  iPhone exit node '$node' is not in the sidecar tailnet (offline, unapproved, or not yet synced)"; return 1; }
   iphone_cli set --exit-node="$ip" --exit-node-allow-lan-access=false --shields-up=true >/dev/null \
     || { eg_warn "  cannot select iPhone exit node '$node' -> $ip (offline, unapproved, or ACL denied)"; return 1; }
-  for i in $(seq 1 20); do iphone_exit_online && return 0; sleep 0.25; done
+  for i in $(seq 1 20); do
+    ios_attempt_check || break
+    iphone_exit_online && return 0
+    sleep 0.25
+  done
   eg_warn "  iPhone exit node '$node' is selected but not online"
   return 1
 }
 
 iphone_up(){
-  iphone_configured || return 1
-  local node
+  local public_rung="${1:-iphone}" node
+  if [[ "$public_rung" == ios:* ]]; then
+    ios_select_context "${public_rung#ios:}" || return 1
+  else
+    iphone_configured || return 1
+  fi
   node="$(iphone_node)" || return 1
   [[ -n "$node" ]] || return 1
   # Publish the sidecar cleanup identity before any process or listener effect.
   # Failed rollback keeps this record; successful rollback removes it.
-  set_active iphone "$node" || return 1
+  set_active "$public_rung" "$node" || return 1
   if ! iphone_start; then
     iphone_down && clear_active
     return 1
@@ -1631,12 +1728,25 @@ iphone_detect_node(){
   [[ -n "$PRIMARY_TAILSCALE_BIN" && -x "$PRIMARY_TAILSCALE_BIN" ]] || return 1
   local -a nodes=()
   mapfile -t nodes < <("$PRIMARY_TAILSCALE_BIN" status --json 2>/dev/null | jq -r \
-    '.Peer[] | select((.OS // "" | ascii_downcase) == "ios") | .TailscaleIPs[0] // empty')
+    '.Peer[] | select((.OS // "" | ascii_downcase) == "ios" and (.ExitNodeOption // false) == true) | .TailscaleIPs[0] // empty')
   if (( ${#nodes[@]} != 1 )); then
     eg_err "expected exactly one iOS peer in the primary tailnet; found ${#nodes[@]} — pass its IP or name explicitly"
     return 1
   fi
   normalize_ip "${nodes[0]}"
+}
+
+iphone_name_for_id(){
+  local node="$1" value=""
+  value="$(iphone_status_json | jq -r --arg node "$node" '
+    [(.Peer // {})[] | select(.ID == $node)
+      | (.DNSName // .HostName // empty)] | .[0] // empty' 2>/dev/null)"
+  if [[ -z "$value" && -n "$PRIMARY_TAILSCALE_BIN" && -x "$PRIMARY_TAILSCALE_BIN" ]]; then
+    value="$("$PRIMARY_TAILSCALE_BIN" status --json 2>/dev/null | jq -r --arg node "$node" '
+      [(.Peer // {})[] | select(.ID == $node)
+        | (.DNSName // .HostName // empty)] | .[0] // empty' 2>/dev/null)"
+  fi
+  [[ -n "$value" ]] && printf '%s' "$value"
 }
 
 iphone_save_node(){
@@ -1651,12 +1761,31 @@ iphone_save_node(){
   [[ -z "$old" || "$old" == "$node" ]] || rm -f "$IPHONE_READY_FILE"
 }
 
+iphone_publish_legacy_fallback(){
+  local node="$1"
+  if [[ -e "$IPHONE_NODE_FILE" || -L "$IPHONE_NODE_FILE" \
+     || -e "$IPHONE_READY_FILE" || -L "$IPHONE_READY_FILE" ]]; then
+    [[ -f "$IPHONE_NODE_FILE" && ! -L "$IPHONE_NODE_FILE" \
+       && -f "$IPHONE_READY_FILE" && ! -L "$IPHONE_READY_FILE" \
+       && "$(stat -c '%u:%a' "$IPHONE_NODE_FILE" 2>/dev/null)" == "$(id -u):600" \
+       && "$(stat -c '%u:%a' "$IPHONE_READY_FILE" 2>/dev/null)" == "$(id -u):600" ]] \
+      || return 1
+    if [[ -s "$IPHONE_NODE_FILE" && -s "$IPHONE_READY_FILE" \
+       && "$(head -1 "$IPHONE_NODE_FILE")" == "$(head -1 "$IPHONE_READY_FILE")" ]]; then
+      return 0
+    fi
+  fi
+  iphone_save_node "$node" || return 1
+  ( umask 077; printf '%s\n' "$node" > "$IPHONE_READY_FILE" ) || return 1
+  chmod 600 "$IPHONE_READY_FILE"
+}
+
 # One-time enrollment of the sidecar identity. Authentication is interactive by
 # default; automation accepts only an auth-key FILE so the secret never appears in
 # argv or shell history. This never changes the primary Tailscale daemon.
 iphone_setup_action(){
-  local node="$1" rc=0
-  iphone_save_node "$node" || return 1
+  local node="$1" label="${2:-}" rc=0
+  IOS_SELECTED_NODE_ID="$node"
   iphone_start || return 1
   # A re-enrolled sidecar reconnects from persisted state and reaches "Running" on its own; deciding it
   # needs `up` before it settles would re-run `up` needlessly (or bail for a TTY it does not need).
@@ -1688,10 +1817,17 @@ iphone_setup_action(){
     local stable_id=""
     stable_id="$(iphone_selected_exit_id)" \
       || { eg_warn "selected phone has no stable node ID in Tailscale status"; return 1; }
-    iphone_save_node "$stable_id" || return 1
-    ( umask 077; printf '%s\n' "$stable_id" > "$IPHONE_READY_FILE" )
-    chmod 600 "$IPHONE_READY_FILE"
-    eg_ok "iPhone exit node '$node' is ready and pinned to its stable node ID"
+    IOS_SELECTED_NODE_ID="$stable_id"
+    IOS_SELECTED_KEY="$(iphone_name_for_id "$stable_id")"
+    if [[ -z "$IOS_SELECTED_KEY" ]]; then
+      if [[ -n "$label" ]]; then
+        IOS_SELECTED_KEY="$label"
+      else
+        eg_warn "selected device has no unique Tailscale DNS name; rerun with --label KEY"
+        return 1
+      fi
+    fi
+    eg_ok "iOS exit node '$node' is ready and resolved to its stable node ID"
   else
     eg_warn "sidecar identity is enrolled and '$node' is saved, but the phone is not usable yet"
     eg_warn "enable Run as Exit Node on the iPhone, approve it in Tailscale, then rerun iphone-setup"
@@ -1701,11 +1837,26 @@ iphone_setup_action(){
 }
 
 iphone_setup(){
-  local node="${1:-}" rc=0 existing=""
-  [[ -n "$node" ]] || node="$(iphone_node)"
-  [[ -n "$node" ]] || node="$(iphone_detect_node)" || return 1
+  local node="${1:-}" label="${2:-}" rc=0 existing="" rows="" count=0
+  if [[ -n "$label" ]]; then
+    ios_key_valid "$label" \
+      || { eg_err "iOS device label has unsupported characters"; return 2; }
+  fi
+  if [[ -z "$node" ]]; then
+    rows="$(ios_devices)" \
+      || { eg_err "cannot read the registered iOS device registry"; return 1; }
+    count="$(grep -c . <<<"$rows")"
+    if (( count == 1 )); then
+      node="$(cut -f2 <<<"$rows")"
+    elif (( count > 1 )); then
+      eg_err "multiple iOS devices are registered — pass a device selector"
+      return 2
+    else
+      node="$(iphone_detect_node)" || return 1
+    fi
+  fi
   route_token_valid "$node" \
-    || { eg_err "iPhone exit-node IP/name has unsupported characters"; return 1; }
+    || { eg_err "iOS exit-node IP/name has unsupported characters"; return 1; }
 
   # Setup is a maintenance transaction, not an exception to route ownership.
   # Recover a prior interrupted transition first, then publish fresh recovery
@@ -1732,12 +1883,86 @@ iphone_setup(){
     return 1
   fi
 
-  iphone_setup_action "$node" || rc=$?
+  IOS_SELECTED_KEY=""
+  IOS_SELECTED_NODE_ID=""
+  iphone_setup_action "$node" "$label" || rc=$?
   if ! teardown_all; then
     eg_err "iphone-setup cleanup was incomplete; recovery ownership was retained"
     return 1
   fi
-  return "$rc"
+  (( rc == 0 )) || return "$rc"
+  [[ -n "$IOS_SELECTED_NODE_ID" && -n "$IOS_SELECTED_KEY" ]] \
+    || { eg_err "iphone-setup did not retain a verified device identity"; return 1; }
+  local -a register_args=(register --node-id "$IOS_SELECTED_NODE_ID" --name-hint "$IOS_SELECTED_KEY")
+  [[ -z "$label" ]] || register_args+=(--label "$label")
+  local registered_key=""
+  registered_key="$(ios_registry_command "${register_args[@]}")" \
+    || { eg_err "cannot publish the iOS device registry"; return 1; }
+  if ! iphone_publish_legacy_fallback "$IOS_SELECTED_NODE_ID"; then
+    eg_warn "registered '$registered_key', but could not create the old-release fallback pin"
+  fi
+  eg_ok "registered iOS device '$registered_key'; future runs do not require iphone-setup"
+}
+
+iphone_list(){
+  local rows="" status='{}' key node online exit_option qualified selected
+  rows="$(ios_registry_command devices)" \
+    || { eg_err "cannot read the registered iOS device registry"; return 1; }
+  if [[ -z "$rows" ]]; then
+    eg_log "no iOS devices are registered"
+    return 0
+  fi
+  if [[ -n "$PRIMARY_TAILSCALE_BIN" && -x "$PRIMARY_TAILSCALE_BIN" ]]; then
+    status="$("$PRIMARY_TAILSCALE_BIN" status --json 2>/dev/null || printf '{}')"
+  fi
+  selected="$ACCOUNT_HOME/.local/state/grok-proxy/release-control/selected-release.json"
+  local position=0
+  while IFS=$'\t' read -r key node; do
+    [[ -n "$key" ]] || continue
+    position=$((position + 1))
+    read -r online exit_option < <(jq -r --arg node "$node" '
+      [(.Peer // {})[] | select(.ID == $node)][0] as $peer
+      | [($peer.Online // false), ($peer.ExitNodeOption // false)] | @tsv' <<<"$status" 2>/dev/null)
+    qualified=no
+    if [[ -f "$selected" && ! -L "$selected" ]] \
+       && jq -e --arg rung "ios:$key" '
+         any((.qualified_rungs // [])[]; .rung == $rung)' "$selected" >/dev/null 2>&1; then
+      qualified=yes
+    fi
+    printf '%d\t%s\t%s\texit-node=%s\tmulti-session-qualified=%s\n' \
+      "$position" "$key" "$([[ "$online" == true ]] && printf online || printf offline)" \
+      "$([[ "$exit_option" == true ]] && printf yes || printf no)" "$qualified"
+  done <<<"$rows"
+}
+
+iphone_registry_mutation_ready(){
+  if recovery_transition_pending || [[ -e "$STATE" || -L "$STATE" ]]; then
+    eg_err "an egress route or recovery transaction is active — run 'grok-remote stop' first"
+    return 1
+  fi
+  teardown_all \
+    || { eg_err "cannot prove empty routing state before registry mutation"; return 1; }
+}
+
+iphone_remove(){
+  local key="$1"
+  ios_key_valid "$key" || { eg_err "invalid iOS device key"; return 2; }
+  iphone_registry_mutation_ready || return 1
+  ios_registry_command remove "$key" \
+    || { eg_err "cannot remove iOS device '$key'"; return 1; }
+  eg_ok "removed iOS device '$key'"
+}
+
+iphone_reorder(){
+  (( $# > 0 )) || { eg_err "iphone-reorder requires every registered key"; return 2; }
+  local key
+  for key in "$@"; do
+    ios_key_valid "$key" || { eg_err "invalid iOS device key '$key'"; return 2; }
+  done
+  iphone_registry_mutation_ready || return 1
+  ios_registry_command reorder "$@" \
+    || { eg_err "iOS priority must be an exact permutation of registered keys"; return 1; }
+  eg_ok "updated iOS device priority"
 }
 
 # ---------------------------------------------------------------- rung: VPN
@@ -1928,6 +2153,7 @@ rung_alive(){
     direct)  return 0 ;;
     local:*) local_alive ;;
     iphone)  iphone_alive ;;
+    ios:*)   ios_select_context "${1#ios:}" && iphone_alive ;;
     vpn)     vpn_alive ;;
     *)       return 1 ;;
   esac
@@ -1938,6 +2164,7 @@ rung_down(){
     direct)  return 0 ;;
     local:*) local_down ;;
     iphone)  iphone_down ;;
+    ios:*)   iphone_down ;;
     vpn)     vpn_down ;;
   esac
 }
@@ -1946,7 +2173,8 @@ rung_up(){
   case "$1" in
     direct)  set_active direct ;;
     local:*) local_up "${1#local:}" ;;
-    iphone)  iphone_up ;;
+    iphone)  iphone_up iphone ;;
+    ios:*)   iphone_up "$1" ;;
     vpn)     vpn_up up ;;
   esac
 }
@@ -1961,7 +2189,7 @@ rung_confirm(){
     rung_probe_forced "$1" "$REQUIRE_MODEL"
     return
   fi
-  if [[ -n "$REQUIRE_MODEL" || "$1" == vpn || "$1" == iphone ]]; then
+  if [[ -n "$REQUIRE_MODEL" || "$1" == vpn || "$1" == iphone || "$1" == ios:* ]]; then
     rung_probe_available "$1" "$REQUIRE_MODEL"
   else
     rung_alive "$1"
@@ -1982,6 +2210,11 @@ teardown_provider_pass(){
       iphone_down || rc=1
       ;;
     iphone)
+      iphone_down || rc=1
+      local_down || rc=1
+      vpn_down || rc=1
+      ;;
+    ios:*)
       iphone_down || rc=1
       local_down || rc=1
       vpn_down || rc=1
@@ -2078,10 +2311,22 @@ begin_clean_route_transition(){
 LADDER=()
 build_ladder(){
   LADDER=()
-  local label
-  while IFS=$'\t' read -r label _ _ _; do LADDER+=("local:$label"); done < <(local_hosts)
-  iphone_configured && LADDER+=("iphone")
-  LADDER+=("vpn")
+  local label registry_rows=""
+  registry_rows="$(ios_devices)" \
+    || { eg_err "cannot read the registered iOS device registry"; return 1; }
+  if [[ -n "$IOS_EXACT_KEY" ]]; then
+    ios_node_for_key "$IOS_EXACT_KEY" >/dev/null \
+      || { eg_err "unknown iOS device '$IOS_EXACT_KEY'"; return 1; }
+    LADDER+=("ios:$IOS_EXACT_KEY")
+    return 0
+  fi
+  if (( IOS_ONLY == 0 )); then
+    while IFS=$'\t' read -r label _ _ _; do LADDER+=("local:$label"); done < <(local_hosts)
+  fi
+  while IFS=$'\t' read -r label _; do
+    [[ -z "$label" ]] || LADDER+=("ios:$label")
+  done <<<"$registry_rows"
+  (( IOS_ONLY == 1 )) || LADDER+=("vpn")
 }
 
 # The vpn entry is not one rung but a sequence: walk VPN Gate candidates until one both
@@ -2127,7 +2372,8 @@ try_vpn_sequence(){
 # demotion/reacquisition. $3 optionally requires one concrete model.
 select_egress(){
   local start="${1:-0}" direct_fallback="${2:-1}" required="${3:-$REQUIRE_MODEL}"
-  local i rung current direct_ok=0
+  local i rung current direct_ok=0 ios_attempt=0
+  IOS_FAMILY_DEADLINE_SECONDS=0
   if recovery_transition_pending || [[ -e "$STATE" || -L "$STATE" ]]; then
     current="$(active_rung 2>/dev/null || true)"
     eg_err "selection requires proved-empty ownership state${current:+ (currently $current)}"
@@ -2136,10 +2382,21 @@ select_egress(){
   begin_clean_route_transition \
     || { eg_err "cannot publish route-selection recovery intent"; return 1; }
   learn_baseline
-  build_ladder
+  build_ladder || return 1
   for (( i = start; i < ${#LADDER[@]}; i++ )); do
     rung="${LADDER[$i]}"
     eg_log "trying rung: $rung"
+    ios_attempt=0
+    if [[ "$rung" == ios:* ]]; then
+      if (( IOS_FAMILY_DEADLINE_SECONDS == 0 )); then
+        IOS_FAMILY_DEADLINE_SECONDS=$((SECONDS + 60))
+      fi
+      if ! ios_attempt_begin; then
+        eg_warn "  iOS family selection reached its 60-second cap"
+        continue
+      fi
+      ios_attempt=1
+    fi
     if [[ "$rung" == vpn ]]; then
       if try_vpn_sequence "$required"; then
         end_recovery_transition || return 1
@@ -2153,6 +2410,7 @@ select_egress(){
       continue
     fi
     if ! rung_up "$rung"; then
+      (( ios_attempt == 0 )) || ios_attempt_end
       current="$(active_rung 2>/dev/null || true)"
       if [[ -e "$STATE" || -L "$STATE" ]]; then
         eg_err "$rung startup retained cleanup ownership${current:+ as $current}; aborting selection"
@@ -2161,13 +2419,16 @@ select_egress(){
       continue
     fi
     if rung_probe_available "$rung" "$required"; then
+      (( ios_attempt == 0 )) || ios_attempt_end
       end_recovery_transition || return 1
       return 0
     fi
     if ! rung_down "$rung"; then
+      (( ios_attempt == 0 )) || ios_attempt_end
       eg_err "$rung probe failed and exact teardown was incomplete; aborting selection"
       return 1
     fi
+    (( ios_attempt == 0 )) || ios_attempt_end
     clear_active || return 1
   done
   if [[ -s "$BASELINE" ]]; then
@@ -2227,7 +2488,7 @@ demote(){
   # Resume the ladder just past the rung being abandoned. Deriving the index from the live ladder
   # (not a stashed LADDER_POS a reused session never set) is what stops a demote from re-probing
   # rungs above the current one. An unknown rung starts past the end -> fail closed, no fallback.
-  build_ladder
+  build_ladder || return 1
   local from=${#LADDER[@]} i
   for (( i = 0; i < ${#LADDER[@]}; i++ )); do
     if [[ "${LADDER[$i]}" == "$cur" ]]; then from=$((i + 1)); break; fi
@@ -2289,7 +2550,7 @@ watch_egress(){
         if [[ -z "$ip" ]]; then
           eg_warn "$cur is up but has no egress (far end blackholing?)"
           healthy=0
-        elif [[ "$cur" == iphone ]] && ! rung_confirm iphone; then
+        elif [[ "$cur" == iphone || "$cur" == ios:* ]] && ! rung_confirm "$cur"; then
           # A phone can move between Wi-Fi, cellular, and roaming egress without
           # the Tailscale peer itself going offline. Periodically re-probe the
           # selected model so a live but newly wrong-region phone is not trusted.
@@ -2373,6 +2634,9 @@ watch_egress(){
 provider_validate_rung(){
   case "$1" in
     direct|iphone|vpn) return 0 ;;
+    ios:[a-z0-9]*)
+      ios_key_valid "${1#ios:}"
+      ;;
     home:[A-Za-z0-9._:+@-]*)
       [[ "${1#home:}" =~ ^[A-Za-z0-9._:+@-]{1,120}$ ]]
       ;;
@@ -2383,13 +2647,14 @@ provider_validate_rung(){
 provider_internal_rung(){
   case "$1" in
     home:*) printf 'local:%s' "${1#home:}" ;;
+    ios:*) ios_key_valid "${1#ios:}" && printf '%s' "$1" ;;
     iphone|vpn|direct) printf '%s' "$1" ;;
     *) return 1 ;;
   esac
 }
 
 provider_write_inventory(){
-  local public_rung="$1" pid path kind
+  local public_rung="$1" pid path kind ios_node_id_sha256=""
   pid="$(port_owner_pid)"
   [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$(stat -c %u "/proc/$pid" 2>/dev/null)" == "$(id -u)" ]] \
     || { eg_err "provider listener has no exact current-user owner"; return 1; }
@@ -2399,17 +2664,24 @@ provider_write_inventory(){
     kind="${path##*:}"; path="${path%:*}"
     [[ -e "$path" || -L "$path" ]] && specs+=("$kind=$path")
   done
+  if [[ "$public_rung" == ios:* ]]; then
+    route_token_valid "${GROK_PROVIDER_IOS_NODE_ID:-}" || return 1
+    ios_node_id_sha256="$(printf '%s' "$GROK_PROVIDER_IOS_NODE_ID" | sha256sum | awk '{print $1}')" \
+      || return 1
+    [[ "$ios_node_id_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+  fi
   python3 - "$GROK_PROVIDER_INVENTORY" "$EG_RUNTIME_DIR" \
     "$GROK_PROVIDER_OWNER_EPOCH" "$GROK_PROVIDER_TRANSITION_ID" \
-    "$GROK_PROVIDER_GENERATION" "$public_rung" "$pid" "${specs[@]}" <<'PY'
+    "$GROK_PROVIDER_GENERATION" "$public_rung" "$pid" \
+    "$ios_node_id_sha256" "${specs[@]}" <<'PY'
 import json, os, pathlib, stat, sys, tempfile
 
 inventory = pathlib.Path(sys.argv[1])
 runtime = pathlib.Path(sys.argv[2])
-owner, transition, generation, rung, pid = sys.argv[3:8]
+owner, transition, generation, rung, pid, ios_node_id_sha256 = sys.argv[3:9]
 allowed = {"control", "inventory", "log", "pid", "socket", "state"}
 paths = []
-for spec in sys.argv[8:]:
+for spec in sys.argv[9:]:
     kind, separator, raw = spec.partition("=")
     if not separator or kind not in allowed:
         raise SystemExit(1)
@@ -2431,6 +2703,7 @@ if rung == "vpn":
     ]
 record = {
     "generation": int(generation),
+    "ios_node_id_sha256": ios_node_id_sha256 or None,
     "owner_epoch": owner,
     "paths": paths,
     "pids": [int(pid)],
@@ -2600,7 +2873,7 @@ provider_stop_command(){
   internal="$(provider_internal_rung "$public_rung")" || return 1
   rung_down "$internal" || rc=1
   clear_active || rc=1
-  if [[ "$public_rung" == iphone ]]; then
+  if [[ "$public_rung" == iphone || "$public_rung" == ios:* ]]; then
     provider_remove_runtime_regular "$IPHONE_LOG" || rc=1
   fi
   provider_remove_inventory || rc=1
@@ -2621,7 +2894,7 @@ provider_recover_command(){
     home:*)
       local_down || rc=1
       ;;
-    iphone)
+    iphone|ios:*)
       pid="$(pid_from_file "$IPHONE_PID")" || true
       if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
          && ! iphone_process_alive "$pid"; then
@@ -2843,7 +3116,7 @@ compatibility_handoff_locked(){
   case "$rung" in
     local:*) legacy_session_lock_check && local_down \
                && legacy_session_lock_check || return 1 ;;
-    iphone|vpn|direct|"") ;;
+    iphone|ios:*|vpn|direct|"") ;;
     *) return 1 ;;
   esac
   if [[ "$rung" != local:* && ( -e "$CTL" || -L "$CTL" ) ]]; then

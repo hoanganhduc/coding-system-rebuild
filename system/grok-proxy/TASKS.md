@@ -137,6 +137,35 @@
 - [ ] Run focused pipeline tests, the complete Grok regression suite, source /
   backup / release parity, leak scan, and a fresh security/rollback review.
 
+### P9 — signed pre-import bootstrap
+
+- [ ] Build the production native verifier only with an explicit offline
+  Ed25519 public key; never generate or store a production private key here.
+- [ ] Stage only the installer-declared public runtime closure, sign its
+  deterministic dispatcher, and prove unreadable private/unrelated paths are
+  never opened.
+- [ ] Make the administrative package transaction own the verifier, signed
+  application store, and exact root-owned selector; candidate install must not
+  create or replace any of them.
+- [x] Add the package-owned signed-application publisher with native compiled-key
+  introspection, inode-stable update/release-operation locking, crash-reconciled
+  selector audits, compare-and-swap reselection/rollback, and no signed-release
+  garbage collection.
+- [x] Move privileged package activation out of GNU Make into a fixed
+  zero-argument freestanding static raw-syscall launcher and activator;
+  descriptor-validate its closed package-owned self/payload roots, make exact
+  directory modes independent of inherited umask, preserve lock inodes,
+  activate native last, and permit crash recovery only for the exact generation
+  bound by the durable pending marker. Use the same launcher source for the
+  bounded-argument administrative publisher so neither boundary loads a shell,
+  `env`, or caller-selected library before environment isolation.
+- [ ] Route phase-6 installation only through the selected signed dispatcher,
+  and route qualification/promotion/profile commands only through the concrete
+  selected immutable release with no caller source/home override.
+- [ ] Pass native tamper/path/identity tests, invocation-lane matrices, the
+  isolated complete Grok gate, CI, fresh security review, staging audit, and
+  exact remote-head verification.
+
 - [x] Run complete deterministic suite and repository-level checks.
 - [x] Deploy atomically and prove canonical/deployed/release parity.
 - [x] Run live same-contract direct/home, iPhone, and VPN canaries where usable.
@@ -356,3 +385,95 @@
   harness skips), the 18-test source-backup pipeline, source parity, diff
   checks, and the 1,704-file leak scan passed. Final listeners, owned
   processes, netns/tun, compatibility state/marker, and Grok cgroups are empty.
+
+## Multi-device iOS routing
+
+- [x] Confirm two-round architecture/security/test review and resolve the
+  `--iphone` product decision as ordered iOS-family selection.
+- [x] Add seen-to-fail registry, setup, typed-rung, failover, evidence, backup,
+  and rollback regressions.
+- [x] Implement secure `devices.json` parsing, migration, atomic mutation, and
+  list/remove/reorder management.
+- [x] Make `iphone-setup` additive and idempotent with exact stable-ID readback
+  and commit-after-cleanup behavior.
+- [x] Add `--ios KEY`, redefine `--iphone` as the iOS family, and expand bare
+  automatic routing into ordered `ios:<key>` rungs.
+- [x] Upgrade contracts/providers/supervisor/qualification to typed per-device
+  identities without a redundant route-binding hash.
+- [x] Update generated gates, installer schemas, fixtures, backup manifest,
+  README, command help, and lifecycle documentation (no wrapper-specific shell
+  completion layer exists in the current system).
+- [x] Run focused and full deterministic tests, fault/load/resource gates,
+  public-source parity, leak scan, and restore tests.
+- [x] Install a new immutable release and verify live iPhone XR, Windows, VPN,
+  two-session same-rung repair, canary promotion, rollback/reinstall, and empty
+  supervisor/provider residue.
+- [ ] Verify live iPad and ordered cross-device iOS failover.  The registered
+  iPhone path passes, but the configured iPad peer is externally offline in the
+  dedicated sidecar and therefore cannot be committed or qualified yet.
+
+### Final multi-device iOS evidence — 2026-07-18
+
+- Immutable release `f1474a17...d68b4` is selected and valid.  User/root
+  selectors agree, deny is absent, rollback eligibility is complete, and the
+  exact `home:windows`, `ios:iphone-xr`, and VPN contracts are promoted for
+  Grok release `sha256:3e5e6f7f...189aba`.
+- `iphone-setup iphone-xr` committed stable Tailscale ID
+  `<redacted-private-node-id>` once and a repeated setup left the mode-0600 registry
+  byte-for-byte unchanged.  Exact `--ios iphone-xr`, compatibility Windows,
+  VPN, and bare automatic Windows model queries all reached Grok and listed
+  `grok-4.5`.
+- The final real-pair qualifications passed for `ios:iphone-xr` in 59,102 ms
+  (reconnect 4,115 ms), `home:windows` in 71,134 ms (reconnect 4,629 ms), and
+  VPN in 145,125 ms (reconnect 5,919 ms).  Each proved two independent Grok
+  sessions, one shared contract/generation/owner, identity-safe cache state,
+  exactly one authenticated provider repair, both clients surviving, valid
+  outputs, leader mode disabled, and cleanup complete.
+- Fixed 32-client load passed in 11,682 ms with 32 unique clients, shared
+  generation/contract, overload rejection, 759,033,856 bytes peak cgroup
+  memory delta, 199 peak cgroup PIDs, and zero post-owned processes.  Forced
+  supervisor-loss recovery passed in 4,990 ms with the escaped descendant
+  contained, the second recovery a no-op, and all resource gates passing.
+- The full deterministic suite passed, including 80 supervisor, 64 verifier,
+  60 VPN-broker, 104 installer tests (five explicit root-cgroup integration
+  skips), feature-on end-to-end tests, and the source/backup install pipeline.
+  Round-trip restore and the 1,691-file leak scan passed.
+- Rollback from `f1474a17...d68b4` to `7607502f...caff`, status validation, and
+  reinstall of `f1474a17...d68b4` passed.  The mode-0600 device registry
+  survived unchanged and all three usable rungs were requalified.
+- The iPad advertised stable ID `<redacted-private-node-id>` in primary Tailscale state,
+  but two exact dedicated-sidecar setup attempts reported the selected peer
+  offline.  Commit-after-cleanup correctly withheld it from the registry, so a
+  live iPad route and iPhone-to-iPad failover remain externally blocked rather
+  than being inferred from deterministic tests.
+
+## Managed default multi-session profile and reusable rung qualification
+
+- [x] Add an exhaustive, versioned `RungQualificationContract` projection and
+  seen-to-fail invalidation/reuse tests.
+- [x] Bind qualification records and installer validation to the projected
+  digest while retaining the original full-contract audit digest.
+- [x] Add strict content-addressed managed-profile parsing, pinned Grok
+  executable identity, and atomic root activation metadata.
+- [x] Route bare invocations through an active managed profile, preserve the
+  explicit compatibility escape, and prohibit ambient authority drift.
+- [x] Make the directly invoked immutable payload enforce the same activation,
+  boot-inventory, and compatibility decisions as the installed entrypoint.
+- [x] Make schema-9 terminal evidence the live independently revocable rung
+  authority; retain qualification transcripts as audit-only records.
+- [x] Persist and revalidate per-release qualified-rung and profile-activation
+  catalogs so A/B upgrade and rollback restore a valid managed state.
+- [x] Treat the active-profile pointer as the activation commit point and expose
+  post-commit history-write degradation without a false activation failure.
+- [x] Implement the redacted `grok-remote doctor --json` readiness interface
+  and focused malformed/stale/unsafe-state tests.
+- [x] Update canonical downstream delegation to stop injecting feature and VPN
+  policy, and consume the readiness contract where appropriate.
+- [x] Run focused and composite full deterministic verification, inspect all
+  scoped diffs, and complete a fresh-context adversarial boundary review.
+- [ ] Repeat the unmodified listener-sensitive end-to-end run and real
+  distinct-UID/root-cgroup checks after the live port-1080 session is gone;
+  isolated/component equivalents pass, but the active session was not touched.
+- [ ] Separately, after operational authorization, install the new immutable
+  release, perform the one-time live requalification, activate the profile,
+  and verify rollback and final residue.

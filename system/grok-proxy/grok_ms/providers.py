@@ -59,6 +59,7 @@ from .runtime import (
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+@/-]{1,256}$")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9._:+@-]{1,128}$")
 _HOME_RUNG_RE = re.compile(r"^home:[A-Za-z0-9._:+@-]{1,120}$")
+_IOS_RUNG_RE = re.compile(r"^ios:[a-z0-9][a-z0-9._-]{0,63}$")
 _PATH_KINDS = {"control", "inventory", "log", "pid", "socket", "state"}
 _PRIVILEGED_KINDS = {"namespace", "tun", "vpn_daemon"}
 _FIXED_VPN_RESOURCES = {
@@ -107,7 +108,11 @@ def _require_positive_int(value: int, name: str, maximum: int = 2**31 - 1) -> No
 
 
 def _valid_rung(rung: str) -> bool:
-    return rung in {"direct", "iphone", "vpn"} or _HOME_RUNG_RE.fullmatch(rung) is not None
+    return (
+        rung in {"direct", "vpn"}
+        or _HOME_RUNG_RE.fullmatch(rung) is not None
+        or _IOS_RUNG_RE.fullmatch(rung) is not None
+    )
 
 
 def _process_identity_to_dict(identity: ProcessIdentity) -> dict[str, Any]:
@@ -2157,10 +2162,17 @@ class LegacyShellProvider:
                     "GROK_PROVIDER_HOME_PORT": str(endpoint.port),
                 }
             )
-        elif request.rung == "iphone":
-            if contract.phone_node_id is None:  # RouteContract validation rejects this.
-                raise ProviderProtocolError("iPhone rung has no frozen node identity")
-            environment["GROK_PROVIDER_IPHONE_NODE_ID"] = contract.phone_node_id
+        elif request.rung.startswith("ios:"):
+            key = request.rung.removeprefix("ios:")
+            endpoint = contract.ios_endpoint(key)
+            if endpoint is None:  # ProviderRequest validation rejects this.
+                raise ProviderProtocolError("iOS rung has no frozen node identity")
+            environment.update(
+                {
+                    "GROK_PROVIDER_IOS_KEY": endpoint.key,
+                    "GROK_PROVIDER_IOS_NODE_ID": endpoint.stable_node_id,
+                }
+            )
         elif request.rung == "vpn":
             policy = contract.vpn_policy
             countries = " ".join(policy.countries)
@@ -2425,6 +2437,7 @@ class LegacyShellProvider:
             "owner_epoch",
             "transition_id",
             "generation",
+            "ios_node_id_sha256",
             "rung",
             "pids",
             "paths",
@@ -2438,7 +2451,17 @@ class LegacyShellProvider:
             "transition_id": request.transition_id,
             "generation": request.generation,
             "rung": request.rung,
+            "ios_node_id_sha256": None,
         }
+        if request.rung.startswith("ios:"):
+            endpoint = request.contract.ios_endpoint(
+                request.rung.removeprefix("ios:")
+            )
+            if endpoint is None:
+                raise ProviderProtocolError("iOS inventory has no frozen endpoint")
+            expected["ios_node_id_sha256"] = hashlib.sha256(
+                endpoint.stable_node_id.encode("ascii")
+            ).hexdigest()
         for name, wanted in expected.items():
             if value[name] != wanted or type(value[name]) is not type(wanted):
                 raise ProviderProtocolError(f"provider inventory {name} mismatch")

@@ -24,11 +24,15 @@ PY
 
 mkdir -p "$tmp/target"
 cp "$ROOT/egress.sh" "$tmp/target/egress.sh"
+mkdir -p "$tmp/target/grok_ms"
+cp "$ROOT/grok_ms/ios_registry.py" "$tmp/target/grok_ms/ios_registry.py"
 install -m 700 "$ROOT/tests/fixtures/fake-tailscale" "$tmp/fake-tailscale"
 install -m 700 "$ROOT/tests/fixtures/fake-tailscaled.py" "$tmp/fake-tailscaled"
 mkdir -p "$tmp/target/state"
 printf '%s\n' n-test-phone > "$tmp/target/state/exit-node"
 printf '%s\n' n-test-phone > "$tmp/target/state/ready"
+chmod 700 "$tmp/target/state"
+chmod 600 "$tmp/target/state/exit-node" "$tmp/target/state/ready"
 
 # A pre-existing runtime log link must never be followed or truncated.
 printf '%s\n' sentinel-log-content > "$tmp/log-sentinel"
@@ -120,6 +124,17 @@ rm "$tmp/target/state/tailscaled.log"
   [[ "$(cat "$IPHONE_READY_FILE")" == n-test-phone ]]
   unset GROK_IPHONE_EXIT_NODE
   iphone_configured
+  [[ "$(ios_devices | cut -f1)" == iphone-xr ]]
+
+  # A second device may share HostName with the phone. DNSName remains the
+  # unique automatic key source, and repeating setup for the same stable ID is
+  # an order-preserving no-op rather than a duplicate or replacement.
+  export FAKE_TAILSCALE_STATUS_JSON='{"BackendState":"Running","ExitNodeStatus":{"ID":"n-tablet","Online":true,"TailscaleIPs":["100.64.0.100/32"]},"Peer":{"100.64.0.99":{"ID":"n-phone","HostName":"ios","DNSName":"iphone-xr.example.ts.net.","Online":true,"ExitNodeOption":true,"TailscaleIPs":["100.64.0.99"]},"100.64.0.100":{"ID":"n-tablet","HostName":"ios","DNSName":"ipad-pro.example.ts.net.","Online":true,"ExitNodeOption":true,"TailscaleIPs":["100.64.0.100"]}}}'
+  iphone_setup "100.64.0.100"
+  [[ "$(ios_devices | cut -f1 | paste -sd, -)" == iphone-xr,ipad-pro ]]
+  iphone_setup "100.64.0.100"
+  [[ "$(ios_devices | cut -f1 | paste -sd, -)" == iphone-xr,ipad-pro ]]
+  unset FAKE_TAILSCALE_STATUS_JSON
 
   marker="$tmp/state-was-sourced"
   printf 'RUNG=$(touch %s)\nDEST=\nSPORT=22\n' "$marker" > "$STATE"

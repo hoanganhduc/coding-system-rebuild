@@ -234,6 +234,16 @@ class BrokerTests(unittest.TestCase):
                 "size": len(data),
                 "sha256": hashlib.sha256(data).hexdigest(),
             })
+        installer = self.release / "install-release.py"
+        installer.write_text("# immutable installer runtime\n", encoding="ascii")
+        installer.chmod(0o444)
+        installer_data = installer.read_bytes()
+        entries.append({
+            "path": installer.name,
+            "mode": "0444",
+            "size": len(installer_data),
+            "sha256": hashlib.sha256(installer_data).hexdigest(),
+        })
         manifest = {
             "schema_version": 2,
             "kind": "root",
@@ -297,6 +307,21 @@ class BrokerTests(unittest.TestCase):
             **policy,
         )
 
+    def test_roleless_root_runtime_is_verified_without_becoming_a_helper(self) -> None:
+        helpers = self.broker._helpers(self.release_id, self.root_files)
+        self.assertEqual(set(helpers), module._ROOT_ROLES)
+        self.assertNotIn("install-release.py", {path.name for path in helpers.values()})
+
+        installer = self.release / "install-release.py"
+        installer.chmod(0o644)
+        installer.write_text("# tampered installer runtime\n", encoding="ascii")
+        installer.chmod(0o444)
+        with self.assertRaisesRegex(
+            module.BrokerError,
+            "root helper does not match its manifest",
+        ):
+            self.broker._helpers(self.release_id, self.root_files)
+
     def canary_supervisor_request(
         self,
         operation: str,
@@ -323,7 +348,7 @@ class BrokerTests(unittest.TestCase):
             "to_release": self.release_id,
         }
         record = {
-            "schema_version": 4,
+            "schema_version": 6,
             "release_id": self.release_id,
             "host_id": module.Broker._host_id(),
             "rung": "vpn",
@@ -334,6 +359,7 @@ class BrokerTests(unittest.TestCase):
             "canary_kind": "rung",
             "canary_nonce": "e" * 64,
             "created_unix_ns": 1,
+            "profile_sha256": None,
         }
         record.update(updates)
         if self.layout.deny.exists():

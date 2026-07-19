@@ -26,7 +26,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from grok_ms.contract import (
+    CONTRACT_SCHEMA_VERSION,
     Endpoint,
+    IosEndpoint,
+    PROTOCOL_VERSION,
     ResourceLimits,
     RouteContract,
     RouteMode,
@@ -111,15 +114,25 @@ def contract(
         candidate = unused_port()
         if candidate != chosen_public and candidate not in chosen_private:
             chosen_private.append(candidate)
+    ios_keys = tuple(
+        dict.fromkeys(
+            rung.removeprefix("ios:")
+            for rung in ladder
+            if rung.startswith("ios:")
+        )
+    )
     return RouteContract(
-        schema_version=1,
-        protocol_version=1,
+        schema_version=CONTRACT_SCHEMA_VERSION,
+        protocol_version=PROTOCOL_VERSION,
         release_id="test-release-1",
         model_id=model_id,
         route_mode=RouteMode.AUTO,
         forced_host=None,
         home_endpoints=(),
-        phone_node_id=None,
+        ios_endpoints=tuple(
+            IosEndpoint(key, f"n-{key}") for key in ios_keys
+        ),
+        forced_ios_key=None,
         allow_direct="direct" in ladder,
         ladder=ladder,
         routing_config_digest="a" * 64,
@@ -791,7 +804,7 @@ def register_packet(wanted: RouteContract, request_id: str | None = None) -> dic
     return {
         "type": "register",
         "schema_version": 1,
-        "protocol_version": 1,
+        "protocol_version": PROTOCOL_VERSION,
         "request_id": request_id or str(uuid.uuid4()),
         "lease_nonce": "b" * 32,
         "wrapper": wrapper_record(),
@@ -908,7 +921,7 @@ class SupervisorProtocolTests(unittest.TestCase):
                 },
             )
             canary_record = {
-                "schema_version": 4,
+                "schema_version": 6,
                 "release_id": wanted.release_id,
                 "host_id": Supervisor._host_id(),
                 "canary_kind": "rung",
@@ -919,6 +932,7 @@ class SupervisorProtocolTests(unittest.TestCase):
                 "model_id": wanted.model_id,
                 "canary_nonce": nonce,
                 "created_unix_ns": time.time_ns(),
+                "profile_sha256": None,
             }
             publish(release_control / "rung-canary.json", canary_record)
             descriptor = os.open(
@@ -1660,7 +1674,7 @@ raise SystemExit(88)
                     {
                         "type": "status",
                         "schema_version": 1,
-                        "protocol_version": 1,
+                        "protocol_version": PROTOCOL_VERSION,
                         "request_id": str(uuid.uuid4()),
                     },
                 )
@@ -1749,7 +1763,7 @@ raise SystemExit(88)
             attach = {
                 "type": "attach-child",
                 "schema_version": 1,
-                "protocol_version": 1,
+                "protocol_version": PROTOCOL_VERSION,
                 "owner_epoch": registered["owner_epoch"],
                 "lease_id": registered["lease_id"],
                 "request_id": str(uuid.uuid4()),
@@ -1776,7 +1790,7 @@ raise SystemExit(88)
                 {
                     "type": "release",
                     "schema_version": 1,
-                    "protocol_version": 1,
+                    "protocol_version": PROTOCOL_VERSION,
                     "owner_epoch": registered["owner_epoch"],
                     "lease_id": registered["lease_id"],
                     "request_id": str(uuid.uuid4()),
@@ -1842,7 +1856,7 @@ raise SystemExit(88)
                             {
                                 "type": "attach-child",
                                 "schema_version": 1,
-                                "protocol_version": 1,
+                                "protocol_version": PROTOCOL_VERSION,
                                 "owner_epoch": registered["owner_epoch"],
                                 "lease_id": registered["lease_id"],
                                 "request_id": str(uuid.uuid4()),
@@ -1886,7 +1900,7 @@ raise SystemExit(88)
                     {
                         "type": "attach-child",
                         "schema_version": 1,
-                        "protocol_version": 1,
+                        "protocol_version": PROTOCOL_VERSION,
                         "owner_epoch": registered["owner_epoch"],
                         "lease_id": registered["lease_id"],
                         "request_id": str(uuid.uuid4()),
@@ -2007,7 +2021,7 @@ raise SystemExit(88)
                         {
                             "type": "attach-child",
                             "schema_version": 1,
-                            "protocol_version": 1,
+                            "protocol_version": PROTOCOL_VERSION,
                             "owner_epoch": registrations[index]["owner_epoch"],
                             "lease_id": registrations[index]["lease_id"],
                             "request_id": str(uuid.uuid4()),
@@ -2039,7 +2053,7 @@ raise SystemExit(88)
                     {
                         "type": "release",
                         "schema_version": 1,
-                        "protocol_version": 1,
+                        "protocol_version": PROTOCOL_VERSION,
                         "owner_epoch": registrations[index]["owner_epoch"],
                         "lease_id": registrations[index]["lease_id"],
                         "request_id": str(uuid.uuid4()),
@@ -2103,6 +2117,81 @@ raise SystemExit(88)
             first.close()
             running.finish()
 
+    def test_ios_registry_order_change_rejects_join_before_provider_mutation(self) -> None:
+        wanted = contract(
+            ladder=("ios:iphone-xr", "ios:ipad-pro"),
+            max_leases=2,
+        )
+        provider = ScriptedProvider((ScriptedStep("start"), ScriptedStep("stop")))
+        running = RunningSupervisor(wanted, provider)
+        first = running.connect()
+        second = running.connect()
+        try:
+            self.assertTrue(request(first, register_packet(wanted))["ok"])
+            changed = dataclasses.replace(
+                wanted,
+                ios_endpoints=tuple(reversed(wanted.ios_endpoints)),
+                ladder=tuple(reversed(wanted.ladder)),
+            )
+            mismatch = request(second, register_packet(changed))
+            self.assertFalse(mismatch["ok"])
+            self.assertIn("contract mismatch", mismatch["error"])
+            self.assertIn("ios_endpoints", mismatch["error"])
+            self.assertEqual(
+                provider.calls,
+                (("start", "ios:iphone-xr", 1),),
+            )
+        finally:
+            second.close()
+            first.close()
+            running.finish()
+
+    def test_ios_transition_deadlines_cap_each_device_and_the_family(self) -> None:
+        keys = tuple(f"device-{index}" for index in range(8))
+        wanted = contract(ladder=tuple(f"ios:{key}" for key in keys))
+        wanted = dataclasses.replace(
+            wanted,
+            timeout_policy=dataclasses.replace(
+                wanted.timeout_policy,
+                transition_ms=120_000,
+            ),
+        )
+        clock = [0]
+
+        class OfflineIosProvider:
+            def __init__(self) -> None:
+                self.starts: list[tuple[str, int, int]] = []
+
+            def start(self, request_value, deadline, _qualifier, _cancellation=None):
+                self.starts.append(
+                    (request_value.rung, clock[0], deadline.expires_ns)
+                )
+                clock[0] += 29_000_000_000
+                raise ProviderError("offline")
+
+            def recover(self, _request, _resources, _deadline):
+                return ResidueReport(True, ())
+
+        provider = OfflineIosProvider()
+        running = RunningSupervisor(wanted, provider)
+        client = running.connect()
+        try:
+            with mock.patch.object(
+                supervisor_module.time,
+                "monotonic_ns",
+                side_effect=lambda: clock[0],
+            ):
+                rejected = request(client, register_packet(wanted))
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(len(provider.starts), 5)
+            self.assertEqual(provider.starts[-1][2], 120_000_000_000)
+            for _rung, started_ns, expires_ns in provider.starts:
+                self.assertGreater(expires_ns, started_ns)
+                self.assertLessEqual(expires_ns - started_ns, 30_000_000_000)
+        finally:
+            client.close()
+            running.finish()
+
     def test_two_leases_have_unique_leaders_status_and_linearized_last_interest(self) -> None:
         wanted = contract(max_leases=2)
         provider = ScriptedProvider((ScriptedStep("start"), ScriptedStep("stop")))
@@ -2120,7 +2209,7 @@ raise SystemExit(88)
                 {
                     "type": "status",
                     "schema_version": 1,
-                    "protocol_version": 1,
+                    "protocol_version": PROTOCOL_VERSION,
                     "request_id": str(uuid.uuid4()),
                 },
             )["status"]
@@ -2132,7 +2221,7 @@ raise SystemExit(88)
                 {
                     "type": "ip",
                     "schema_version": 1,
-                    "protocol_version": 1,
+                    "protocol_version": PROTOCOL_VERSION,
                     "request_id": str(uuid.uuid4()),
                 },
             )
@@ -2172,7 +2261,7 @@ raise SystemExit(88)
                     {
                         "type": "attach-child",
                         "schema_version": 1,
-                        "protocol_version": 1,
+                        "protocol_version": PROTOCOL_VERSION,
                         "owner_epoch": registered["owner_epoch"],
                         "lease_id": registered["lease_id"],
                         "request_id": str(uuid.uuid4()),
@@ -2282,6 +2371,55 @@ raise SystemExit(88)
             running.finish()
         self.assertEqual(provider.calls[-1], ("stop", "vpn", 3))
 
+    def test_ios_watchdog_repairs_device_then_transitions_to_new_generation(self) -> None:
+        wanted = contract(ladder=("ios:iphone-xr", "ios:ipad-pro"))
+        provider = ScriptedProvider(
+            (
+                ScriptedStep("start"),
+                ScriptedStep("stop"),
+                ScriptedStep("start"),
+                ScriptedStep("stop"),
+                ScriptedStep("start"),
+                ScriptedStep("stop"),
+            )
+        )
+
+        running = RunningSupervisor(
+            wanted,
+            provider,
+            start_watchdog=True,
+            health_check=lambda result: result.request.rung == "ios:ipad-pro",
+        )
+        client = running.connect()
+        try:
+            self.assertTrue(request(client, register_packet(wanted))["ok"])
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if (
+                    running.supervisor.status_snapshot()["active_rung"]
+                    == "ios:ipad-pro"
+                ):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(
+                running.supervisor.status_snapshot()["active_rung"],
+                "ios:ipad-pro",
+            )
+            self.assertEqual(
+                provider.calls[:5],
+                (
+                    ("start", "ios:iphone-xr", 1),
+                    ("stop", "ios:iphone-xr", 1),
+                    ("start", "ios:iphone-xr", 2),
+                    ("stop", "ios:iphone-xr", 2),
+                    ("start", "ios:ipad-pro", 3),
+                ),
+            )
+        finally:
+            client.close()
+            running.finish()
+        self.assertEqual(provider.calls[-1], ("stop", "ios:ipad-pro", 3))
+
     def test_watchdog_ladder_exhaustion_terminates_epoch(self) -> None:
         wanted = contract(ladder=("direct",))
         provider = ScriptedProvider(
@@ -2350,7 +2488,7 @@ raise SystemExit(88)
         os.chmod(auth, 0o600)
         nonce = "d" * 64
         record = {
-            "schema_version": 4,
+            "schema_version": 5,
             "release_id": wanted.release_id,
             "host_id": running.supervisor._host_id(),
             "canary_kind": "rung",
@@ -2379,7 +2517,7 @@ raise SystemExit(88)
             packet = {
                 "type": "qualification-provider-fault",
                 "schema_version": 1,
-                "protocol_version": 1,
+                "protocol_version": PROTOCOL_VERSION,
                 "request_id": str(uuid.uuid4()),
                 "owner_epoch": running.supervisor.owner_epoch,
                 "canary_nonce": nonce,
@@ -2565,7 +2703,7 @@ raise SystemExit(88)
                 packet = {
                     "type": "qualification-pause",
                     "schema_version": 1,
-                    "protocol_version": 1,
+                    "protocol_version": PROTOCOL_VERSION,
                     "request_id": str(uuid.uuid4()),
                     "owner_epoch": supervisor.owner_epoch,
                     "canary_nonce": "d" * 64,
@@ -2707,7 +2845,7 @@ raise SystemExit(88)
                         {
                             "type": "qualification-quiesce",
                             "schema_version": 1,
-                            "protocol_version": 1,
+                            "protocol_version": PROTOCOL_VERSION,
                             "request_id": str(uuid.uuid4()),
                             "owner_epoch": supervisor.owner_epoch,
                             "canary_nonce": packet["canary_nonce"],
@@ -2733,7 +2871,7 @@ raise SystemExit(88)
                         {
                             "type": "qualification-quiesce",
                             "schema_version": 1,
-                            "protocol_version": 1,
+                            "protocol_version": PROTOCOL_VERSION,
                             "request_id": str(uuid.uuid4()),
                             "owner_epoch": supervisor.owner_epoch,
                             "canary_nonce": packet["canary_nonce"],
@@ -2761,7 +2899,7 @@ raise SystemExit(88)
                             {
                                 "type": "qualification-quiesce",
                                 "schema_version": 1,
-                                "protocol_version": 1,
+                                "protocol_version": PROTOCOL_VERSION,
                                 "request_id": str(uuid.uuid4()),
                                 "owner_epoch": supervisor.owner_epoch,
                                 "canary_nonce": packet["canary_nonce"],
@@ -2795,7 +2933,7 @@ raise SystemExit(88)
                             {
                                 "type": "qualification-disarm",
                                 "schema_version": 1,
-                                "protocol_version": 1,
+                                "protocol_version": PROTOCOL_VERSION,
                                 "request_id": str(uuid.uuid4()),
                                 "owner_epoch": supervisor.owner_epoch,
                                 "canary_nonce": packet["canary_nonce"],
@@ -3058,7 +3196,7 @@ raise SystemExit(88)
                 packet = {
                     "type": "qualification-pause",
                     "schema_version": 1,
-                    "protocol_version": 1,
+                    "protocol_version": PROTOCOL_VERSION,
                     "request_id": str(uuid.uuid4()),
                     "owner_epoch": supervisor.owner_epoch,
                     "canary_nonce": "d" * 64,
@@ -3348,7 +3486,7 @@ raise SystemExit(88)
         os.chmod(auth, 0o600)
         nonce = "e" * 64
         record = {
-            "schema_version": 4,
+            "schema_version": 5,
             "release_id": wanted.release_id,
             "host_id": running.supervisor._host_id(),
             "canary_kind": "rung",
@@ -3370,7 +3508,7 @@ raise SystemExit(88)
         packet = {
             "type": "qualification-provider-fault",
             "schema_version": 1,
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "request_id": str(uuid.uuid4()),
             "owner_epoch": running.supervisor.owner_epoch,
             "canary_nonce": nonce,
@@ -5019,7 +5157,7 @@ exit 91
                     staged = root / f".supervisor.ready.{'b' * 24}.tmp"
                     payload = {
                         "schema_version": 1,
-                        "protocol_version": 1,
+                        "protocol_version": PROTOCOL_VERSION,
                         "release_id": fence.release_id,
                         "owner_epoch": fence.owner_epoch,
                         "pid": fence.pid,

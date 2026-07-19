@@ -39,6 +39,11 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from .config import build_contract, classify
 from .grok_exec import grok_release_id
 from .ipc import SeqPacketConnection
+from .managed_profile import (
+    ManagedProfileError,
+    load_managed_profile,
+    open_profile_grok,
+)
 from .contract import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
@@ -79,7 +84,7 @@ CGROUP_RESOURCE_VALUE_NAMES = (
 )
 PUBLIC_PORT = 1080
 PRIVATE_PORTS = (11080, 11081)
-EVIDENCE_SCHEMA_VERSION = 3
+EVIDENCE_SCHEMA_VERSION = 5
 QUALIFICATION_KIND = "grok-multi-session-qualification"
 PROVIDER_RECOVERY_RECORD_VERSION = 1
 CHILD_RECOVERY_RECORD_VERSION = 2
@@ -105,10 +110,10 @@ _SCOPE_NAME = re.compile(r"^grok-ms-[0-9a-f]{24}$")
 _RUNNER_SCOPE_NAME = re.compile(r"^grok-installer-[0-9a-f]{24}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9._:+@-]{1,256}$")
 _RUNG_TOKEN = re.compile(
-    r"^(?:direct|iphone|vpn|home:[A-Za-z0-9._:+@-]{1,120})$"
+    r"^(?:direct|vpn|home:[A-Za-z0-9._:+@-]{1,120}|ios:[a-z0-9][a-z0-9._-]{0,63})$"
 )
 _ROUTE_PROFILE_TOKEN = re.compile(
-    r"^(?:direct|iphone|vpn|auto|auto-no-direct|home:[A-Za-z0-9._:+@-]{1,120})$"
+    r"^(?:direct|iphone|vpn|auto|auto-no-direct|home:[A-Za-z0-9._:+@-]{1,120}|ios:[a-z0-9][a-z0-9._-]{0,63})$"
 )
 _GROK_RELEASE_TOKEN = re.compile(r"^[A-Za-z0-9._:+@-]{1,128}$")
 _MODEL_TOKEN = re.compile(r"^[A-Za-z0-9._:+/@-]{1,128}$")
@@ -128,6 +133,7 @@ _CANARY_ENV = (
     "GROK_RELEASE_CANARY_KIND",
     "GROK_RELEASE_CANARY_MODEL",
     "GROK_RELEASE_CANARY_ROUTE_PROFILE",
+    "GROK_RELEASE_CANARY_PROFILE_SHA256",
     "GROK_QUALIFICATION_DEADLINE_MONOTONIC_NS",
     "GROK_QUALIFICATION_CLEANUP_DEADLINE_MONOTONIC_NS",
 )
@@ -636,7 +642,7 @@ def capture_cleanup_authority(
         type(release_id) is not str
         or type(owner_epoch) is not str
         or ready.get("schema_version") != 1
-        or ready.get("protocol_version") != 1
+        or ready.get("protocol_version") != PROTOCOL_VERSION
         or snapshot.get("phase") != "READY"
         or release_id != provenance.get("release_id")
         or ready.get("release_id") != release_id
@@ -4803,6 +4809,7 @@ class QualificationContext:
     grok_release_id: str
     model_id: str
     auth_fd: int
+    profile_sha256: str | None = None
 
     @classmethod
     def from_environment(cls) -> "QualificationContext":
@@ -4827,6 +4834,9 @@ class QualificationContext:
         rung = values["GROK_RELEASE_CANARY_RUNG"]
         route_profile = values["GROK_RELEASE_CANARY_ROUTE_PROFILE"]
         contract = values.get("GROK_RELEASE_CANARY_CONTRACT")
+        profile_sha256 = values.get(
+            "GROK_RELEASE_CANARY_PROFILE_SHA256"
+        )
         grok_release = values["GROK_RELEASE_CANARY_GROK_RELEASE"]
         model = values["GROK_RELEASE_CANARY_MODEL"]
         if (
@@ -4840,8 +4850,13 @@ class QualificationContext:
             or _GROK_RELEASE_TOKEN.fullmatch(grok_release) is None
             or _MODEL_TOKEN.fullmatch(model) is None
             or (kind == "release" and contract is not None)
+            or (kind == "release" and profile_sha256 is not None)
             or (kind == "release" and (rung != "direct" or route_profile != "direct"))
             or (kind == "rung" and (contract is None or _DIGEST.fullmatch(contract) is None))
+            or (
+                profile_sha256 is not None
+                and _DIGEST.fullmatch(profile_sha256) is None
+            )
         ):
             raise VerificationBlocked("qualification authorization values are invalid")
         return cls(
@@ -4854,6 +4869,7 @@ class QualificationContext:
             grok_release,
             model,
             int(values["GROK_RELEASE_CANARY_FD"]),
+            profile_sha256,
         )
 
 
@@ -5118,11 +5134,56 @@ def _compact_fault(
     return observations
 
 
+def _qualification_home(profile_sha256: str | None) -> Path:
+    """Return the fixed account home, with one isolated profile-test seam."""
+
+    try:
+        account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError) as exc:
+        raise VerificationBlocked(
+            "qualification cannot resolve the target account home"
+        ) from exc
+    if not account_home.is_absolute():
+        raise VerificationBlocked(
+            "qualification target account home is not absolute"
+        )
+    if (
+        profile_sha256 is None
+        or os.environ.get("GROK_TESTING") != "1"
+    ):
+        return account_home
+    candidate = Path(os.environ.get("HOME", str(account_home)))
+    if not candidate.is_absolute():
+        raise VerificationBlocked(
+            "profile qualification test home is not absolute"
+        )
+    return candidate
+
+
+def _qualification_profile_root(profile_sha256: str) -> Path:
+    home = _qualification_home(profile_sha256)
+    if os.environ.get("GROK_TESTING") == "1":
+        state_value = os.environ.get("XDG_STATE_HOME")
+        if state_value is not None:
+            state_root = Path(state_value)
+            if not state_root.is_absolute():
+                raise VerificationBlocked(
+                    "profile qualification XDG_STATE_HOME is not absolute"
+                )
+            return state_root / "grok-proxy/profiles"
+    return home / ".local/state/grok-proxy/profiles"
+
+
 def _real_environment() -> dict[str, str]:
     account = pwd.getpwuid(os.getuid())
+    canary = _canary_environment()
+    profile_sha256 = canary.get(
+        "GROK_RELEASE_CANARY_PROFILE_SHA256"
+    )
+    selected_home = _qualification_home(profile_sha256)
     selected = {
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        "HOME": account.pw_dir,
+        "HOME": str(selected_home),
         "USER": account.pw_name,
         "LOGNAME": account.pw_name,
         "LANG": "C.UTF-8",
@@ -5130,7 +5191,28 @@ def _real_environment() -> dict[str, str]:
         "TERM": "dumb",
         "GROK_MULTI_SESSION": "1",
     }
-    selected.update(_canary_environment())
+    selected.update(canary)
+    if (
+        profile_sha256 is not None
+        and os.environ.get("GROK_TESTING") == "1"
+    ):
+        # Prefix-layout tests use the same explicit test-only state seams as
+        # the installed client.  These selectors are never copied for an
+        # ordinary or legacy qualification context.
+        selected["GROK_TESTING"] = "1"
+        selected["HOME"] = str(selected_home)
+        for name in (
+            "XDG_STATE_HOME",
+            "GROK_TEST_ROOT_RELEASE_CONTROL",
+        ):
+            value = os.environ.get(name)
+            if value is not None:
+                candidate = Path(value)
+                if not candidate.is_absolute():
+                    raise VerificationBlocked(
+                        f"profile qualification {name} is not absolute"
+                    )
+                selected[name] = str(candidate)
     return selected
 
 
@@ -5509,6 +5591,10 @@ def _real_route_arguments(route_profile: str) -> list[str]:
         return ["--direct"]
     if route_profile == "iphone":
         return ["--iphone"]
+    if route_profile.startswith("ios:") and re.fullmatch(
+        r"[a-z0-9][a-z0-9._-]{0,63}", route_profile[4:]
+    ):
+        return ["--ios", route_profile[4:]]
     if route_profile == "vpn":
         return ["--vpn"]
     if route_profile == "auto":
@@ -5524,19 +5610,73 @@ def _real_route_arguments(route_profile: str) -> list[str]:
     raise VerificationBlocked("real-pair route profile is not supported")
 
 
+def _profile_bound_contract(
+    context: QualificationContext,
+) -> RouteContract:
+    """Load the exact private profile selected by root-owned canary authority."""
+
+    profile_sha256 = context.profile_sha256
+    if profile_sha256 is None or _DIGEST.fullmatch(profile_sha256) is None:
+        raise VerificationBlocked(
+            "profile-bound qualification lacks an exact profile identity"
+        )
+    profile_root = _qualification_profile_root(profile_sha256)
+    try:
+        profile = load_managed_profile(
+            profile_root / f"{profile_sha256}.json",
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+            expected_sha256=profile_sha256,
+        )
+        with open_profile_grok(profile):
+            pass
+    except (ManagedProfileError, OSError) as exc:
+        # Do not expose an owner-only profile path or nested endpoint detail in
+        # the verifier's closed failure surface.
+        raise VerificationBlocked(
+            "profile-bound qualification profile is invalid"
+        ) from exc
+    original = profile.contract
+    if (
+        context.canary_kind != "rung"
+        or context.contract_sha256 is None
+        or original.release_id != context.release_id
+        or original.digest() != context.contract_sha256
+        or profile.grok_release_id != context.grok_release_id
+        or original.grok_release_id != context.grok_release_id
+        or original.model_id != context.model_id
+        or context.rung not in original.ladder
+        or not qualification_route_profile_matches(
+            original, context.route_profile, context.rung
+        )
+    ):
+        raise VerificationBlocked(
+            "profile-bound qualification identity is mismatched"
+        )
+    return original
+
+
 def _real_contracts(
     context: QualificationContext,
     env: Mapping[str, str],
 ) -> tuple[RouteContract, RouteContract]:
-    route_arguments = _real_route_arguments(context.route_profile)
-    original = build_contract(
-        classify((*route_arguments, "-m", context.model_id)),
-        context.model_id,
-        release_dir=ROOT,
-        grok_bin=Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/bin/grok",
-        env=env,
-        grok_release_id=context.grok_release_id,
-    )
+    if context.profile_sha256 is None:
+        route_arguments = _real_route_arguments(context.route_profile)
+        original = build_contract(
+            classify((*route_arguments, "-m", context.model_id)),
+            context.model_id,
+            release_dir=ROOT,
+            grok_bin=(
+                Path(pwd.getpwuid(os.getuid()).pw_dir)
+                / ".local/bin/grok"
+            ),
+            env=env,
+            grok_release_id=context.grok_release_id,
+        )
+    else:
+        # The content-addressed profile, not ambient GROK/VPNGATE selectors,
+        # is the complete contract source for profile-bound qualification.
+        original = _profile_bound_contract(context)
     if (
         original.release_id != context.release_id
         or original.grok_release_id != context.grok_release_id
@@ -6984,6 +7124,9 @@ def run_real_pair(
             "sessions_requested": 2,
             "sessions_completed": len(outputs),
             "active_rung": context.rung,
+            "rung_qualification_sha256": (
+                original_contract.rung_qualification_digest(context.rung)
+            ),
             "model_id": context.model_id,
             "shared_owner_epoch": guarded.get("owner_epoch")
             == repaired.get("owner_epoch"),
@@ -7168,6 +7311,7 @@ def _default_observations(step: str) -> dict[str, Any]:
     return {
         "sessions_requested": 2, "sessions_completed": 0,
         "active_rung": "direct", "model_id": "unknown",
+        "rung_qualification_sha256": digest,
         "shared_owner_epoch": False, "shared_generation": False,
         "shared_contract": False, "independent_grok_units": 0,
         "shared_leader_disabled": False, "leader_socket_count": 0,
@@ -7226,7 +7370,7 @@ def main() -> int:
         # immutable release manifest before every workload launch.
         stage.set(f"{args.mode}-provenance")
         entrypoint = (
-            Path(pwd.getpwuid(os.getuid()).pw_dir)
+            _qualification_home(context.profile_sha256)
             / ".local/bin/grok-remote"
         )
         provenance = release_provenance(entrypoint)
@@ -7330,6 +7474,9 @@ def main() -> int:
         )
         grok_release_id = os.environ.get("GROK_RELEASE_CANARY_GROK_RELEASE", "unknown")
         model_id = os.environ.get("GROK_RELEASE_CANARY_MODEL", "unknown")
+        profile_sha256 = os.environ.get(
+            "GROK_RELEASE_CANARY_PROFILE_SHA256"
+        )
     else:
         release_id = context.release_id
         nonce = context.nonce
@@ -7338,6 +7485,7 @@ def main() -> int:
         route_profile = context.route_profile
         grok_release_id = context.grok_release_id
         model_id = context.model_id
+        profile_sha256 = context.profile_sha256
     record = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "kind": QUALIFICATION_KIND,
@@ -7350,6 +7498,7 @@ def main() -> int:
         "contract_sha256": contract_sha256,
         "grok_release_id": grok_release_id,
         "model_id": model_id,
+        "profile_sha256": profile_sha256,
         "status": status_name,
         "started_unix_ns": started_unix_ns,
         "completed_unix_ns": completed_unix_ns,

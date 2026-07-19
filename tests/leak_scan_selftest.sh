@@ -8,7 +8,7 @@ T=$(mktemp -d /tmp/csr-canary.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 
 # construct canaries by concatenation so no token-shaped literal exists in THIS file
-P1="sk-"; P2="ghp_"; P3="AKIA"; P4="xoxb-"; P5="-----BEGIN "; P6="/home/"; P7="eyJ"
+P1="sk-"; P2="ghp_"; P3="AKIA"; P4="xoxb-"; P5="-----BEGIN "; P6="/home/"; P7="eyJ"; P8="n"
 mkdir -p "$T/dirty" "$T/clean"
 {
   echo "key = \"${P1}CANARY0123456789abcdefgh\""
@@ -19,6 +19,7 @@ mkdir -p "$T/dirty" "$T/clean"
   echo "path=${P6}ubuntu/.claude/secrets.json"
   echo "jwt=${P7}AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBB.CCCCCCCCCCCC"
   echo "TELEGRAM_BOT_TOKEN=\"99999999:AA$(printf 'x%.0s' {1..30})\""
+  echo "tailscale_node=${P8}CANARY012345CNTRL"
 } > "$T/dirty/leaky.conf"
 echo "nothing to see here, placeholder {{ TELEGRAM_BOT_TOKEN }}" > "$T/clean/ok.conf"
 
@@ -32,7 +33,7 @@ if CSR_DENYLIST="$DL" "$REPO/bin/leak-scan.sh" "$T/dirty" >/dev/null 2>&1; then
 else
   # count distinct finding classes caught
   out=$(CSR_DENYLIST="$DL" "$REPO/bin/leak-scan.sh" "$T/dirty" 2>&1 || true)
-  for label in "openai" "github token" "aws" "slack" "private key" "home path" "jwt" "telegram" "denylist"; do
+  for label in "openai" "github token" "aws" "slack" "private key" "home path" "jwt" "telegram" "tailscale stable node" "denylist"; do
     echo "$out" | grep -qi "$label" || { echo "FAIL: canary class not caught: $label"; fail=1; }
   done
 fi
@@ -40,5 +41,5 @@ if ! CSR_DENYLIST="$DL" "$REPO/bin/leak-scan.sh" "$T/clean" >/dev/null 2>&1; the
   echo "FAIL: scanner flagged a clean dir"; fail=1
 fi
 rm -f "$DL"
-[[ $fail -eq 0 ]] && echo "leak-scan self-test: PASS (9 canary classes caught, clean dir passes)"
+[[ $fail -eq 0 ]] && echo "leak-scan self-test: PASS (10 canary classes caught, clean dir passes)"
 exit $fail
