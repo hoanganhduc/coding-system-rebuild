@@ -843,6 +843,7 @@ class Supervisor:
         self._replays: OrderedDict[tuple[str, ...], _Replay] = OrderedDict()
         self._diagnostics: deque[dict[str, Any]] = deque(maxlen=_MAX_DIAGNOSTICS)
         self._sequence = 0
+        self._authority_activity_sequence = 0
         self._cleanup_proved = False
         self._cleanup_error: str | None = None
         self._lease_cleanup_errors: list[str] = []
@@ -4089,6 +4090,7 @@ class Supervisor:
                     "watchdog health-check ownership is recursive"
                 )
             self._watchdog_check_owners.add(owner)
+            self._authority_activity_sequence += 1
             return True
 
     def _finish_watchdog_health_check(self) -> None:
@@ -4099,6 +4101,7 @@ class Supervisor:
                     "watchdog health-check ownership is missing"
                 )
             self._watchdog_check_owners.remove(owner)
+            self._authority_activity_sequence += 1
             self._probe_condition.notify_all()
 
     def _watchdog_loop(self) -> None:
@@ -4198,6 +4201,11 @@ class Supervisor:
                     ),
                     "leases": len(self._leases),
                     "max_leases": contract.limits.max_leases if contract is not None else None,
+                    "active_probes": len(self._active_probes),
+                    "watchdog_checks": len(self._watchdog_check_owners),
+                    "authority_activity_sequence": (
+                        self._authority_activity_sequence
+                    ),
                     "provider_processes": (
                         len(active.resources.processes) if active is not None else 0
                     ),
@@ -4536,6 +4544,7 @@ class Supervisor:
         probe_id = secrets.token_hex(16)
         with self._probe_condition:
             self._active_probes.add(probe_id)
+            self._authority_activity_sequence += 1
         barrier_read, barrier_write = os.pipe2(os.O_CLOEXEC)
         process: subprocess.Popen[bytes] | None = None
         child: ProcessIdentity | None = None
@@ -4708,6 +4717,7 @@ class Supervisor:
                     cleanup_error = cleanup_error or exc
             with self._probe_condition:
                 self._active_probes.discard(probe_id)
+                self._authority_activity_sequence += 1
                 self._probe_condition.notify_all()
 
         if cleanup_error is not None:

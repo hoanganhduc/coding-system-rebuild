@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import inspect
 import os
 from dataclasses import replace
@@ -59,6 +60,18 @@ from grok_ms.runtime import current_process_identity as runtime_process_identity
 
 
 class LiveVerifierHelperTests(unittest.TestCase):
+    def test_recovery_json_parse_and_digest_share_one_bounded_read(self) -> None:
+        raw = b'{"owner_epoch":"epoch-a"}\n'
+        with mock.patch.object(
+            VERIFY, "_read_bounded", return_value=raw
+        ) as bounded:
+            value, digest = VERIFY._read_json_digest(Path("/record.json"))
+        self.assertEqual(value, {"owner_epoch": "epoch-a"})
+        self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
+        bounded.assert_called_once_with(
+            Path("/record.json"), VERIFY.MAX_RUNTIME_RECORD
+        )
+
     def test_default_country_policy_is_identical_across_all_authorities(self) -> None:
         expected = ("CN", "IR", "KP", "TM", "VE")
         self.assertEqual(tuple(CONFIG._BLOCKED_DEFAULT.split()), expected)
@@ -205,9 +218,13 @@ class LiveVerifierHelperTests(unittest.TestCase):
             control = Path(directory) / "control"
             provider_records = control / "recovery/providers"
             provider_scopes = control / "recovery/provider-scopes"
+            detached_scopes = control / "recovery/detached-scopes"
+            child_records = control / "recovery/children"
             runtime_dir = control / "p/provider-test"
             provider_records.mkdir(mode=0o700, parents=True)
             provider_scopes.mkdir(mode=0o700, parents=True)
+            detached_scopes.mkdir(mode=0o700, parents=True)
+            child_records.mkdir(mode=0o700, parents=True)
             runtime_dir.mkdir(mode=0o700, parents=True)
             graph = ProviderResourceGraph(
                 "epoch-1",
@@ -266,16 +283,117 @@ class LiveVerifierHelperTests(unittest.TestCase):
                 "populated": True,
                 "processes": [identity.pid],
             }
+            authority_identities = (
+                VERIFY.ProcessIdentity(2_000_000_001, 101, identity.boot_id),
+                VERIFY.ProcessIdentity(2_000_000_002, 102, identity.boot_id),
+                VERIFY.ProcessIdentity(2_000_000_003, 103, identity.boot_id),
+            )
+
+            def strict_scope(suffix: str) -> dict[str, object]:
+                return {
+                    "backend": "cgroup-v2-v1",
+                    "parent_path": "/sys/fs/cgroup",
+                    "parent_device": 1,
+                    "parent_inode": 2,
+                    "scope_path": "/sys/fs/cgroup/grok-ms-" + suffix * 24,
+                    "scope_device": 3,
+                    "scope_inode": 4,
+                }
+
+            detached = {
+                "child": authority_identities[0].to_dict(),
+                "kind": "supervisor-epoch",
+                "owner_epoch": "epoch-1",
+                "phase": "OWNED",
+                "record_version": 1,
+                "release_id": contract.release_id,
+                "schema_version": 1,
+                "scope": strict_scope("a"),
+            }
+            detached_path = detached_scopes / "supervisor-epoch.json"
+            detached_path.write_text(
+                json.dumps(detached, sort_keys=True, separators=(",", ":"))
+                + "\n",
+                encoding="ascii",
+            )
+            os.chmod(detached_path, 0o600)
+            for index, child in enumerate(authority_identities[1:]):
+                lease_id = f"lease-{index}"
+                child_record = {
+                    "child": child.to_dict(),
+                    "kind": "child-recovery",
+                    "leader_path": str(control / "leaders" / f"{lease_id}.sock"),
+                    "lease_id": lease_id,
+                    "owner_epoch": "epoch-1",
+                    "phase": "ATTACHED",
+                    "record_version": VERIFY.CHILD_RECOVERY_RECORD_VERSION,
+                    "release_id": contract.release_id,
+                    "schema_version": 1,
+                    "scope": strict_scope(str(index + 1)),
+                }
+                child_path = child_records / f"{lease_id}.json"
+                child_path.write_text(
+                    json.dumps(
+                        child_record, sort_keys=True, separators=(",", ":")
+                    )
+                    + "\n",
+                    encoding="ascii",
+                )
+                os.chmod(child_path, 0o600)
+
+            bound_identities: list[VERIFY.ProcessIdentity] = []
+
+            def bind_identity(
+                candidate: VERIFY.ProcessIdentity,
+            ) -> dict[str, object]:
+                bound_identities.append(candidate)
+                return {"identity": candidate.to_dict()}
+
+            def scope_evidence(
+                _value: object,
+                child: VERIFY.ProcessIdentity,
+            ) -> dict[str, object]:
+                return {
+                    "scope_path": "/sys/fs/cgroup/grok-ms-" + "e" * 24,
+                    "scope_device": 3,
+                    "scope_inode": 4,
+                    "populated": True,
+                    "processes": [child.pid],
+                }
 
             def inspect() -> dict[str, object]:
                 with mock.patch.object(
                     VERIFY, "_retained_scope_evidence", return_value=retained
+                ), mock.patch.object(
+                    VERIFY, "_scope_evidence", side_effect=scope_evidence
+                ), mock.patch.object(
+                    VERIFY, "exact_process_evidence", side_effect=bind_identity
+                ), mock.patch.object(
+                    VERIFY, "process_matches", return_value=True
+                ), mock.patch.object(
+                    VERIFY,
+                    "process_metrics",
+                    side_effect=AssertionError(
+                        "authority binding must not sample volatile metrics"
+                    ),
                 ):
                     return VERIFY.recovery_authorities(
-                        control, expected_rung="direct"
+                        control,
+                        expected_rung="direct",
+                        require_no_probes=True,
                     )
 
             authorities = inspect()
+            self.assertEqual(
+                sorted(item.pid for item in bound_identities),
+                sorted(
+                    [
+                        identity.pid,
+                        *(item.pid for item in authority_identities),
+                    ]
+                ),
+            )
+            bound_identities.clear()
 
             unsupported = dict(record)
             unsupported["record_version"] = 999
@@ -332,6 +450,18 @@ class LiveVerifierHelperTests(unittest.TestCase):
             authorities["providers"][0]["processes"][0]["identity"],
             normalized[0].to_dict(),
         )
+        self.assertEqual(
+            set(authorities["providers"][0]["processes"][0]),
+            {"identity"},
+        )
+        for collection in ("detached_scopes", "children"):
+            self.assertTrue(authorities[collection])
+            self.assertTrue(
+                all(
+                    set(item["process"]) == {"identity"}
+                    for item in authorities[collection]
+                )
+            )
 
     def test_recovery_authorities_bind_one_retained_legacy_provider_scope(self) -> None:
         identity = runtime_process_identity()
@@ -508,6 +638,29 @@ class LiveVerifierHelperTests(unittest.TestCase):
             ):
                 VERIFY.recovery_authorities(control, expected_rung="direct")
 
+    def test_probe_quiescent_authority_scan_rejects_before_process_inspection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "control"
+            probes = control / "recovery/probes"
+            probes.mkdir(mode=0o700, parents=True)
+            record = probes / ("a" * 32 + ".json")
+            record.write_text("{}\n", encoding="ascii")
+            os.chmod(record, 0o600)
+            with mock.patch.object(
+                VERIFY,
+                "exact_process_evidence",
+                side_effect=AssertionError("probe process must not be sampled"),
+            ), self.assertRaisesRegex(
+                VERIFY.VerificationError, "not probe-quiescent"
+            ):
+                VERIFY.recovery_authorities(
+                    control,
+                    expected_rung="direct",
+                    require_no_probes=True,
+                )
+
     def test_process_and_listener_inventory_recheck_exact_identity(self) -> None:
         identity = VERIFY.ProcessIdentity(
             42, 123, "11111111-2222-3333-4444-555555555555"
@@ -536,6 +689,20 @@ class LiveVerifierHelperTests(unittest.TestCase):
                 ):
                     VERIFY.listener_inventory((1080,), (identity,), proc)
 
+    def test_exact_process_evidence_rechecks_identity_without_metrics(self) -> None:
+        identity = VERIFY.ProcessIdentity(
+            42, 123, "11111111-2222-3333-4444-555555555555"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory) / "proc"
+            with mock.patch.object(
+                VERIFY, "process_matches", side_effect=(True, False)
+            ):
+                with self.assertRaisesRegex(
+                    VERIFY.VerificationError, "changed during binding"
+                ):
+                    VERIFY.exact_process_evidence(identity, proc)
+
     def test_real_process_inventory_requires_a_live_pidfd_anchor(self) -> None:
         identity = VERIFY.current_process_identity(os.getpid())
         with mock.patch.object(
@@ -547,6 +714,182 @@ class LiveVerifierHelperTests(unittest.TestCase):
                 VERIFY.VerificationError, "exited during metrics inventory"
             ):
                 VERIFY.process_metrics(identity)
+
+    def test_real_authority_evidence_requires_a_live_pidfd_anchor(self) -> None:
+        identity = VERIFY.current_process_identity(os.getpid())
+        with mock.patch.object(
+            VERIFY.signal,
+            "pidfd_send_signal",
+            side_effect=ProcessLookupError,
+        ):
+            with self.assertRaisesRegex(
+                VERIFY.VerificationError, "exited during binding"
+            ):
+                VERIFY.exact_process_evidence(identity)
+
+    def test_real_authority_evidence_rejects_an_unreaped_zombie(self) -> None:
+        read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+        process: subprocess.Popen[bytes] | None = None
+        pidfd = -1
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    "import os,sys; os.read(int(sys.argv[1]), 1)",
+                    str(read_fd),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                pass_fds=(read_fd,),
+            )
+            identity = VERIFY.current_process_identity(process.pid)
+            pidfd = VERIFY.open_exact_pidfd(identity)
+            os.close(read_fd)
+            read_fd = -1
+            os.write(write_fd, b"x")
+            os.close(write_fd)
+            write_fd = -1
+            VERIFY.wait_exact_pidfd_exit(identity, pidfd, 2)
+            self.assertTrue(VERIFY.process_matches(identity))
+            with self.assertRaisesRegex(
+                VERIFY.VerificationError, "exited during binding"
+            ):
+                VERIFY.exact_process_evidence(identity)
+            process.wait(timeout=2)
+            self.assertFalse(VERIFY.process_matches(identity))
+        finally:
+            for descriptor in (read_fd, write_fd, pidfd):
+                if descriptor >= 0:
+                    os.close(descriptor)
+            if process is not None and process.returncode is None:
+                process.wait(timeout=2)
+
+    def test_exact_supervisor_status_uses_kernel_bound_peer_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "control"
+            control.mkdir(mode=0o700)
+            socket_path = control / "supervisor.sock"
+            listener = socket.socket(
+                socket.AF_UNIX,
+                socket.SOCK_SEQPACKET | getattr(socket, "SOCK_CLOEXEC", 0),
+            )
+            listener.bind(str(socket_path))
+            listener.listen(1)
+            identity = VERIFY.current_process_identity(os.getpid())
+            authority = VERIFY.CleanupAuthority(
+                "a" * 64,
+                "owner-a",
+                identity,
+            )
+            errors: list[BaseException] = []
+
+            def serve() -> None:
+                try:
+                    peer, _ = listener.accept()
+                    connection = VERIFY.SeqPacketConnection(peer)
+                    try:
+                        request = connection.recv()
+                        self.assertEqual(request.fds, ())
+                        self.assertEqual(request.payload.get("type"), "status")
+                        connection.send(
+                            {
+                                "ok": True,
+                                "type": "status",
+                                "request_id": request.payload["request_id"],
+                                "status": {
+                                    "release_id": authority.release_id,
+                                    "owner_epoch": authority.owner_epoch,
+                                    "phase": "READY",
+                                },
+                            }
+                        )
+                    finally:
+                        connection.close()
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=serve)
+            thread.start()
+            try:
+                with mock.patch.object(
+                    VERIFY, "account_control", return_value=control
+                ):
+                    snapshot = VERIFY._exact_supervisor_status(authority, 2)
+            finally:
+                thread.join(timeout=3)
+                listener.close()
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(snapshot["phase"], "READY")
+
+    def test_exact_supervisor_rejects_same_uid_replacement_before_send(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "control"
+            control.mkdir(mode=0o700)
+            socket_path = control / "supervisor.sock"
+            ready_read, ready_write = os.pipe2(os.O_CLOEXEC)
+            child = os.fork()
+            if child == 0:
+                os.close(ready_read)
+                listener = socket.socket(
+                    socket.AF_UNIX,
+                    socket.SOCK_SEQPACKET
+                    | getattr(socket, "SOCK_CLOEXEC", 0),
+                )
+                try:
+                    listener.bind(str(socket_path))
+                    listener.listen(1)
+                    os.write(ready_write, b"1")
+                    os.close(ready_write)
+                    peer, _ = listener.accept()
+                    try:
+                        peer.settimeout(2)
+                        received = peer.recv(1)
+                    finally:
+                        peer.close()
+                    os._exit(0 if received == b"" else 3)
+                except BaseException:
+                    os._exit(4)
+                finally:
+                    listener.close()
+
+            os.close(ready_write)
+            reaped = False
+            try:
+                self.assertEqual(os.read(ready_read, 1), b"1")
+                authority = VERIFY.CleanupAuthority(
+                    "a" * 64,
+                    "owner-a",
+                    VERIFY.current_process_identity(os.getpid()),
+                )
+                with mock.patch.object(
+                    VERIFY, "account_control", return_value=control
+                ), self.assertRaisesRegex(
+                    VERIFY.ProtocolError, "peer pid mismatch"
+                ):
+                    VERIFY._exact_supervisor_connection(authority, 2)
+                waited, status = os.waitpid(child, 0)
+                reaped = True
+                self.assertEqual(waited, child)
+                self.assertTrue(os.WIFEXITED(status))
+                self.assertEqual(os.WEXITSTATUS(status), 0)
+            finally:
+                os.close(ready_read)
+                if not reaped:
+                    fallback = socket.socket(
+                        socket.AF_UNIX, socket.SOCK_SEQPACKET
+                    )
+                    try:
+                        fallback.connect(str(socket_path))
+                    except OSError:
+                        pass
+                    finally:
+                        fallback.close()
+                    os.waitpid(child, 0)
 
     def test_listener_inventory_rechecks_the_attributed_socket_inode(self) -> None:
         identity = VERIFY.ProcessIdentity(
@@ -730,10 +1073,29 @@ class LiveVerifierHelperTests(unittest.TestCase):
             repaired_tail.index('stage.set("real-pair-repair-bindings")'),
             repaired_tail.index("recovery_authorities("),
         )
+        self.assertEqual(source.count("require_no_probes=True"), 2)
+        self.assertEqual(source.count("_close_authority_inventory("), 2)
+        self.assertEqual(source.count("_wait_bound_guard_status("), 2)
+        self.assertLess(
+            repaired_tail.index("recovery_authorities("),
+            repaired_tail.index("repaired_bound = _wait_bound_guard_status("),
+        )
+        self.assertLess(
+            repaired_tail.index("repaired_bound = _wait_bound_guard_status("),
+            repaired_tail.index("prove_exclusive_epoch_authority("),
+        )
         self.assertEqual(reconnect_positions, sorted(reconnect_positions))
         self.assertLess(
             fault_source.index("response = exchange()"),
             fault_source.index('stage.set("real-pair-provider-fault-replay")'),
+        )
+        self.assertLess(
+            pause_source.index("_exact_supervisor_connection("),
+            pause_source.index("(context.auth_fd,)"),
+        )
+        self.assertLess(
+            fault_source.index("_exact_supervisor_connection("),
+            fault_source.index("(context.auth_fd,)"),
         )
         self.assertLess(
             fault_source.index('stage.set("real-pair-provider-fault-replay")'),
@@ -1199,6 +1561,202 @@ class LiveVerifierHelperTests(unittest.TestCase):
         frontend["active_streams"] = 1
         with self.assertRaisesRegex(VERIFY.VerificationError, "gauges disagree"):
             VERIFY._validate_frontend(snapshot, count)
+
+    def test_guard_status_binding_requires_probe_quiescence_and_exact_epoch(
+        self,
+    ) -> None:
+        snapshot = {
+            "release_id": "a" * 64,
+            "owner_epoch": "epoch-a",
+            "phase": "READY",
+            "contract_digest": "b" * 64,
+            "generation": 2,
+            "active_rung": "direct",
+            "provisional_leases": 0,
+            "live_leases": 2,
+            "live_interest": 2,
+            "transition": None,
+            "cleanup_error": None,
+            "resources": {
+                "leases": 2,
+                "provider_processes": 1,
+                "active_probes": 0,
+                "watchdog_checks": 0,
+                "authority_activity_sequence": 4,
+                "frontend": {
+                    "committed_generation": 2,
+                    "active_streams": 0,
+                    "accepted_streams": 2,
+                    "backend_connected_streams": 2,
+                    "client_to_backend_bytes": 100,
+                    "backend_to_client_bytes": 0,
+                },
+                "qualification": {
+                    "active": True,
+                    "pause_id": "c" * 32,
+                    "lease_count": 2,
+                    "frozen_scopes": 2,
+                    "fault_in_progress": False,
+                    "frontend": {
+                        "response_hold": True,
+                        "accept_cursor": 0,
+                        "quiesce_epoch": 0,
+                        "streams": [],
+                    },
+                },
+            },
+        }
+
+        def matches(value: dict[str, object]) -> bool:
+            return VERIFY._guard_status_matches(
+                value,
+                contract_digest="b" * 64,
+                rung="direct",
+                generation=2,
+                pause_id="c" * 32,
+                frozen_scopes=2,
+            )
+
+        self.assertTrue(matches(snapshot))
+        binding = VERIFY._guard_status_binding(snapshot)
+        mutations = (
+            ("owner_epoch", ("owner_epoch",), "epoch-b"),
+            ("phase", ("phase",), "DRAINING"),
+            ("cleanup_error", ("cleanup_error",), "fenced"),
+            ("live_interest", ("live_interest",), 1),
+            ("leases", ("resources", "leases"), 1),
+            (
+                "provider_processes",
+                ("resources", "provider_processes"),
+                2,
+            ),
+            (
+                "authority_activity_sequence",
+                ("resources", "authority_activity_sequence"),
+                6,
+            ),
+            (
+                "accepted_streams",
+                ("resources", "frontend", "accepted_streams"),
+                3,
+            ),
+        )
+        for label, path, replacement in mutations:
+            changed = json.loads(json.dumps(snapshot))
+            target = changed
+            for name in path[:-1]:
+                target = target[name]
+            target[path[-1]] = replacement
+            self.assertTrue(matches(changed), label)
+            self.assertNotEqual(
+                VERIFY._guard_status_binding(changed), binding, label
+            )
+        for field in ("active_probes", "watchdog_checks"):
+            unquiet = json.loads(json.dumps(snapshot))
+            unquiet["resources"][field] = 1
+            self.assertFalse(matches(unquiet), field)
+
+        changed = json.loads(json.dumps(snapshot))
+        changed["owner_epoch"] = "epoch-b"
+        with mock.patch.object(
+            VERIFY, "status", side_effect=(changed, snapshot)
+        ) as sampled, mock.patch.object(VERIFY.time, "sleep"):
+            rebound = VERIFY._wait_bound_guard_status(
+                Path("/entrypoint"),
+                {},
+                binding,
+                contract_digest="b" * 64,
+                rung="direct",
+                generation=2,
+                pause_id="c" * 32,
+                frozen_scopes=2,
+                timeout=1,
+            )
+        self.assertEqual(rebound, snapshot)
+        self.assertEqual(sampled.call_count, 2)
+
+    def test_closed_authority_inventory_rejects_recovery_or_cgroup_change(
+        self,
+    ) -> None:
+        identity = VERIFY.ProcessIdentity(
+            42,
+            123,
+            "11111111-2222-3333-4444-555555555555",
+        )
+        authorities = {
+            "children": [{"record_sha256": "a" * 64}],
+            "identities": [identity],
+        }
+        inventory = {
+            "captured_at": "2026-01-01T00:00:00Z",
+            "parent_path": "/sys/fs/cgroup/fixture",
+            "parent_device": 1,
+            "parent_inode": 2,
+            "scopes": [],
+        }
+        changed_authorities = {
+            "children": [{"record_sha256": "b" * 64}],
+            "identities": [identity],
+        }
+        with mock.patch.object(
+            VERIFY,
+            "recovery_authorities",
+            return_value=changed_authorities,
+        ), self.assertRaisesRegex(
+            VERIFY.VerificationError, "recovery authority changed"
+        ):
+            VERIFY._close_authority_inventory(
+                Path("/control"),
+                expected_rung="direct",
+                opening_authorities=authorities,
+                opening_cgroups=inventory,
+                deadline_monotonic_ns=time.monotonic_ns() + 1_000_000_000,
+            )
+
+        changed_inventory = {
+            **inventory,
+            "captured_at": "2026-01-01T00:00:01Z",
+            "scopes": [{"scope_path": "/sys/fs/cgroup/fixture/foreign"}],
+        }
+        with mock.patch.object(
+            VERIFY, "recovery_authorities", return_value=authorities
+        ), mock.patch.object(
+            VERIFY, "cgroup_scope_inventory", return_value=changed_inventory
+        ), mock.patch.object(
+            VERIFY, "assert_cgroup_scopes_match"
+        ), self.assertRaisesRegex(
+            VERIFY.VerificationError, "cgroup authority changed"
+        ):
+            VERIFY._close_authority_inventory(
+                Path("/control"),
+                expected_rung="direct",
+                opening_authorities=authorities,
+                opening_cgroups=inventory,
+                deadline_monotonic_ns=time.monotonic_ns() + 1_000_000_000,
+            )
+
+        closing_inventory = {
+            **inventory,
+            "captured_at": "2026-01-01T00:00:02Z",
+        }
+        with mock.patch.object(
+            VERIFY, "recovery_authorities", return_value=authorities
+        ), mock.patch.object(
+            VERIFY, "cgroup_scope_inventory", return_value=closing_inventory
+        ), mock.patch.object(VERIFY, "assert_cgroup_scopes_match"):
+            closed_authorities, closed_inventory = (
+                VERIFY._close_authority_inventory(
+                    Path("/control"),
+                    expected_rung="direct",
+                    opening_authorities=authorities,
+                    opening_cgroups=inventory,
+                    deadline_monotonic_ns=(
+                        time.monotonic_ns() + 1_000_000_000
+                    ),
+                )
+            )
+        self.assertIs(closed_authorities, authorities)
+        self.assertIs(closed_inventory, closing_inventory)
 
     def test_recovery_pair_requires_a_second_exact_noop(self) -> None:
         first = {

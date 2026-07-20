@@ -47,7 +47,11 @@ from grok_ms.grok_exec import (  # noqa: E402
     VerifiedGrokExecutable,
     grok_release_id,
 )
-from grok_ms.ipc import SeqPacketConnection, bind_seqpacket_listener  # noqa: E402
+from grok_ms.ipc import (  # noqa: E402
+    ProtocolError,
+    SeqPacketConnection,
+    bind_seqpacket_listener,
+)
 from grok_ms.managed_profile import (  # noqa: E402
     PROFILE_STATUS_SCHEMA,
     ActivationRecord,
@@ -552,7 +556,10 @@ while True:
                                 keyword_arguments, {"strict_direct": False}
                             )
                         else:
-                            self.assertEqual(keyword_arguments, {})
+                            self.assertEqual(
+                                keyword_arguments,
+                                {"release_id": "f" * 64},
+                            )
                         self.assertDescriptorClosed(descriptor)
                         self.assertFalse(
                             set(visible).intersection(client._CANARY_BINDINGS)
@@ -1539,6 +1546,59 @@ while True:
                 listener.close()
                 path.unlink(missing_ok=True)
 
+    def test_exact_connect_rejects_a_same_uid_replacement_listener(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            os.chmod(root, 0o700)
+            path = root / "control.sock"
+            ready_read, ready_write = os.pipe2(os.O_CLOEXEC)
+            child = os.fork()
+            if child == 0:
+                os.close(ready_read)
+                listener = bind_seqpacket_listener(path)
+                try:
+                    os.write(ready_write, b"1")
+                    os.close(ready_write)
+                    peer, _ = listener.accept()
+                    try:
+                        peer.settimeout(2)
+                        received = peer.recv(1)
+                    finally:
+                        peer.close()
+                    os._exit(0 if received == b"" else 3)
+                except BaseException:
+                    os._exit(4)
+                finally:
+                    listener.close()
+
+            os.close(ready_write)
+            reaped = False
+            try:
+                self.assertEqual(os.read(ready_read, 1), b"1")
+                expected = client.current_process_identity()
+                with self.assertRaisesRegex(
+                    ProtocolError, "peer pid mismatch"
+                ):
+                    client._connect(path, expected_identity=expected)
+                waited, status = os.waitpid(child, 0)
+                reaped = True
+                self.assertEqual(waited, child)
+                self.assertTrue(os.WIFEXITED(status))
+                self.assertEqual(os.WEXITSTATUS(status), 0)
+            finally:
+                os.close(ready_read)
+                if not reaped:
+                    fallback = socket.socket(
+                        socket.AF_UNIX, socket.SOCK_SEQPACKET
+                    )
+                    try:
+                        fallback.connect(str(path))
+                    except OSError:
+                        pass
+                    finally:
+                        fallback.close()
+                    os.waitpid(child, 0)
+
     def test_zombie_readiness_owner_is_not_treated_as_attachable(self) -> None:
         barrier_read, barrier_write = os.pipe2(os.O_CLOEXEC)
         child = os.fork()
@@ -1741,7 +1801,7 @@ while True:
                         ),
                     )
                 self.assertIs(result, connection)
-                validate_scope.assert_called_once()
+                self.assertEqual(validate_scope.call_count, 2)
                 spawn.assert_not_called()
                 connection.close.assert_not_called()
 
@@ -1782,7 +1842,7 @@ while True:
                                 detached_store=mock.Mock(),
                                 provider_canary=capability,
                             )
-                        rejected.close.assert_called_once_with()
+                        rejected.close.assert_not_called()
                         rejected_scope.assert_not_called()
                         rejected_spawn.assert_not_called()
                         self.assertEqual(
@@ -1908,6 +1968,47 @@ while True:
             with mock.patch("sys.stderr") as stderr:
                 self.assertEqual(client._control("status", environment), 2)
             self.assertIn("recovery required", str(stderr.write.call_args_list))
+
+    def test_control_rejects_readiness_change_before_sending_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            root = state / "grok-proxy" / "control"
+            root.mkdir(parents=True, mode=0o700)
+            socket_path = root / "supervisor.sock"
+            identity = client.current_process_identity()
+            ready = {
+                "schema_version": client.SCHEMA_VERSION,
+                "protocol_version": client.PROTOCOL_VERSION,
+                "release_id": "a" * 64,
+                "owner_epoch": "owner-a",
+                "pid": identity.pid,
+                "pid_start_ticks": identity.start_ticks,
+                "boot_id": identity.boot_id,
+                "socket": str(socket_path),
+            }
+            connection = mock.Mock()
+            environment = {
+                "GROK_TESTING": "1",
+                "XDG_STATE_HOME": str(state),
+            }
+            with mock.patch.object(
+                client,
+                "_read_json",
+                side_effect=(ready, {**ready, "owner_epoch": "owner-b"}),
+            ), mock.patch.object(
+                client, "_connect", return_value=connection
+            ), mock.patch.object(
+                client, "_request"
+            ) as request, self.assertRaisesRegex(
+                client.ClientError, "readiness changed"
+            ):
+                client._control(
+                    "status",
+                    environment,
+                    release_id="a" * 64,
+                )
+            connection.close.assert_called_once_with()
+            request.assert_not_called()
 
     def test_recover_passes_complete_exact_epoch_expectation_atomically(self) -> None:
         environment = {

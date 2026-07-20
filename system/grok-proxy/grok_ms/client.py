@@ -812,25 +812,75 @@ def _ready_identity(
         raise ClientError(f"invalid supervisor identity: {exc}") from exc
 
 
-def _connect(path: Path, timeout: float = 2.0) -> SeqPacketConnection:
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC)
-    sock.settimeout(timeout)
+def _read_ready(path: Path) -> dict[str, Any]:
+    """Preserve readiness absence for bootstrap/control state handling."""
+
     try:
+        return _read_json(path)
+    except ClientError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            raise FileNotFoundError(path) from exc
+        raise
+
+
+def _connect(
+    path: Path,
+    timeout: float = 2.0,
+    *,
+    expected_identity: ProcessIdentity | None = None,
+) -> SeqPacketConnection:
+    anchor = (
+        pidfd_for_identity(expected_identity)
+        if expected_identity is not None
+        else -1
+    )
+    sock: socket.socket | None = None
+    try:
+        sock = socket.socket(
+            socket.AF_UNIX,
+            socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC,
+        )
+        sock.settimeout(timeout)
         sock.connect(str(path))
+        connection = SeqPacketConnection(sock)
+        try:
+            connection.verify_peer(
+                expected_uid=os.getuid(),
+                expected_pid=(
+                    expected_identity.pid
+                    if expected_identity is not None
+                    else None
+                ),
+            )
+            if expected_identity is not None:
+                poller = select.poll()
+                poller.register(
+                    anchor,
+                    select.POLLIN | select.POLLHUP | select.POLLERR,
+                )
+                if (
+                    not process_matches(expected_identity)
+                    or not process_can_still_execute(expected_identity)
+                    or poller.poll(0)
+                ):
+                    raise ClientError(
+                        "connected supervisor identity is not exact-live"
+                    )
+        except Exception:
+            connection.close()
+            raise
+        # The timeout bounds only bootstrap/connect.  Registration may legitimately
+        # spend the contract transition budget qualifying a route, and leaving the
+        # two-second socket timeout installed aborts every real first admission.
+        sock.settimeout(None)
+        return connection
     except Exception:
-        sock.close()
+        if sock is not None:
+            sock.close()
         raise
-    connection = SeqPacketConnection(sock)
-    try:
-        connection.verify_peer(expected_uid=os.getuid())
-    except Exception:
-        connection.close()
-        raise
-    # The timeout bounds only bootstrap/connect.  Registration may legitimately
-    # spend the contract transition budget qualifying a route, and leaving the
-    # two-second socket timeout installed aborts every real first admission.
-    sock.settimeout(None)
-    return connection
+    finally:
+        if anchor >= 0:
+            os.close(anchor)
 
 
 def _validate_ready(
@@ -1266,19 +1316,38 @@ def ensure_supervisor(
         ready_path = root / "supervisor.ready"
         existing_connection: SeqPacketConnection | None = None
         try:
-            existing_connection = _connect(
-                socket_path,
-                timeout=min(2.0, _remaining(deadline, "existing supervisor connect")),
-            )
-            ready = _read_json(ready_path)
-            _validate_ready(
+            ready = _read_ready(ready_path)
+            identity = _ready_identity(
                 ready,
-                release_id=contract.release_id,
-                socket_path=socket_path,
                 provider_canary_nonce=(
                     None if provider_canary is None else provider_canary.nonce
                 ),
             )
+            if ready.get("release_id") != contract.release_id:
+                raise ClientError(
+                    "supervisor readiness release does not match the request"
+                )
+            if ready.get("socket") != str(socket_path):
+                raise ClientError(
+                    "supervisor readiness names a different control socket"
+                )
+            existing_connection = _connect(
+                socket_path,
+                timeout=min(2.0, _remaining(deadline, "existing supervisor connect")),
+                expected_identity=identity,
+            )
+            _validate_owned_supervisor_scope(
+                store,
+                ready,
+                contract.release_id,
+                provider_canary_nonce=(
+                    None if provider_canary is None else provider_canary.nonce
+                ),
+            )
+            if _read_ready(ready_path) != ready:
+                raise ClientError(
+                    "supervisor readiness changed during exact connection"
+                )
             _validate_owned_supervisor_scope(
                 store,
                 ready,
@@ -1300,7 +1369,7 @@ def ensure_supervisor(
         # Never unlink an ownership-looking socket until the recorded process is
         # proved dead.  A live-but-unresponsive epoch is recovery work.
         if ready_path.exists() or ready_path.is_symlink():
-            ready = _read_json(ready_path)
+            ready = _read_ready(ready_path)
             identity = _ready_identity(
                 ready,
                 provider_canary_nonce=(
@@ -1351,12 +1420,8 @@ def ensure_supervisor(
                     )
                 connection: SeqPacketConnection | None = None
                 try:
-                    connection = _connect(
-                        socket_path,
-                        timeout=min(0.5, _remaining(deadline, "supervisor connect")),
-                    )
-                    ready = _read_json(ready_path)
-                    _validate_ready(
+                    ready = _read_ready(ready_path)
+                    identity = _validate_ready(
                         ready,
                         release_id=contract.release_id,
                         socket_path=socket_path,
@@ -1366,16 +1431,18 @@ def ensure_supervisor(
                             else provider_canary.nonce
                         ),
                     )
-                    if _ready_identity(
-                        ready,
-                        provider_canary_nonce=(
-                            None
-                            if provider_canary is None
-                            else provider_canary.nonce
-                        ),
-                    ) != launch.record.child:
+                    if identity != launch.record.child:
                         raise ClientError(
                             "supervisor readiness differs from the scoped launch"
+                        )
+                    connection = _connect(
+                        socket_path,
+                        timeout=min(0.5, _remaining(deadline, "supervisor connect")),
+                        expected_identity=identity,
+                    )
+                    if _read_ready(ready_path) != ready:
+                        raise ClientError(
+                            "supervisor readiness changed during exact connection"
                         )
                     owner_epoch = ready.get("owner_epoch")
                     if type(owner_epoch) is not str:
@@ -1979,11 +2046,52 @@ def _maintenance(
     os.execvpe(str(wrapper), [str(wrapper), *classification_argv], legacy_env)
 
 
-def _control(command: str, env: Mapping[str, str]) -> int:
+def _control(
+    command: str,
+    env: Mapping[str, str],
+    *,
+    release_id: str | None = None,
+) -> int:
     root = control_root(env)
     socket_path = root / "supervisor.sock"
     try:
-        connection = _connect(socket_path)
+        ready_path = root / "supervisor.ready"
+        ready = _read_ready(ready_path)
+        provider_canary_nonce = env.get("GROK_RELEASE_CANARY_NONCE")
+        if provider_canary_nonce is None and "provider_canary_nonce" in ready:
+            recorded_nonce = ready.get("provider_canary_nonce")
+            if (
+                type(recorded_nonce) is not str
+                or _DIGEST_RE.fullmatch(recorded_nonce) is None
+            ):
+                raise ClientError(
+                    "supervisor readiness provider canary identity is invalid"
+                )
+            provider_canary_nonce = recorded_nonce
+        if release_id is None:
+            identity = _ready_identity(
+                ready,
+                provider_canary_nonce=provider_canary_nonce,
+            )
+            if ready.get("socket") != str(socket_path):
+                raise ClientError(
+                    "supervisor readiness names a different control socket"
+                )
+            if not process_can_still_execute(identity):
+                raise ClientError("supervisor readiness identity is not live")
+        else:
+            identity = _validate_ready(
+                ready,
+                release_id=release_id,
+                socket_path=socket_path,
+                provider_canary_nonce=provider_canary_nonce,
+            )
+        connection = _connect(socket_path, expected_identity=identity)
+        if _read_ready(ready_path) != ready:
+            connection.close()
+            raise ClientError(
+                "supervisor readiness changed during exact connection"
+            )
     except (FileNotFoundError, ConnectionRefusedError, OSError, ProtocolError):
         residue = _inactive_residue(root)
         if residue is not None:
@@ -2200,7 +2308,11 @@ def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
                 [str(wrapper), "iphone-list"],
                 legacy_env,
             )
-        return _control(classification.control, execution_env)
+        return _control(
+            classification.control,
+            execution_env,
+            release_id=_release_id(release_dir, execution_env),
+        )
     if classification.kind is CommandKind.RECOVERY:
         return _recover(
             release_dir,

@@ -38,7 +38,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .config import build_contract, classify
 from .grok_exec import grok_release_id
-from .ipc import SeqPacketConnection
+from .ipc import ProtocolError, SeqPacketConnection
 from .managed_profile import (
     ManagedProfileError,
     load_managed_profile,
@@ -342,6 +342,21 @@ def _read_json(path: Path, maximum: int = MAX_RUNTIME_RECORD) -> dict[str, Any]:
     return value
 
 
+def _read_json_digest(
+    path: Path, maximum: int = MAX_RUNTIME_RECORD
+) -> tuple[dict[str, Any], str]:
+    """Parse and hash one recovery record from the same stable open."""
+
+    raw = _read_bounded(path, maximum)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise VerificationError(f"invalid JSON evidence record: {path}") from exc
+    if type(value) is not dict:
+        raise VerificationError(f"JSON evidence is not an object: {path}")
+    return value, hashlib.sha256(raw).hexdigest()
+
+
 def _sha256_file(path: Path, maximum: int = 512 * 1024 * 1024) -> str:
     flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -539,6 +554,19 @@ def wait_exact_pidfd_exit(
         )
 
 
+def pidfd_has_exited(pidfd: int) -> bool:
+    """Return whether one retained pidfd already reached kernel exit."""
+
+    if type(pidfd) is not int or pidfd < 0:
+        raise VerificationError("exact process liveness requires a valid pidfd")
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(pidfd, selectors.EVENT_READ)
+            return bool(selector.select(0))
+    except (OSError, ValueError) as exc:
+        raise VerificationError("cannot inspect exact process liveness") from exc
+
+
 def close_pidfd_anchors(anchors: list[tuple[ProcessIdentity, int]]) -> None:
     errors: list[str] = []
     while anchors:
@@ -591,7 +619,45 @@ def process_metrics(identity: ProcessIdentity, proc_root: Path = Path("/proc")) 
                 raise VerificationError(
                     f"process exited during metrics inventory: {identity.pid}"
                 ) from exc
+            if pidfd_has_exited(anchor):
+                raise VerificationError(
+                    f"process exited during metrics inventory: {identity.pid}"
+                )
         return result
+    finally:
+        if anchor >= 0:
+            os.close(anchor)
+
+
+def exact_process_evidence(
+    identity: ProcessIdentity,
+    proc_root: Path = Path("/proc"),
+) -> dict[str, Any]:
+    """Bind authority to one exact-live identity without sampling diagnostics."""
+
+    anchor = open_exact_pidfd(identity) if proc_root == Path("/proc") else -1
+    try:
+        if not process_matches(identity, proc_root):
+            raise VerificationError(
+                f"recorded authority process is not exact-live: {identity.pid}"
+            )
+        evidence = {"identity": identity.to_dict()}
+        if not process_matches(identity, proc_root):
+            raise VerificationError(
+                f"authority process identity changed during binding: {identity.pid}"
+            )
+        if anchor >= 0:
+            try:
+                signal.pidfd_send_signal(anchor, 0)
+            except ProcessLookupError as exc:
+                raise VerificationError(
+                    f"authority process exited during binding: {identity.pid}"
+                ) from exc
+            if pidfd_has_exited(anchor):
+                raise VerificationError(
+                    f"authority process exited during binding: {identity.pid}"
+                )
+        return evidence
     finally:
         if anchor >= 0:
             os.close(anchor)
@@ -1227,6 +1293,7 @@ def recovery_authorities(
     control: Path,
     *,
     expected_rung: str,
+    require_no_probes: bool = False,
     deadline_monotonic_ns: int | None = None,
 ) -> dict[str, Any]:
     children: list[dict[str, Any]] = []
@@ -1240,6 +1307,15 @@ def recovery_authorities(
     provider_scopes: list[dict[str, Any]] = []
     detached_scopes: list[dict[str, Any]] = []
 
+    probe_paths = _record_files(
+        control / "recovery/probes",
+        deadline_monotonic_ns=deadline_monotonic_ns,
+    )
+    if require_no_probes and probe_paths:
+        raise VerificationError(
+            "recovery authority snapshot is not probe-quiescent"
+        )
+
     for path in _record_files(
         control / "recovery/detached-scopes",
         deadline_monotonic_ns=deadline_monotonic_ns,
@@ -1247,7 +1323,7 @@ def recovery_authorities(
         _check_deadline(
             deadline_monotonic_ns, "detached scope recovery authority"
         )
-        value = _read_json(path)
+        value, record_sha256 = _read_json_digest(path)
         try:
             record = DetachedScopeRecord.from_dict(value)
         except (TypeError, ValueError) as exc:
@@ -1270,12 +1346,12 @@ def recovery_authorities(
         )
         detached_scopes.append(
             {
-                "record_sha256": _sha256_file(path),
+                "record_sha256": record_sha256,
                 "release_id": record.release_id,
                 "owner_epoch": record.owner_epoch,
                 "kind": record.kind,
                 "phase": record.phase,
-                "process": process_metrics(child),
+                "process": exact_process_evidence(child),
                 "scope": _scope_evidence(record.scope.to_dict(), child),
             }
         )
@@ -1285,7 +1361,7 @@ def recovery_authorities(
         deadline_monotonic_ns=deadline_monotonic_ns,
     ):
         _check_deadline(deadline_monotonic_ns, "child recovery authority")
-        value = _read_json(path)
+        value, record_sha256 = _read_json_digest(path)
         lease_id = value.get("lease_id")
         if set(value) != {
             "child",
@@ -1316,22 +1392,19 @@ def recovery_authorities(
         identities.append(identity)
         children.append(
             {
-                "record_sha256": _sha256_file(path),
+                "record_sha256": record_sha256,
                 "release_id": value.get("release_id"),
                 "owner_epoch": value.get("owner_epoch"),
                 "lease_id": value.get("lease_id"),
                 "leader_path": value.get("leader_path"),
-                "process": process_metrics(identity),
+                "process": exact_process_evidence(identity),
                 "scope": scope,
             }
         )
 
-    for path in _record_files(
-        control / "recovery/probes",
-        deadline_monotonic_ns=deadline_monotonic_ns,
-    ):
+    for path in probe_paths:
         _check_deadline(deadline_monotonic_ns, "probe recovery authority")
-        value = _read_json(path)
+        value, record_sha256 = _read_json_digest(path)
         probe_id = value.get("probe_id")
         if set(value) != {
             "child",
@@ -1357,11 +1430,11 @@ def recovery_authorities(
         identities.append(identity)
         probes.append(
             {
-                "record_sha256": _sha256_file(path),
+                "record_sha256": record_sha256,
                 "release_id": value.get("release_id"),
                 "owner_epoch": value.get("owner_epoch"),
                 "probe_id": value.get("probe_id"),
-                "process": process_metrics(identity),
+                "process": exact_process_evidence(identity),
                 "scope": _scope_evidence(value.get("scope"), identity),
             }
         )
@@ -1371,7 +1444,7 @@ def recovery_authorities(
         deadline_monotonic_ns=deadline_monotonic_ns,
     ):
         _check_deadline(deadline_monotonic_ns, "provider recovery authority")
-        value = _read_json(path)
+        value, record_sha256 = _read_json_digest(path)
         effect_id = value.get("effect_id")
         if set(value) != {
             "effect_id",
@@ -1482,13 +1555,15 @@ def recovery_authorities(
             )
         providers.append(
             {
-                "record_sha256": _sha256_file(path),
+                "record_sha256": record_sha256,
                 "release_id": value.get("release_id"),
                 "owner_epoch": value.get("owner_epoch"),
                 "generation": resources["generation"],
                 "rung": graph.rung,
                 "effect_id": value.get("effect_id"),
-                "processes": [process_metrics(item) for item in processes],
+                "processes": [
+                    exact_process_evidence(item) for item in processes
+                ],
                 "listener": provider_listeners[-1],
                 "runtime_dir": str(runtime_dir),
                 "paths": path_evidence,
@@ -1503,7 +1578,7 @@ def recovery_authorities(
         _check_deadline(
             deadline_monotonic_ns, "provider scope recovery authority"
         )
-        value = _read_json(path)
+        value, record_sha256 = _read_json_digest(path)
         if set(value) != {
             "child",
             "phase",
@@ -1543,7 +1618,7 @@ def recovery_authorities(
         provider_scope_requests.append(request)
         provider_scopes.append(
             {
-                "record_sha256": _sha256_file(path),
+                "record_sha256": record_sha256,
                 "release_id": value.get("release_id"),
                 "owner_epoch": request.owner_epoch,
                 "generation": request.generation,
@@ -3360,12 +3435,94 @@ def invoke(
     )
 
 
+def _exact_supervisor_connection(
+    authority: CleanupAuthority,
+    timeout: float,
+) -> SeqPacketConnection:
+    """Connect to the socket peer named by one captured exact epoch."""
+
+    anchor = open_exact_pidfd(authority.supervisor)
+    sock: socket.socket | None = None
+    try:
+        sock = socket.socket(
+            socket.AF_UNIX,
+            socket.SOCK_SEQPACKET | getattr(socket, "SOCK_CLOEXEC", 0),
+        )
+        sock.settimeout(timeout)
+        sock.connect(str(account_control() / "supervisor.sock"))
+        connection = SeqPacketConnection(sock)
+        try:
+            connection.verify_peer(
+                expected_uid=os.getuid(),
+                expected_pid=authority.supervisor.pid,
+            )
+            if (
+                not process_matches(authority.supervisor)
+                or pidfd_has_exited(anchor)
+            ):
+                raise VerificationError(
+                    "captured supervisor peer is not exact-live"
+                )
+            return connection
+        except Exception:
+            connection.close()
+            raise
+    except Exception:
+        if sock is not None:
+            sock.close()
+        raise
+    finally:
+        os.close(anchor)
+
+
+def _exact_supervisor_status(
+    authority: CleanupAuthority,
+    timeout: float,
+) -> dict[str, Any]:
+    request_id = str(uuid.uuid4())
+    connection = _exact_supervisor_connection(authority, timeout)
+    try:
+        connection.send(
+            {
+                "type": "status",
+                "schema_version": SCHEMA_VERSION,
+                "protocol_version": PROTOCOL_VERSION,
+                "request_id": request_id,
+            }
+        )
+        response = _recv_without_descriptors(connection, "exact status")
+    finally:
+        connection.close()
+    if (
+        set(response) != {"ok", "type", "request_id", "status"}
+        or response.get("ok") is not True
+        or response.get("type") != "status"
+        or response.get("request_id") != request_id
+        or type(response.get("status")) is not dict
+        or response["status"].get("release_id") != authority.release_id
+        or response["status"].get("owner_epoch") != authority.owner_epoch
+    ):
+        raise VerificationError("exact supervisor status response is invalid")
+    return response["status"]
+
+
 def status(
     entrypoint: Path,
     env: Mapping[str, str],
     *,
     timeout: float = 5,
+    authority: CleanupAuthority | None = None,
 ) -> dict[str, Any] | None:
+    if authority is not None:
+        try:
+            return _exact_supervisor_status(authority, timeout)
+        except (
+            OSError,
+            ProtocolError,
+            VerificationBlocked,
+            VerificationError,
+        ):
+            return None
     try:
         result = invoke(entrypoint, env, "status", timeout=timeout)
     except (BoundedHelperUnavailable, subprocess.SubprocessError, UnicodeError):
@@ -3385,6 +3542,8 @@ def wait_status(
     env: Mapping[str, str],
     predicate: Callable[[dict[str, Any]], bool],
     timeout: float,
+    *,
+    authority: CleanupAuthority | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last: dict[str, Any] | None = None
@@ -3392,10 +3551,19 @@ def wait_status(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        current = status(
-            entrypoint,
-            env,
-            timeout=min(5.0, remaining),
+        current = (
+            status(
+                entrypoint,
+                env,
+                timeout=min(5.0, remaining),
+            )
+            if authority is None
+            else status(
+                entrypoint,
+                env,
+                timeout=min(5.0, remaining),
+                authority=authority,
+            )
         )
         if current is not None:
             last = current
@@ -6079,6 +6247,7 @@ def _recv_without_descriptors(
 @dataclass(slots=True)
 class QualificationPause:
     connection: SeqPacketConnection
+    authority: CleanupAuthority
     owner_epoch: str
     canary_nonce: str
     pause_id: str
@@ -6093,6 +6262,7 @@ class QualificationPause:
         cls,
         context: QualificationContext,
         snapshot: Mapping[str, Any],
+        authority: CleanupAuthority,
         wrappers: Sequence[ManagedWrapper],
         overall_deadline_monotonic_ns: int,
     ) -> "QualificationPause":
@@ -6106,12 +6276,15 @@ class QualificationPause:
             raise VerificationError(
                 "qualification deadline has no bounded pause interval remaining"
             )
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        sock.settimeout(remaining)
-        sock.connect(str(account_control() / "supervisor.sock"))
-        connection = SeqPacketConnection(sock)
+        if (
+            snapshot.get("release_id") != authority.release_id
+            or snapshot.get("owner_epoch") != authority.owner_epoch
+        ):
+            raise VerificationError(
+                "qualification pause snapshot differs from captured authority"
+            )
+        connection = _exact_supervisor_connection(authority, remaining)
         try:
-            connection.verify_peer(expected_uid=os.getuid())
             connection.send(
                 {
                     "type": "qualification-pause",
@@ -6203,6 +6376,7 @@ class QualificationPause:
                 )
             pause = cls(
                 connection=connection,
+                authority=authority,
                 owner_epoch=str(response["owner_epoch"]),
                 canary_nonce=context.nonce,
                 pause_id=str(response["pause_id"]),
@@ -6217,7 +6391,7 @@ class QualificationPause:
             ) / 1_000_000_000
             if remaining <= 0:
                 raise VerificationError("qualification pause expired during setup")
-            sock.settimeout(max(1.0, remaining))
+            connection.socket.settimeout(max(1.0, remaining))
             return pause
         except BaseException:
             connection.close()
@@ -6533,12 +6707,11 @@ def _request_provider_fault(
             raise VerificationError(
                 "qualification pause expired before provider repair completed"
             )
-        connection_socket = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        connection_socket.settimeout(max(0.001, remaining))
-        connection_socket.connect(str(account_control() / "supervisor.sock"))
-        connection = SeqPacketConnection(connection_socket)
+        connection = _exact_supervisor_connection(
+            pause.authority,
+            max(0.001, remaining),
+        )
         try:
-            connection.verify_peer(expected_uid=os.getuid())
             connection.send(
                 {
                     "type": "qualification-provider-fault",
@@ -6633,6 +6806,10 @@ def _guard_status_matches(
         and value.get("contract_digest") == contract_digest
         and value.get("generation") == generation
         and value.get("transition") is None
+        and resources.get("active_probes") == 0
+        and resources.get("watchdog_checks") == 0
+        and type(resources.get("authority_activity_sequence")) is int
+        and resources.get("authority_activity_sequence", -1) >= 0
         and qualification["active"] is True
         and qualification["pause_id"] == pause_id
         and qualification["lease_count"] == 2
@@ -6641,6 +6818,140 @@ def _guard_status_matches(
         and stream_state["response_hold"] is response_hold
         and type(frontend) is dict
         and frontend.get("committed_generation") == generation
+    )
+
+
+def _guard_status_binding(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the stable state that brackets one authority inventory."""
+
+    resources = value.get("resources")
+    qualification = (
+        resources.get("qualification") if type(resources) is dict else None
+    )
+    if type(resources) is not dict or type(qualification) is not dict:
+        raise VerificationError("qualification authority status is incomplete")
+    frontend = resources.get("frontend")
+    if type(frontend) is not dict:
+        raise VerificationError("qualification authority frontend is incomplete")
+    return {
+        "release_id": value.get("release_id"),
+        "owner_epoch": value.get("owner_epoch"),
+        "phase": value.get("phase"),
+        "contract_digest": value.get("contract_digest"),
+        "generation": value.get("generation"),
+        "active_rung": value.get("active_rung"),
+        "provisional_leases": value.get("provisional_leases"),
+        "live_leases": value.get("live_leases"),
+        "live_interest": value.get("live_interest"),
+        "transition": value.get("transition"),
+        "cleanup_error": value.get("cleanup_error"),
+        "leases": resources.get("leases"),
+        "provider_processes": resources.get("provider_processes"),
+        "active_probes": resources.get("active_probes"),
+        "watchdog_checks": resources.get("watchdog_checks"),
+        "authority_activity_sequence": resources.get(
+            "authority_activity_sequence"
+        ),
+        "frontend": _status_frontend(value),
+        "qualification": {
+            **{
+                name: qualification.get(name)
+                for name in (
+                    "active",
+                    "pause_id",
+                    "lease_count",
+                    "frozen_scopes",
+                    "fault_in_progress",
+                )
+            },
+            "frontend": _status_qualification(value),
+        },
+    }
+
+
+def _cgroup_scope_binding(inventory: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one complete cgroup inventory without its capture timestamp."""
+
+    expected = {
+        "captured_at",
+        "parent_path",
+        "parent_device",
+        "parent_inode",
+        "scopes",
+    }
+    if set(inventory) != expected or type(inventory.get("scopes")) is not list:
+        raise VerificationError("cgroup authority inventory has an invalid schema")
+    return {
+        name: inventory[name]
+        for name in (
+            "parent_path",
+            "parent_device",
+            "parent_inode",
+            "scopes",
+        )
+    }
+
+
+def _close_authority_inventory(
+    control: Path,
+    *,
+    expected_rung: str,
+    opening_authorities: Mapping[str, Any],
+    opening_cgroups: Mapping[str, Any],
+    deadline_monotonic_ns: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Require a second complete recovery/cgroup scan to match the first."""
+
+    closing_authorities = recovery_authorities(
+        control,
+        expected_rung=expected_rung,
+        require_no_probes=True,
+        deadline_monotonic_ns=deadline_monotonic_ns,
+    )
+    if closing_authorities != opening_authorities:
+        raise VerificationError("recovery authority changed during inventory")
+    closing_cgroups = cgroup_scope_inventory(
+        deadline_monotonic_ns=deadline_monotonic_ns
+    )
+    assert_cgroup_scopes_match(closing_cgroups, closing_authorities)
+    if _cgroup_scope_binding(closing_cgroups) != _cgroup_scope_binding(
+        opening_cgroups
+    ):
+        raise VerificationError("cgroup authority changed during inventory")
+    return closing_authorities, closing_cgroups
+
+
+def _wait_bound_guard_status(
+    entrypoint: Path,
+    env: Mapping[str, str],
+    binding: Mapping[str, Any],
+    *,
+    contract_digest: str,
+    rung: str,
+    generation: int,
+    pause_id: str,
+    frozen_scopes: int,
+    timeout: float,
+    authority: CleanupAuthority | None = None,
+) -> dict[str, Any]:
+    """Wait until the post-inventory guard exactly matches its pre-snapshot."""
+
+    return wait_status(
+        entrypoint,
+        env,
+        lambda value: (
+            _guard_status_matches(
+                value,
+                contract_digest=contract_digest,
+                rung=rung,
+                generation=generation,
+                pause_id=pause_id,
+                frozen_scopes=frozen_scopes,
+            )
+            and _guard_status_binding(value) == binding
+        ),
+        timeout,
+        authority=authority,
     )
 
 
@@ -6698,6 +7009,7 @@ def _wait_stable_frozen_receipts(
     generation: int,
     pause_id: str,
     deadline_monotonic_ns: int,
+    authority: CleanupAuthority | None = None,
 ) -> dict[str, Any]:
     """Require five identical exact transcript samples while both scopes freeze."""
 
@@ -6708,7 +7020,16 @@ def _wait_stable_frozen_receipts(
         remaining = _remaining_seconds(
             deadline_monotonic_ns, 5, "old stream stabilization"
         )
-        current = status(entrypoint, env, timeout=remaining)
+        current = (
+            status(entrypoint, env, timeout=remaining)
+            if authority is None
+            else status(
+                entrypoint,
+                env,
+                timeout=remaining,
+                authority=authority,
+            )
+        )
         if current is not None and _guard_status_matches(
             current,
             contract_digest=contract_digest,
@@ -6905,6 +7226,7 @@ def run_real_pair(
         pause = QualificationPause.open(
             context,
             snapshot,
+            candidate,
             pair_wrappers,
             overall_deadline_monotonic_ns,
         )
@@ -6922,6 +7244,7 @@ def run_real_pair(
             _remaining_seconds(
                 pause.deadline_monotonic_ns, 10, "guard acknowledgement"
             ),
+            authority=candidate,
         )
 
         stage.set("real-pair-old-generation")
@@ -6954,6 +7277,7 @@ def run_real_pair(
             _remaining_seconds(
                 pause.deadline_monotonic_ns, 180, "old-generation receipts"
             ),
+            authority=candidate,
         )
         old_state = _status_qualification(old_ready)
         old_stream_ids = tuple(
@@ -6990,6 +7314,7 @@ def run_real_pair(
                 pause.deadline_monotonic_ns,
                 time.monotonic_ns() + 10_000_000_000,
             ),
+            authority=candidate,
         )
         old_frozen_state = _status_qualification(old_frozen)
         if {
@@ -7009,6 +7334,7 @@ def run_real_pair(
         authorities = recovery_authorities(
             account_control(),
             expected_rung=context.rung,
+            require_no_probes=True,
             deadline_monotonic_ns=overall_deadline_monotonic_ns,
         )
         children = _bound_pause_children(pause, authorities)
@@ -7016,9 +7342,33 @@ def run_real_pair(
             deadline_monotonic_ns=overall_deadline_monotonic_ns
         )
         assert_cgroup_scopes_match(initial_scope_inventory, authorities)
+        authorities, initial_scope_inventory = _close_authority_inventory(
+            account_control(),
+            expected_rung=context.rung,
+            opening_authorities=authorities,
+            opening_cgroups=initial_scope_inventory,
+            deadline_monotonic_ns=overall_deadline_monotonic_ns,
+        )
+        initial_binding = _guard_status_binding(old_frozen)
+        initial_bound = _wait_bound_guard_status(
+            entrypoint,
+            env,
+            initial_binding,
+            contract_digest=runtime_contract_digest,
+            rung=context.rung,
+            generation=pause.generation,
+            pause_id=pause.pause_id,
+            frozen_scopes=2,
+            timeout=_remaining_seconds(
+                pause.deadline_monotonic_ns,
+                10,
+                "initial authority status binding",
+            ),
+            authority=candidate,
+        )
         cleanup_authority = prove_exclusive_epoch_authority(
             account_control(),
-            old_frozen,
+            initial_bound,
             candidate,
             authorities,
             children,
@@ -7067,11 +7417,13 @@ def run_real_pair(
                 900,
                 "same-rung provider repair",
             ),
+            authority=candidate,
         )
         stage.set("real-pair-repair-bindings")
         repaired_authorities = recovery_authorities(
             account_control(),
             expected_rung=context.rung,
+            require_no_probes=True,
             deadline_monotonic_ns=overall_deadline_monotonic_ns,
         )
         if _bound_pause_children(pause, repaired_authorities) != children:
@@ -7083,6 +7435,33 @@ def run_real_pair(
         assert_cgroup_scopes_match(
             repaired_scope_inventory, repaired_authorities
         )
+        repaired_authorities, repaired_scope_inventory = (
+            _close_authority_inventory(
+                account_control(),
+                expected_rung=context.rung,
+                opening_authorities=repaired_authorities,
+                opening_cgroups=repaired_scope_inventory,
+                deadline_monotonic_ns=overall_deadline_monotonic_ns,
+            )
+        )
+        repaired_binding = _guard_status_binding(repaired)
+        repaired_bound = _wait_bound_guard_status(
+            entrypoint,
+            env,
+            repaired_binding,
+            contract_digest=runtime_contract_digest,
+            rung=context.rung,
+            generation=fault["generation_after"],
+            pause_id=pause.pause_id,
+            frozen_scopes=2,
+            timeout=_remaining_seconds(
+                pause.deadline_monotonic_ns,
+                10,
+                "repaired authority status binding",
+            ),
+            authority=candidate,
+        )
+        repaired = repaired_bound
         stage.set("real-pair-repair-authority")
         cleanup_authority = prove_exclusive_epoch_authority(
             account_control(),
@@ -7164,6 +7543,7 @@ def run_real_pair(
                     )
                 ),
                 min(180.0, remaining),
+                authority=candidate,
             )
             observed_state = _status_qualification(observed)
             receipt = dict(observed_state["streams"][0])

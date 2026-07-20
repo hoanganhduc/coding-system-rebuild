@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -3118,6 +3119,9 @@ raise SystemExit(88)
                     "_process_parent",
                     side_effect=lambda pid: parent_map[pid],
                 ):
+                    sequence_before = supervisor.status_snapshot()["resources"][
+                        "authority_activity_sequence"
+                    ]
                     self.assertTrue(supervisor._begin_watchdog_health_check())
                     pause_started = threading.Event()
                     pause_waits = (threading.Event(), threading.Event())
@@ -3157,9 +3161,19 @@ raise SystemExit(88)
                             supervisor._active_probes.add(
                                 "fixture-watchdog-probe"
                             )
+                        inflight = supervisor.status_snapshot()["resources"]
+                        self.assertEqual(inflight["active_probes"], 1)
+                        self.assertEqual(inflight["watchdog_checks"], 1)
+                        self.assertEqual(
+                            inflight["authority_activity_sequence"],
+                            sequence_before + 1,
+                        )
                         supervisor._finish_watchdog_health_check()
                         self.assertTrue(pause_waits[1].wait(timeout=1))
                         self.assertIsNone(supervisor._qualification_connection_id)
+                        probe_only = supervisor.status_snapshot()["resources"]
+                        self.assertEqual(probe_only["active_probes"], 1)
+                        self.assertEqual(probe_only["watchdog_checks"], 0)
                         with supervisor._probe_condition:
                             supervisor._active_probes.remove(
                                 "fixture-watchdog-probe"
@@ -3177,9 +3191,20 @@ raise SystemExit(88)
                         packet["deadline_monotonic_ns"],
                     )
                     self.assertEqual(len(paused["bindings"]), 2)
-                    qualification = supervisor.status_snapshot()["resources"][
-                        "qualification"
-                    ]
+                    resources = supervisor.status_snapshot()["resources"]
+                    self.assertEqual(resources["active_probes"], 0)
+                    self.assertEqual(resources["watchdog_checks"], 0)
+                    self.assertEqual(
+                        resources["authority_activity_sequence"],
+                        sequence_before + 2,
+                    )
+                    self.assertEqual(
+                        inspect.getsource(supervisor._run_probe).count(
+                            "_authority_activity_sequence += 1"
+                        ),
+                        2,
+                    )
+                    qualification = resources["qualification"]
                     self.assertEqual(
                         {
                             name: qualification[name]
