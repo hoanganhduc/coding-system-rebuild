@@ -5,6 +5,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../vpngate-connect.sh
 . "$ROOT/vpngate-connect.sh"
 
+# An explicitly empty frozen deny policy is valid and must survive the
+# privileged helper boundary instead of being replaced with the built-in
+# default. Use a clean shell because this test file has already sourced the
+# helper's readonly constants.
+GROK_BLOCKED_CC="" /bin/bash -c \
+  '. "$1"; [[ -z "$GROK_BLOCKED_CC" ]]' _ "$ROOT/vpngate-connect.sh"
+
 marker="VPNGATE_COMMAND_INTERPOLATION"
 set +e
 out="$(tcp_ok 8.8.8.8 "9; printf $marker #")"
@@ -309,6 +316,50 @@ pathlib.Path(sys.argv[1]).write_text(
 PY
 ! build_candidates
 ! compgen -G "$WORK/cand-*.ovpn" >/dev/null
+
+# Country ordering must honor the explicit allowlist and the frozen deny as
+# separate boundaries. Available-but-unlisted countries are not appended in
+# explicit mode, and blocked entries never survive either explicit or default
+# selection.
+policy_matrix="$tmp/policy-matrix.tsv"
+printf '%s\n' \
+  $'DE\t1.1.1.1\t10\t1\tQQ==' \
+  $'JP\t1.1.1.2\t9\t1\tQQ==' \
+  $'US\t1.1.1.3\t8\t1\tQQ==' \
+  $'CN\t1.1.1.4\t7\t1\tQQ==' \
+  $'IR\t1.1.1.5\t6\t1\tQQ==' \
+  $'KP\t1.1.1.6\t5\t1\tQQ==' \
+  $'TM\t1.1.1.7\t4\t1\tQQ==' \
+  $'VE\t1.1.1.8\t3\t1\tQQ==' > "$policy_matrix"
+(
+  PARSEDF="$policy_matrix"
+  VPNGATE_COUNTRIES="JP CN"
+  VPNGATE_PREFER=""
+  GROK_BLOCKED_CC="CN IR KP TM VE"
+  mapfile -t ordered < <(country_order)
+  [[ "${ordered[*]}" == JP ]]
+)
+(
+  PARSEDF="$policy_matrix"
+  VPNGATE_COUNTRIES="DE JP"
+  VPNGATE_PREFER=""
+  GROK_BLOCKED_CC="DE"
+  mapfile -t ordered < <(country_order)
+  [[ "${ordered[*]}" == JP ]]
+)
+(
+  PARSEDF="$policy_matrix"
+  VPNGATE_COUNTRIES=""
+  VPNGATE_PREFER="DE CN IR KP TM VE JP"
+  GROK_BLOCKED_CC="CN IR KP TM VE"
+  mapfile -t ordered < <(country_order)
+  [[ " ${ordered[*]} " == *" DE "* ]]
+  [[ " ${ordered[*]} " == *" JP "* ]]
+  [[ " ${ordered[*]} " == *" US "* ]]
+  for blocked_country in CN IR KP TM VE; do
+    [[ " ${ordered[*]} " != *" $blocked_country "* ]]
+  done
+)
 
 # Dead endpoints consume the same finite probe budget as reachable endpoints,
 # keeping the broker's derived timeout valid even for a hostile catalog.

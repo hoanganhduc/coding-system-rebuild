@@ -8,6 +8,7 @@ import inspect
 import os
 from dataclasses import replace
 from pathlib import Path
+import re
 import signal
 import socket
 import stat
@@ -25,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from grok_ms import qualification_fake_grok as FIXTURE
+from grok_ms import config as CONFIG
 from grok_ms import qualification_verifier as VERIFY
 from grok_ms import providers as PROVIDERS
 from grok_ms import supervisor as SUPERVISOR
@@ -57,6 +59,21 @@ from grok_ms.runtime import current_process_identity as runtime_process_identity
 
 
 class LiveVerifierHelperTests(unittest.TestCase):
+    def test_default_country_policy_is_identical_across_all_authorities(self) -> None:
+        expected = ("CN", "IR", "KP", "TM", "VE")
+        self.assertEqual(tuple(CONFIG._BLOCKED_DEFAULT.split()), expected)
+        self.assertEqual(tuple(VERIFY._BLOCKED_DEFAULT.split()), expected)
+        for relative in ("egress.sh", "vpngate-connect.sh"):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            match = re.search(
+                r'^GROK_BLOCKED_CC="\$\{GROK_BLOCKED_CC-([A-Z ]+)\}"$',
+                source,
+                re.MULTILINE,
+            )
+            self.assertIsNotNone(match, relative)
+            assert match is not None
+            self.assertEqual(tuple(match.group(1).split()), expected, relative)
+
     @staticmethod
     def _open_fds_under(root: Path) -> tuple[int, ...]:
         prefix = f"{root}/"
@@ -1337,7 +1354,11 @@ class LiveVerifierHelperTests(unittest.TestCase):
             default_policy_env = dict(release_env)
             del default_policy_env["GROK_BLOCKED_CC"]
             default_policy = build(default_policy_env)
-            self.assertIn("DE", default_policy.vpn_policy.blocked_countries)
+            self.assertNotIn("DE", default_policy.vpn_policy.blocked_countries)
+            self.assertEqual(
+                default_policy.vpn_policy.blocked_countries,
+                ("CN", "IR", "KP", "TM", "VE"),
+            )
             self.assertNotEqual(first.digest(), default_policy.digest())
 
             with mock.patch.object(VERIFY, "_canary_environment", return_value={}):
@@ -1349,7 +1370,11 @@ class LiveVerifierHelperTests(unittest.TestCase):
                 }
             )
             real = build(real_env)
-            self.assertIn("DE", real.vpn_policy.blocked_countries)
+            self.assertNotIn("DE", real.vpn_policy.blocked_countries)
+            self.assertEqual(
+                real.vpn_policy.blocked_countries,
+                ("CN", "IR", "KP", "TM", "VE"),
+            )
 
             command = VERIFY.broker_status_command(
                 {"release_id": "a" * 64},

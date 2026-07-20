@@ -34,10 +34,7 @@ from .secure_files import SecureFileError, read_secure_json
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+/@-]{1,128}$")
 _HOME_LABEL_RE = re.compile(r"^[A-Za-z0-9._:+@-]{1,120}$")
-_BLOCKED_DEFAULT = (
-    "AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT "
-    "RO SK SI ES SE CN IR KP TM VE"
-)
+_BLOCKED_DEFAULT = "CN IR KP TM VE"
 
 
 class ConfigurationError(ValueError):

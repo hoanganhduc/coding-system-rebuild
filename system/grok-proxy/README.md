@@ -42,8 +42,9 @@ The baseline still identifies and reports what a route adds, but a catalog delta
 admission requirement. This avoids turning a newly global model into a reason to reject every
 healthy preferred route.
 
-Each rung is probed by exit country first (free, and rejects the EU / X-banned block outright),
-then by `grok models` through that rung — one API round-trip, no inference tokens.
+Each rung is probed by exit country first (free, and rejects a route denied by the frozen
+country policy), then by a fresh `grok models` request through that rung — one API round-trip,
+no inference tokens.
 
 **And the unlocked model is the one you actually get.** Left alone, grok keeps using its own
 default (`grok-build`) even when a better model is on the menu, so unlocking one is not the same as
@@ -486,7 +487,7 @@ deleted, requests through the proxy fail rather than leaking out of the host.
 | `GROK_IPHONE_STATE_DIR` | `~/.local/state/grok-proxy/iphone` | private state/socket/log directory for the userspace sidecar |
 | `GROK_IPHONE_AUTHKEY_FILE` | *(unset)* | auth-key file used only by `iphone-setup`; never an inline secret |
 | `GROK_IPHONE_HOSTNAME` | `grok-iphone-relay` | tailnet hostname for the sidecar identity |
-| `GROK_BLOCKED_CC` | EU + X-banned | exit countries that cannot serve the gated models |
+| `GROK_BLOCKED_CC` | `CN IR KP TM VE` | frozen all-rung country deny; an explicit override is preserved in the contract |
 | `VPNGATE_COUNTRIES` | — | force an ordered country list, e.g. `"VN JP"` |
 
 State kept in this directory: `.model.choice` (your model), `.model.seen` (the menu you were last
@@ -517,9 +518,9 @@ multi-session verification can safely consume it.
   local UID could otherwise consume the route or its bounded stream capacity.
 - VPN Gate servers are shared/datacenter IPs, and grok.com may bot-flag them even when the region
   is right — prefer the home-PC path. Their country labels are also approximate (a "VN" entry may
-  exit in JP). Any non-EU exit unlocks grok-4.5, so do not rely on a *specific* country.
-- Region gating is xAI's deliberate policy; this routes your own account's grok traffic through
-  your own home connection. Skim xAI's ToS before relying on it.
+  exit in JP), so every candidate must still pass the fresh route-scoped model probe.
+- Service availability and country policy can change. This routes your own account's Grok traffic
+  through a selected egress; review xAI's current terms before relying on it.
 - Install path matters: `ssh -M` appends a 17-char suffix to the control socket and a Unix socket
   path caps at ~108 chars. `~/grok-proxy` is fine; a deeply nested directory is not.
 - `grok --debug-file` writes your OAuth bearer token to the log in cleartext. Treat those files as

@@ -2160,7 +2160,7 @@ do not rely on the interactive shell's ambient umask or repair one file ad hoc.
 
 **Logged**: 2026-07-20T04:20:00Z
 **Priority**: high
-**Status**: pending
+**Status**: resolved
 
 ### Summary
 
@@ -2174,6 +2174,10 @@ Add an installed-lane-only exemption for the exact epoch-bound administrative
 pair. Bind the Python argv slot, complete child/parent argv relationship,
 executable identity, and full UID/GID vectors; retain any additional bound
 cwd, executable, argument, wrapper, or unrelated process as a blocker.
+
+The focused regressions, complete isolated suite, and a live installed
+`begin-release-qualification` using the exact `sudo` to `/usr/bin/python3 -I
+-B` pair all passed after this correction.
 
 ### Prevention
 
@@ -2203,8 +2207,10 @@ correctly rejected the group-writable OpenVPN fixture.
 
 ### Response
 
-Extract normalized Git archives under an explicit `0022` umask before applying
-the reviewed working-tree patch.
+Extract normalized Git archives under an explicit `0022` umask and pass
+`tar --no-same-permissions`; GNU tar otherwise preserves Git archive `0775`
+entries despite the caller umask. Verify a representative executable is `0755`
+before applying the reviewed working-tree patch.
 
 ### Prevention
 
@@ -2215,5 +2221,253 @@ executable is `0755` before launching the full isolated gate.
 
 - Reproducible: yes; two partial ledgers failed at the same E2E prerequisite
 - Related Files: `system/grok-proxy/tests/run-isolated.sh`
+
+---
+
+## [ERR-20260720-048] release-builder-required-precreated-output-root
+
+**Logged**: 2026-07-20T09:10:00Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+The first read-only-to-output release build attempt failed because the builder
+requires both source and output roots to exist, while its short usage guidance
+did not state that precondition.
+
+### Response
+
+Created a task-specific temporary directory with the required output child,
+then reran the same deterministic build. No release selector or production
+state changed on the failed attempt.
+
+### Prevention
+
+Inspect the builder implementation as well as its usage text, create and
+validate task-specific source/output roots before invocation, and retain the
+explicit `umask 0022` archive rule.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `system/grok-proxy/bootstrap/build_bundle.py`
+
+---
+
+## [ERR-20260720-049] guessed-helper-and-test-selectors
+
+**Logged**: 2026-07-20T10:05:00Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+Two nonmutating commands guessed a helper path and a unittest method name that
+do not exist in this repository.
+
+### Response
+
+Located the exact entrypoints with `rg --files` and method definitions with
+`rg`, then reran the intended checks successfully. No source or runtime state
+was changed by either failed selector.
+
+### Prevention
+
+Resolve helper paths and test selectors from the current tree before invoking
+them; do not infer either from a related module name or nearby test wording.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `bin/sync.sh`, `bin/lib/manifest_sync.py`,
+  `system/grok-proxy/tests/test_live_multi_verify.py`
+
+---
+
+## [ERR-20260720-050] e2e-echo-wait-used-absolute-count
+
+**Logged**: 2026-07-20T10:24:00Z
+**Priority**: medium
+**Status**: resolved
+
+### Summary
+
+The isolated full gate exposed a timing race in the installed two-wrapper E2E
+fixture: its wait loop stopped at an absolute two accepted echo connections,
+while earlier release canaries had already contributed four connections.
+
+### Error
+
+    AssertionError: 5 not greater than or equal to 6
+
+### Response
+
+Changed only the wait predicate to use the same relative threshold as the
+assertion, `canary_accepts + 2`. The failed partial ledger was retained as the
+seen-to-fail proof before rerunning the isolated gate.
+
+### Prevention
+
+When one long E2E fixture reuses a cumulative counter across phases, every wait
+and assertion must be relative to the phase baseline; never mix an absolute
+readiness threshold with a delta assertion.
+
+### Metadata
+
+- Reproducible: timing-dependent; observed in the mandatory isolated gate
+- Related Files: `system/grok-proxy/tests/test_multi_feature_e2e.py`
+
+---
+
+## [ERR-20260720-051] changed-egress-missed-self-admission-bundle
+
+**Logged**: 2026-07-20T10:42:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+The first isolated run after the country-policy edit reached the production
+self-admission test and correctly rejected the changed `egress.sh` bytes
+because the reviewed three-file bundle had not been extended.
+
+### Response
+
+Computed the exact current `grok-remote`, `egress.sh`, and
+`grok_ms/release_admission.py` hashes, appended them as one inseparable bundle,
+and retained prior tuples for rollback without admitting component hybrids.
+
+### Prevention
+
+Treat any byte change to a direct-admission path as a required bundle update;
+run the exact production-contract test before the full isolated gate.
+
+### Metadata
+
+- Reproducible: yes; fail-closed in the mandatory isolated suite
+- Related Files: `system/grok-proxy/egress.sh`,
+  `system/grok-proxy/install-release.py`,
+  `system/grok-proxy/tests/test_release_installer.py`
+
+---
+
+## [ERR-20260720-052] candidate-patch-escaped-normalizing-umask
+
+**Logged**: 2026-07-20T11:20:00Z
+**Priority**: medium
+**Status**: resolved
+
+### Summary
+
+The first replacement candidate extracted its Git archive under `umask 0022`
+but applied the working-tree patch after leaving that subshell.  Modified files
+therefore inherited the interactive `0002` umask and became `0664` or `0775`.
+
+### Response
+
+Discarded that candidate before verification, rebuilt from a fresh temporary
+root with one `umask 0022` scope around both archive extraction and `git apply`,
+and required a whole-tree check proving that no regular file was group- or
+world-writable.
+
+### Prevention
+
+The normalized-candidate recipe must keep every file-creating step inside the
+same restrictive umask, including patch application.  Verify representative
+`0755` and `0644` paths plus a whole-tree writable-file scan before launching
+the isolated gate.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `system/grok-proxy/tests/run-isolated.sh`
+
+---
+
+## [ERR-20260720-053] source-reconcile-must-preserve-excluded-descendants
+
+**Logged**: 2026-07-20T12:05:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+The first dry-run-only authoring reconciliation helper proposed exchanging
+whole manifest match roots.  Review caught that doing so would remove generated
+or excluded descendants nested inside managed directories, and that its custom
+transaction marker had no supported crash rollback path.  No real source file
+was changed by that version.
+
+### Response
+
+Replaced the helper before apply with a forward-resumable per-managed-file
+transaction: complete classification first, copied single-link byte backups,
+a mode-0700 inode-bound transaction journal, the renderer's genuine restore
+marker, no-replace quarantine, pinned manifest/renderer bytes, and an exact
+private/generated identity fingerprint.  Publication writes a private pending
+inode, fsyncs it, and uses `linkat(AT_EMPTY_PATH)` from the still-open descriptor
+so a pathname substitution cannot publish an unsynced replacement.
+
+Fresh review caught and fake tests reproduced four additional pre-apply crash
+or resume defects: torn final backup/READY writes, rejection of the valid
+`target=new` resume state, reuse of an exact-but-not-proven-durable pending
+inode, and a post-fsync pathname swap.  Each was fixed and re-reviewed before
+the one real apply.  Normal apply, pre-marker failure, post-quarantine failure,
+first-restore publication, repeated-fsync failure, and pathname-substitution
+fixtures converged or failed closed.  The real canonical tree then matched all
+82 expected public files, the compatible marker was absent, and the unmanaged
+fingerprint and worktree binary diff were unchanged.
+
+The fixture also caught that `Path("/proc/self/fd/N")` is itself a symlink for a
+root scan and cannot be reopened with `O_NOFOLLOW`.  Root scans now use the
+reviewed `/proc/self/fd/N/.` form, while root-directory fsync duplicates the
+already pinned descriptor.
+
+### Prevention
+
+Never replace a manifest match directory when exclusions may live below it.
+For reverse authoring reconciliation, mutate only classified managed files,
+make every pre-marker record atomically publishable and forward-resumable,
+bind publication to the fsynced inode rather than its pathname, and do not
+touch the real tree until fault injection and fresh-context review both pass.
+
+### Metadata
+
+- Reproducible: yes; caught before real `--apply`
+- Related Files: `MANIFEST.yaml`, `bin/lib/render_install.py`,
+  `bin/lib/manifest_sync.py`
+
+---
+
+## [ERR-20260720-054] linked-worktree-control-file-tripped-leak-scan
+
+**Logged**: 2026-07-20T14:20:00Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+Running the repository leak scanner directly in a Git linked worktree reported
+the worktree's `.git` control file because it contains the absolute path of the
+primary repository.  That control file is Git metadata, not a tracked or
+publishable artifact.
+
+### Response
+
+Kept the scanner policy unchanged and reran the same scanner on the normalized
+`git archive` plus reviewed binary patch candidate.  The actual 1,694-file
+publishable tree passed cleanly.
+
+### Prevention
+
+For release evidence from a linked worktree, scan the normalized publishable
+candidate.  Treat a `.git` control-file-only finding as worktree plumbing, but
+never suppress findings from tracked files or weaken the repository scanner.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `bin/leak-scan.sh`
 
 ---

@@ -927,7 +927,11 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 while time.monotonic() < deadline:
                     leader_entries = tuple(leaders.glob("*.sock")) if leaders.exists() else ()
                     child_entries = tuple(child_records.glob("*.json")) if child_records.exists() else ()
-                    if len(leader_entries) == 2 and len(child_entries) == 2 and echo.accepted >= 2:
+                    if (
+                        len(leader_entries) == 2
+                        and len(child_entries) == 2
+                        and echo.accepted >= canary_accepts + 2
+                    ):
                         break
                     time.sleep(0.05)
                 self.assertEqual(len(leader_entries), 2)

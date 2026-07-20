@@ -356,6 +356,11 @@ DIRECT_ADMISSION_PRODUCTION_BUNDLES = frozenset(
             "5898d5d8002ed8dfb3b7d72dbba929a046b955fcb4f09ee7eb4281928f0106b3",
             "57d7c1b12d6f005ef6519403afe0259963542a3d1cb896b973ea7434c948ef0f",
         ),
+        (
+            "1c45779924a7ce462bb6f904f15e56932772b651cf5b00eef9bc3a2062328f82",
+            "d23d3a23e39da2afe2175881ef918a27c7102d1bd39a8952a5338d3633ee3538",
+            "57d7c1b12d6f005ef6519403afe0259963542a3d1cb896b973ea7434c948ef0f",
+        ),
     }
 )
 # Compatibility index for callers that enumerate the fixed path set.  Bundle

@@ -976,6 +976,19 @@ set -e
   main --iphone
 )
 
+# A currently supported region must reach the fresh model predicate under the
+# built-in policy; this guards against reintroducing the obsolete EU-wide deny.
+(
+  export GROK_IPHONE_STATE_DIR="$tmp/forced-default-de-phone"
+  . "$tmp/target/egress.sh"
+  rm -f "$RECOVERY_MARKER"
+  UNLOCKED="$tmp/forced-default-de-unlocked"
+  egress_country(){ printf '%s' DE; }
+  models_via(){ printf '%s\n' grok-4.5; }
+  rung_probe_forced iphone grok-4.5
+  [[ "$(cat "$UNLOCKED")" == grok-4.5 ]]
+)
+
 # Forced intent never bypasses country policy, and the model API is not probed
 # after a known blocked exit is identified.
 (
@@ -983,10 +996,14 @@ set -e
   . "$tmp/target/egress.sh"
   rm -f "$RECOVERY_MARKER"
   UNLOCKED="$tmp/forced-blocked-unlocked"
-  egress_country(){ printf '%s' DE; }
+  blocked_country=""
+  egress_country(){ printf '%s' "$blocked_country"; }
   models_via(){ : > "$tmp/forced-blocked-models-called"; printf '%s\n' grok-4.5; }
-  ! rung_probe_forced iphone grok-4.5
-  [[ ! -e "$tmp/forced-blocked-models-called" && ! -e "$UNLOCKED" ]]
+  for blocked_country in CN IR KP TM VE; do
+    rm -f "$tmp/forced-blocked-models-called" "$UNLOCKED"
+    ! rung_probe_forced iphone grok-4.5
+    [[ ! -e "$tmp/forced-blocked-models-called" && ! -e "$UNLOCKED" ]]
+  done
 )
 
 # Once launch pins a model, deep phone confirmation continues to use the exact

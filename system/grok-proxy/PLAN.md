@@ -48,8 +48,14 @@ blocked, never inferred healthy.
     candidate tree, make the administrative selector the only update authority,
     separate bootstrap and installed CLI lanes, and prove no editable Python is
     imported or executed across the privilege boundary.
-11. **Delivery gate.** Fresh-context code/test/security reviews, remediation,
-   full affected reruns, artifact leak scan, and explicit remaining gaps.
+11. **P10 / G10 — refresh stale country-policy data.** Keep the frozen
+    all-rung country boundary and explicit overrides, synchronize the four
+    default authorities to `CN IR KP TM VE`, and prove nonblocked `DE`
+    admission still requires a fresh route-scoped model catalogue.  Publish a
+    new immutable release/profile, real-pair qualify direct, and prove two
+    simultaneous sessions on that promoted rung.
+12. **Delivery gate.** Fresh-context code/test/security reviews, remediation,
+    full affected reruns, artifact leak scan, and explicit remaining gaps.
 
 Provider and Grok probes are part of the same durable ownership graph as Grok
 children: they run behind a parent-death/attach barrier in recorded cgroup-v2
@@ -110,6 +116,7 @@ deny in place for an explicit resume or rollback.
 | Direct source execution refused | Prevents the editable tree from bypassing the generated release gate and invalidating release-bound evidence | Accepted |
 | Selected-only user release exposure | Keep exactly the selected user release at `0555`, archive every inactive user release at `0500`, and validate the exact production self-admission bytes before re-exposure | Accepted |
 | Native signed pre-import bootstrap | A separately packaged Ed25519 verifier and administrative selector admit a closed dispatcher before candidate Python can run; production private keys remain offline and candidate installation cannot replace the anchor | Accepted |
+| Synchronized narrow default country deny | Preserve frozen all-rung policy and explicit overrides while replacing the obsolete EU-wide default with the identical `CN IR KP TM VE` value in managed config, qualification, compatibility, and VPN helper authorities | Accepted |
 
 ## Verification Plan
 

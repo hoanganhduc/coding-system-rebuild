@@ -2,8 +2,8 @@
 # vpngate-connect.sh — FALLBACK egress for grok using a VPN Gate server in a region
 # where grok-4.5 is available. It tries the preferred countries in order (VN first,
 # then JP, KR, TH, ID, ... — see VPNGATE_PREFER), skips servers it cannot reach, and
-# fails over to the next one until a tunnel comes up. EU and X-banned countries are
-# never used, since grok-4.5 is not offered there (see GROK_BLOCKED_CC).
+# fails over to the next one until a tunnel comes up. Countries denied by the
+# frozen GROK_BLOCKED_CC policy are never selected.
 #
 # The VPN runs inside a dedicated network namespace, so ONLY the command you run
 # through it goes over the VPN. The rest of the VM (Tailscale, the OpenClaw
@@ -48,14 +48,12 @@ API="https://www.vpngate.net/api/iphone/"
 SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P || true)"
 SANITIZER="$SELF_DIR/sanitize.awk"
 
-# grok-4.5 is region-gated ONLY against the EU (EU AI Act classes it a systemic-risk
-# GPAI model) and the few countries where X/Twitter itself is banned. Egress through
-# any of these will NOT unlock grok-4.5, so we never use a VPN Gate server there even
-# when one is offered (e.g. Romania is an EU member state). ISO-3166 alpha-2, space-sep.
-GROK_BLOCKED_CC="${GROK_BLOCKED_CC:-AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE CN IR KP TM VE}"
+# Conservative default deny for countries where the service itself is blocked.
+# ISO-3166 alpha-2, space-separated; an explicit caller policy takes precedence.
+GROK_BLOCKED_CC="${GROK_BLOCKED_CC-CN IR KP TM VE}"
 
-# Preferred egress countries, in order — all non-EU and confirmed to serve grok-4.5.
-# VN first because it is the account's home region. In auto mode any OTHER non-blocked
+# Preferred egress countries, in order. VN comes first because it is the account's
+# home region. In auto mode any OTHER nonblocked
 # country VPN Gate happens to offer is appended after these (by server count), so the
 # fallback uses every usable country, not just Vietnam.
 VPNGATE_PREFER="${VPNGATE_PREFER:-VN JP KR TH ID}"
@@ -491,14 +489,14 @@ normalize_list(){
 
 # Ordered, de-duplicated list of countries to try. Explicit override wins; otherwise
 # VPNGATE_PREFER, then any other country present in the list by descending server
-# count. Countries in GROK_BLOCKED_CC (EU / X-banned) are always dropped.
+# count. Countries in GROK_BLOCKED_CC are always dropped.
 country_order(){
   local avail blocked=" $GROK_BLOCKED_CC " base cc seen=" " out=()
   avail="$(cut -f1 "$PARSEDF" | sort -u)"
   base="${VPNGATE_COUNTRIES:-$VPNGATE_PREFER}"
   for cc in $base; do
     if [[ "$blocked" == *" $cc "* ]]; then
-      echo "[vpngate] skip $cc — grok-4.5 is not available there (EU / X-banned)" >&2; continue
+      echo "[vpngate] skip $cc — blocked by the frozen country policy" >&2; continue
     fi
     grep -qx "$cc" <<<"$avail" || continue
     [[ "$seen" == *" $cc "* ]] && continue

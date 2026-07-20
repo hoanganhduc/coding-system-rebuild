@@ -493,3 +493,23 @@
 - [ ] Separately, after operational authorization, install the new immutable
   release, perform the one-time live requalification, activate the profile,
   and verify rollback and final residue.
+
+## Default country-policy refresh — 2026-07-20
+
+- [x] Reproduce the managed direct failure at a `DE` exit and separately prove
+  the same exact Grok 4.5 binary can fetch a fresh catalogue and complete a
+  real inference through that direct route.
+- [x] Ground the correction in current first-party X/xAI availability material
+  and obtain independent security and test-review verdicts.
+- [x] Add seen-to-fail parity, nonblocked-DE, explicit-policy, watchdog, and
+  retained-block regressions.
+- [x] Synchronize the managed config, qualification verifier, compatibility
+  dispatcher, and VPN helper defaults to `CN IR KP TM VE`; remove obsolete
+  EU-wide availability claims without changing override semantics.
+- [x] Run focused checks, the clean isolated full suite, leak/diff gates, and a
+  fresh trust-boundary review.
+- [ ] Commit and push the default branch and require GitHub Actions to pass.
+- [ ] Publish and install the exact signed immutable release, construct a new
+  profile, real-pair qualify/promote direct, and activate it.
+- [ ] Prove two simultaneous real `grok-remote` sessions share the promoted
+  direct contract/generation, then verify final cleanup and release inventory.

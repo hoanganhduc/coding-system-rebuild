@@ -248,9 +248,9 @@ VPN_PREFER_COUNTRIES="${VPNGATE_PREFER:-VN JP KR TH ID}"
 ALLOW_DIRECT="${GROK_ALLOW_DIRECT:-1}"
 VPN_STABILITY_CHECKS="${GROK_VPN_STABILITY_CHECKS:-3}"
 
-# EU (AI Act) + the countries where X itself is banned: grok-4.5 is not served from any of
-# them, so an exit there is useless no matter how healthy the tunnel is.
-GROK_BLOCKED_CC="${GROK_BLOCKED_CC-AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE CN IR KP TM VE}"
+# Conservative default deny for countries where the service itself is blocked.
+# An explicit override remains frozen into the route contract for every rung.
+GROK_BLOCKED_CC="${GROK_BLOCKED_CC-CN IR KP TM VE}"
 
 c_cyan=$'\033[36m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_rst=$'\033[0m'
 eg_log(){  printf '%s[egress]%s %s\n' "$c_cyan" "$c_rst" "$*" >&2; }
@@ -1054,7 +1054,7 @@ rung_probe(){
   # egress: the model probe is the authoritative test, so fall through to it rather than discarding a
   # server that may well work. rung_unlocks rejects a genuinely unreachable API on its own.
   if [[ -n "$cc" ]] && ! country_allowed "$cc"; then
-    eg_warn "  $rung: exits in $cc — the EU / X-banned block never serves the gated models"; return 1
+    eg_warn "  $rung: exits in $cc — the frozen country policy blocks this route"; return 1
   fi
   if [[ -n "$cc" ]]; then eg_log "  $rung: exits in $cc — asking grok what that unlocks"
   else eg_log "  $rung: egress country unknown — asking grok what it unlocks anyway"; fi
@@ -1066,7 +1066,7 @@ rung_probe_available(){
   [[ "$rung" == direct ]] && proxy=""
   cc="$(egress_country "$proxy")"
   if [[ -n "$cc" ]] && ! country_allowed "$cc"; then
-    eg_warn "  $rung: exits in $cc — the EU / X-banned block is not an allowed route"
+    eg_warn "  $rung: exits in $cc — the frozen country policy blocks this route"
     return 1
   fi
   if [[ -n "$cc" ]]; then eg_log "  $rung: exits in $cc — asking grok what it offers"

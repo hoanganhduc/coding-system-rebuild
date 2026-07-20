@@ -79,6 +79,10 @@ echo "PASS: Grok children receive only the selected route, a private umask, and 
 # the caller started grok-remote from a cooperative umask.
 cat > "$tmp/bin/fake-grok-models" <<'EOF'
 #!/usr/bin/env bash
+if [[ -e "$FAKE_CACHE_PATH" ]]; then
+  printf 'Available models:\n  * stale-cached-model\n'
+  exit 0
+fi
 : > "$FAKE_CACHE_PATH"
 printf 'Available models:\n  * grok-4.5\n'
 EOF
@@ -90,6 +94,7 @@ chmod 700 "$tmp/bin/fake-grok-models"
   export GROK_MODELS_CACHE="$tmp/probe-model-cache"
   export FAKE_CACHE_PATH="$GROK_MODELS_CACHE"
   . "$tmp/target/egress.sh"
+  printf '%s\n' stale > "$GROK_MODELS_CACHE"
   [[ "$(models_via "$PROXY" iphone)" == grok-4.5 ]]
   [[ "$(stat -c %a "$GROK_MODELS_CACHE")" == 600 ]]
 )

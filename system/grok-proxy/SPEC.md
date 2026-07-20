@@ -766,3 +766,27 @@ first release with this schema requires one deliberate requalification of each
 desired rung.  Old immutable releases and their existing selection/evidence
 schemas remain rollback-readable; no live promotion or production activation
 is part of source-level implementation verification.
+
+## Default country-policy refresh — 2026-07-20
+
+The built-in `GROK_BLOCKED_CC` policy shall default exactly to
+`CN IR KP TM VE`.  It remains a frozen contract field enforced for direct,
+home, iOS, and VPN rungs; an explicit operator override is not weakened or
+reinterpreted by route type.  VPN rungs additionally remain constrained to
+their frozen country allowlist.
+
+This is a data correction, not a relaxation of the country-policy boundary.
+The prior EU-wide default contradicted current first-party availability
+documentation and a fresh route-scoped Grok 4.5 catalogue plus inference from
+the production host's `DE` exit.  Managed configuration, the release
+qualification verifier, the compatibility dispatcher, and the privileged VPN
+helper must carry one identical default so no lane can construct a different
+contract or candidate set.
+
+Because the country policy contributes to every rung projection and contract
+digest, no existing profile or rung evidence may be reused across this change.
+Acceptance requires cross-source default parity, explicit-block preservation,
+fresh model-probe admission for a nonblocked `DE` route, retained rejection of
+the five default-blocked countries, isolated full verification, a new immutable
+release and profile, direct real-pair promotion, and two simultaneous real Grok
+sessions sharing one qualified generation.

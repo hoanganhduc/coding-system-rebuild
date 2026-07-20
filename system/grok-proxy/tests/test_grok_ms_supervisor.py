@@ -154,7 +154,7 @@ def contract(
             max_tries=2,
             ranking_version="rank-test-v1",
             countries=("JP",),
-            blocked_countries=("CN",),
+            blocked_countries=("CN", "IR", "KP", "TM", "VE"),
         ),
         helper_release_ids=(
             ("relay", "test-release-1"),
@@ -1090,7 +1090,10 @@ class SupervisorProtocolTests(unittest.TestCase):
     def test_default_qualifier_executes_open_grok_inode_after_path_retarget_without_fd_leak(self) -> None:
         first_source = """#!/usr/bin/python3
 import os
+from pathlib import Path
 expected = (int(os.environ["EXPECTED_GROK_DEV"]), int(os.environ["EXPECTED_GROK_INO"]))
+if (Path(os.environ["GROK_HOME"]) / "models_cache.json").exists():
+    raise SystemExit(76)
 for name in os.listdir("/proc/self/fd"):
     try:
         info = os.fstat(int(name))
@@ -1114,6 +1117,11 @@ raise SystemExit(88)
             second.write_text(second_source, encoding="ascii")
             os.chmod(first, 0o700)
             os.chmod(second, 0o700)
+            source_home = base / "source-grok-home"
+            source_home.mkdir(mode=0o700)
+            (source_home / "models_cache.json").write_text(
+                '{"stale":true}\n', encoding="ascii"
+            )
             selected.symlink_to(first)
             executable = VerifiedGrokExecutable.open(selected)
             selected.unlink()
@@ -1148,7 +1156,7 @@ raise SystemExit(88)
             try:
                 with mock.patch.dict(
                     os.environ,
-                    {"GROK_HOME": str(base / "empty-grok-home")},
+                    {"GROK_HOME": str(source_home)},
                     clear=False,
                 ):
                     output = supervisor._models_through_proxy(
@@ -1191,7 +1199,7 @@ raise SystemExit(88)
             with mock.patch.object(
                 instance,
                 "_run_probe",
-                return_value="ip=203.0.113.20\nloc=JP\n",
+                return_value="ip=203.0.113.20\nloc=DE\n",
             ) as probe, mock.patch.object(
                 instance,
                 "_models_through_proxy",
@@ -1208,6 +1216,171 @@ raise SystemExit(88)
                 probe.call_args.args[0][-1],
                 "https://www.cloudflare.com/cdn-cgi/trace",
             )
+
+    def test_explicit_country_policy_still_blocks_qualification_and_watchdog(self) -> None:
+        base = contract()
+        wanted = dataclasses.replace(
+            base,
+            vpn_policy=dataclasses.replace(
+                base.vpn_policy,
+                blocked_countries=("DE",),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "control"
+            root.mkdir(mode=0o700)
+            instance = Supervisor(
+                root,
+                ROOT,
+                wanted.digest(),
+                release_id=wanted.release_id,
+                qualifier=None,
+                start_watchdog=False,
+            )
+            instance.contract = wanted
+            request_value = ProviderRequest(
+                owner_epoch="a" * 32,
+                transition_id="b" * 32,
+                generation=1,
+                rung="direct",
+                model_id=wanted.model_id,
+                private_endpoint=Endpoint("127.0.0.1", wanted.private_ports[0]),
+                contract=wanted,
+            )
+            with mock.patch.object(
+                instance,
+                "_run_probe",
+                return_value="ip=203.0.113.20\nloc=DE\n",
+            ), mock.patch.object(instance, "_models_through_proxy") as models:
+                with self.assertRaisesRegex(ProviderError, "blocked by the contract"):
+                    instance._default_qualifier(
+                        request_value.private_endpoint,
+                        request_value,
+                        TransitionDeadline.after_ms(1_000),
+                        None,
+                    )
+            models.assert_not_called()
+
+        provider = ScriptedProvider((ScriptedStep("start"), ScriptedStep("stop")))
+        running = RunningSupervisor(wanted, provider)
+        client = running.connect()
+        try:
+            self.assertTrue(request(client, register_packet(wanted))["ok"])
+            active = running.supervisor.active_result
+            self.assertIsNotNone(active)
+            with mock.patch(
+                "grok_ms.supervisor.process_matches", return_value=True
+            ), mock.patch.object(
+                running.supervisor,
+                "_run_probe",
+                return_value="ip=203.0.113.20\nloc=DE\n",
+            ):
+                self.assertFalse(running.supervisor._default_health_check(active))
+        finally:
+            client.close()
+            running.finish()
+
+    def test_default_blocked_countries_never_reach_the_model_probe(self) -> None:
+        wanted = contract()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "control"
+            root.mkdir(mode=0o700)
+            instance = Supervisor(
+                root,
+                ROOT,
+                wanted.digest(),
+                release_id=wanted.release_id,
+                qualifier=None,
+                start_watchdog=False,
+            )
+            instance.contract = wanted
+            request_value = ProviderRequest(
+                owner_epoch="a" * 32,
+                transition_id="b" * 32,
+                generation=1,
+                rung="direct",
+                model_id=wanted.model_id,
+                private_endpoint=Endpoint("127.0.0.1", wanted.private_ports[0]),
+                contract=wanted,
+            )
+            for country in wanted.vpn_policy.blocked_countries:
+                with self.subTest(country=country), mock.patch.object(
+                    instance,
+                    "_run_probe",
+                    return_value=f"ip=203.0.113.20\nloc={country}\n",
+                ), mock.patch.object(instance, "_models_through_proxy") as models:
+                    with self.assertRaisesRegex(
+                        ProviderError, "blocked by the contract"
+                    ):
+                        instance._default_qualifier(
+                            request_value.private_endpoint,
+                            request_value,
+                            TransitionDeadline.after_ms(1_000),
+                            None,
+                        )
+                    models.assert_not_called()
+
+    def test_vpn_country_allowlist_and_deny_apply_at_qualification_and_watchdog(self) -> None:
+        wanted = contract(ladder=("vpn",))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "control"
+            root.mkdir(mode=0o700)
+            instance = Supervisor(
+                root,
+                ROOT,
+                wanted.digest(),
+                release_id=wanted.release_id,
+                qualifier=None,
+                start_watchdog=False,
+            )
+            instance.contract = wanted
+            request_value = ProviderRequest(
+                owner_epoch="a" * 32,
+                transition_id="b" * 32,
+                generation=1,
+                rung="vpn",
+                model_id=wanted.model_id,
+                private_endpoint=Endpoint("127.0.0.1", wanted.private_ports[0]),
+                contract=wanted,
+            )
+            for country, reason in (
+                ("US", "outside the contract allowlist"),
+                ("CN", "blocked by the contract"),
+            ):
+                with self.subTest(country=country), mock.patch.object(
+                    instance,
+                    "_run_probe",
+                    return_value=f"ip=198.51.100.40\nloc={country}\n",
+                ), mock.patch.object(instance, "_models_through_proxy") as models:
+                    with self.assertRaisesRegex(ProviderError, reason):
+                        instance._default_qualifier(
+                            request_value.private_endpoint,
+                            request_value,
+                            TransitionDeadline.after_ms(1_000),
+                            None,
+                        )
+                    models.assert_not_called()
+
+        provider = ScriptedProvider((ScriptedStep("start"), ScriptedStep("stop")))
+        running = RunningSupervisor(wanted, provider)
+        client = running.connect()
+        try:
+            self.assertTrue(request(client, register_packet(wanted))["ok"])
+            active = running.supervisor.active_result
+            self.assertIsNotNone(active)
+            with mock.patch("grok_ms.supervisor.process_matches", return_value=True):
+                for country in ("US", "CN"):
+                    with self.subTest(watchdog_country=country), mock.patch.object(
+                        running.supervisor,
+                        "_run_probe",
+                        return_value=f"ip=198.51.100.40\nloc={country}\n",
+                    ):
+                        self.assertFalse(
+                            running.supervisor._default_health_check(active)
+                        )
+        finally:
+            client.close()
+            running.finish()
 
     def test_probe_cancellation_kills_blocking_descendant_and_clears_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3598,7 +3771,7 @@ raise SystemExit(88)
                 with mock.patch.object(
                     running.supervisor,
                     "_run_probe",
-                    return_value="ip=203.0.113.20\nloc=JP\n",
+                    return_value="ip=203.0.113.20\nloc=DE\n",
                 ) as probe:
                     self.assertTrue(running.supervisor._default_health_check(active))
                     self.assertEqual(
@@ -3608,7 +3781,7 @@ raise SystemExit(88)
                 with mock.patch.object(
                     running.supervisor,
                     "_run_probe",
-                    return_value="ip=203.0.113.21\nloc=JP\n",
+                    return_value="ip=203.0.113.21\nloc=DE\n",
                 ):
                     self.assertFalse(running.supervisor._default_health_check(active))
         finally:
