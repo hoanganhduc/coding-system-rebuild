@@ -3816,13 +3816,16 @@ class SupervisorRecoveryTests(unittest.TestCase):
 set -euo pipefail
 [[ "${1:-}" == compatibility-handoff ]]
 marker="$(dirname "$0")/handoff-descendant.pid"
+ack="$(dirname "$0")/handoff-descendant.ack"
 (
   (
-    setsid /bin/bash -c 'trap "" TERM HUP; printf "%s\n" "$$" > "$1"; while :; do sleep 60; done' _ "$marker" </dev/null >/dev/null 2>&1 &
+    setsid /bin/bash -c 'trap "" TERM HUP; tmp="$1.tmp.$$"; printf "%s\n" "$$" > "$tmp"; /usr/bin/mv -T -- "$tmp" "$1"; while :; do sleep 60; done' _ "$marker" </dev/null >/dev/null 2>&1 &
   ) &
 )
-for _ in $(seq 1 200); do [[ -s "$marker" ]] && exit 0; sleep 0.01; done
-exit 91
+for _ in $(seq 1 200); do [[ -s "$marker" ]] && break; sleep 0.01; done
+[[ -s "$marker" ]] || exit 91
+for _ in $(seq 1 500); do [[ -e "$ack" ]] && exit 0; sleep 0.01; done
+exit 92
 ''',
                 encoding="utf-8",
             )
@@ -3874,6 +3877,7 @@ exit 91
             worker.start()
             descendant_pidfd = -1
             scope_path: Path | None = None
+            ack = release / "handoff-descendant.ack"
             try:
                 marker = release / "handoff-descendant.pid"
                 deadline = time.monotonic() + 5
@@ -3890,6 +3894,7 @@ exit 91
                 self.assertIsNotNone(scope_path)
                 descendant_pid = int(marker.read_text(encoding="ascii"))
                 descendant_pidfd = os.pidfd_open(descendant_pid, 0)
+                ack.touch()
                 worker.join(timeout=10)
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(errors, [])
@@ -3900,6 +3905,7 @@ exit 91
                 self.assertEqual(store.list_records(), ())
                 self.assertEqual(backend.forced, [str(scope_path)])
             finally:
+                ack.touch()
                 worker.join(timeout=1)
                 if descendant_pidfd >= 0:
                     os.close(descendant_pidfd)
