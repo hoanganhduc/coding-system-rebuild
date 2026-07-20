@@ -132,6 +132,12 @@
   during repaired convergence, prove every post-spawn failure kills and reaps
   its exact child, and enter the repaired-binding checkpoint before scanning
   the replacement generation's recovery authorities.
+- [x] Serialize the real-pair qualification pause against the complete watchdog
+  health-check/repair decision, wait for active probes to quiesce before fencing,
+  and suppress new watchdog checks while authenticated qualification owns the
+  epoch without blocking its provider-transition qualification probe. Close
+  watchdog admission at terminal drain and quiesce foreign watchdog decisions
+  before acquiring the provider-transition lock.
 
 ## Verification and delivery
 

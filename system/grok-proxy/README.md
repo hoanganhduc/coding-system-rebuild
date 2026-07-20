@@ -438,7 +438,11 @@ fence still fails closed. Cleanup after an earlier primary failure retains both
 facts in a closed stage-specific diagnostic code without exposing dynamic text.
 Post-repair status polling treats only already-contained transient helper failures
 as unavailable samples, and the following recovery-authority scan has its own
-closed checkpoint.
+closed checkpoint. Qualification also drains an in-flight watchdog check before
+publishing its pause and suppresses new watchdog probes until that pause ends.
+Terminal drain closes watchdog admission and quiesces foreign watchdog decisions
+before taking the provider-transition lock, so fatal repair and cleanup cannot
+wait on one another.
 
 ## How failure is handled
 

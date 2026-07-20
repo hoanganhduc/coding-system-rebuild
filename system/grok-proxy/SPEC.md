@@ -297,13 +297,24 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
 - Real-pair qualification adds one transient supervisor-owned admission fence.
   The authenticated verifier binds the fence to the exact two registered
   wrapper/lease/child tuples, then freezes their complete lease cgroups before
-  the provider fault. Registration is closed while the fence exists. After
-  repair, the verifier thaws and re-freezes each scope separately and requires
-  a new committed-frontend acceptance from that scope before moving to the
-  other. Control EOF or the fixed deadline thaws every scope automatically;
+  the provider fault. Before publishing that fence it waits for every active
+  supervisor probe and complete watchdog decision to finish; while the fence
+  exists the watchdog cannot start another health check. Registration is closed
+  while the fence exists. Provider-transition qualification probes remain
+  available for the authenticated repair itself and finish before its repaired
+  authority is returned. After repair, the verifier thaws and re-freezes each
+  scope separately and requires a new committed-frontend acceptance from that
+  scope before moving to the other. Control EOF or the fixed deadline thaws
+  every scope automatically;
   an uncertain thaw drains and reconciles the exact epoch instead of reopening
   admission. This qualification-only fence does not alter the promoted route
   contract's normal session capacity.
+- Terminal drain sets the epoch stop event before cleanup, rejects every new
+  watchdog reservation, and waits for foreign watchdog decisions before taking
+  the provider-transition lock. Cleanup never holds the transition lock while
+  waiting for a watchdog owner that may need the same lock for fatal repair.
+  Owner-quiescence timeout remains a fail-closed cleanup error, but does not
+  skip the subsequent frontend/provider cleanup attempt.
 - Fixed qualification result schema 5 exposes only installer-validated,
   step/status-specific failure codes plus a hash of suppressed detail. Dynamic
   exception text, provider stderr, paths, and process identities are never

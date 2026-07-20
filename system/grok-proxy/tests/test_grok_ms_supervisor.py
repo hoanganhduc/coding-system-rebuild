@@ -2508,15 +2508,61 @@ raise SystemExit(88)
             health_check=health,
         )
         client = running.connect()
+        original_repair = running.supervisor._repair_active
+        original_stop_result = running.supervisor._stop_result
+        repair_owner_checks: list[tuple[bool, bool]] = []
+        repair_interior_checks: list[bool] = []
+
+        def repair_with_owner(*args, **kwargs):
+            with running.supervisor._probe_condition:
+                entered_with_owner = (
+                    threading.get_ident()
+                    in running.supervisor._watchdog_check_owners
+                )
+            try:
+                return original_repair(*args, **kwargs)
+            finally:
+                with running.supervisor._probe_condition:
+                    repair_owner_checks.append(
+                        (
+                            entered_with_owner,
+                            threading.get_ident()
+                            in running.supervisor._watchdog_check_owners,
+                        )
+                    )
+
+        def stop_with_owner(*args, **kwargs):
+            with running.supervisor._probe_condition:
+                repair_interior_checks.append(
+                    threading.get_ident()
+                    in running.supervisor._watchdog_check_owners
+                )
+            return original_stop_result(*args, **kwargs)
+
         try:
-            registered = request(client, register_packet(wanted))
-            self.assertTrue(registered["ok"])
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline:
-                if running.supervisor.status_snapshot()["active_rung"] == "vpn":
-                    break
-                time.sleep(0.01)
+            with mock.patch.object(
+                running.supervisor,
+                "_repair_active",
+                side_effect=repair_with_owner,
+            ), mock.patch.object(
+                running.supervisor,
+                "_stop_result",
+                side_effect=stop_with_owner,
+            ):
+                registered = request(client, register_packet(wanted))
+                self.assertTrue(registered["ok"])
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if running.supervisor.status_snapshot()["active_rung"] == "vpn":
+                        break
+                    time.sleep(0.01)
             self.assertEqual(running.supervisor.status_snapshot()["active_rung"], "vpn")
+            self.assertTrue(repair_owner_checks)
+            self.assertTrue(
+                all(before and after for before, after in repair_owner_checks)
+            )
+            self.assertTrue(repair_interior_checks)
+            self.assertTrue(all(repair_interior_checks))
             self.assertEqual(
                 provider.calls[:5],
                 (
@@ -2626,6 +2672,7 @@ raise SystemExit(88)
             self.assertTrue(running.supervisor._stop.is_set())
             self.assertEqual(snapshot["live_interest"], 0)
             self.assertIsNone(snapshot["active_rung"])
+            self.assertIsNone(snapshot["cleanup_error"])
             self.assertEqual(
                 provider.calls,
                 (
@@ -2636,6 +2683,181 @@ raise SystemExit(88)
                 ),
             )
         finally:
+            client.close()
+            running.finish()
+
+    def test_drain_waits_for_foreign_watchdog_owner_before_cleanup(self) -> None:
+        wanted = contract(ladder=("direct",))
+        provider = ScriptedProvider(())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "control"
+            root.mkdir(mode=0o700)
+            supervisor = Supervisor(
+                root,
+                ROOT,
+                wanted.digest(),
+                expected_control_cap=wanted.limits.max_control_connections,
+                release_id=wanted.release_id,
+                providers={"*": provider},
+                qualifier=evidence,
+                start_watchdog=False,
+            )
+            supervisor.bootstrap()
+            supervisor.contract = wanted
+            self.assertTrue(supervisor._begin_watchdog_health_check())
+            wait_entered = threading.Event()
+            drain_errors: list[BaseException] = []
+            original_wait = supervisor._probe_condition.wait
+
+            def tracked_wait(timeout=None):
+                wait_entered.set()
+                return original_wait(timeout)
+
+            def drain() -> None:
+                try:
+                    supervisor._drain_epoch()
+                except BaseException as exc:
+                    drain_errors.append(exc)
+
+            drain_thread = threading.Thread(
+                target=drain,
+                name="test-foreign-watchdog-drain",
+            )
+            try:
+                with mock.patch.object(
+                    supervisor._probe_condition,
+                    "wait",
+                    side_effect=tracked_wait,
+                ):
+                    drain_thread.start()
+                    self.assertTrue(wait_entered.wait(timeout=1))
+                    self.assertTrue(drain_thread.is_alive())
+                    transition_available = supervisor._transition_lock.acquire(
+                        blocking=False
+                    )
+                    self.assertTrue(transition_available)
+                    if transition_available:
+                        supervisor._transition_lock.release()
+                    supervisor._finish_watchdog_health_check()
+                    drain_thread.join(timeout=3)
+                self.assertFalse(drain_thread.is_alive())
+                self.assertEqual(drain_errors, [])
+                self.assertIsNone(supervisor.status_snapshot()["cleanup_error"])
+            finally:
+                with supervisor._probe_condition:
+                    owned = (
+                        threading.get_ident()
+                        in supervisor._watchdog_check_owners
+                    )
+                if owned:
+                    supervisor._finish_watchdog_health_check()
+                drain_thread.join(timeout=3)
+                supervisor._stop.set()
+                supervisor.finalize()
+
+    def test_foreign_drain_cannot_deadlock_fatal_watchdog_repair(self) -> None:
+        wanted = contract(ladder=("direct",))
+        provider = ScriptedProvider(
+            (
+                ScriptedStep("start"),
+                ScriptedStep("stop"),
+            )
+        )
+        running = RunningSupervisor(wanted, provider)
+        client = running.connect()
+        supervisor = running.supervisor
+        force_entered = threading.Event()
+        allow_force = threading.Event()
+        foreign_wait_entered = threading.Event()
+        watchdog_errors: list[BaseException] = []
+        drain_errors: list[BaseException] = []
+        original_force = supervisor._force_shutdown
+        original_wait = supervisor._probe_condition.wait
+
+        def gated_force(reason: str) -> None:
+            force_entered.set()
+            if not allow_force.wait(timeout=3):
+                raise AssertionError("watchdog force-shutdown gate timed out")
+            original_force(reason)
+
+        def tracked_wait(timeout=None):
+            if threading.current_thread().name == "test-foreign-drain":
+                foreign_wait_entered.set()
+            return original_wait(timeout)
+
+        def watchdog_repair(active: ProviderResult) -> None:
+            try:
+                if not supervisor._begin_watchdog_health_check():
+                    raise AssertionError("watchdog reservation was rejected")
+                try:
+                    supervisor._repair_active(active)
+                finally:
+                    supervisor._finish_watchdog_health_check()
+            except BaseException as exc:
+                watchdog_errors.append(exc)
+
+        def foreign_drain() -> None:
+            try:
+                supervisor._drain_epoch()
+            except BaseException as exc:
+                drain_errors.append(exc)
+
+        watchdog_thread: threading.Thread | None = None
+        drain_thread: threading.Thread | None = None
+        try:
+            self.assertTrue(request(client, register_packet(wanted))["ok"])
+            with supervisor._state_lock:
+                active = supervisor.active_result
+                self.assertIsNotNone(active)
+                supervisor._same_rung_repairs.add("direct")
+            assert active is not None
+            watchdog_thread = threading.Thread(
+                target=watchdog_repair,
+                args=(active,),
+                name="test-fatal-watchdog-repair",
+            )
+            drain_thread = threading.Thread(
+                target=foreign_drain,
+                name="test-foreign-drain",
+            )
+            with mock.patch.object(
+                supervisor,
+                "_force_shutdown",
+                side_effect=gated_force,
+            ), mock.patch.object(
+                supervisor._probe_condition,
+                "wait",
+                side_effect=tracked_wait,
+            ):
+                watchdog_thread.start()
+                self.assertTrue(force_entered.wait(timeout=1))
+                drain_thread.start()
+                self.assertTrue(foreign_wait_entered.wait(timeout=1))
+                self.assertTrue(drain_thread.is_alive())
+                transition_available = supervisor._transition_lock.acquire(
+                    blocking=False
+                )
+                self.assertTrue(transition_available)
+                if transition_available:
+                    supervisor._transition_lock.release()
+                allow_force.set()
+                watchdog_thread.join(timeout=3)
+                drain_thread.join(timeout=3)
+            self.assertFalse(watchdog_thread.is_alive())
+            self.assertFalse(drain_thread.is_alive())
+            self.assertEqual(watchdog_errors, [])
+            self.assertEqual(drain_errors, [])
+            self.assertIsNone(supervisor.status_snapshot()["cleanup_error"])
+            self.assertEqual(
+                provider.calls,
+                (("start", "direct", 1), ("stop", "direct", 1)),
+            )
+        finally:
+            allow_force.set()
+            if watchdog_thread is not None:
+                watchdog_thread.join(timeout=3)
+            if drain_thread is not None:
+                drain_thread.join(timeout=3)
             client.close()
             running.finish()
 
@@ -2896,10 +3118,60 @@ raise SystemExit(88)
                     "_process_parent",
                     side_effect=lambda pid: parent_map[pid],
                 ):
-                    paused = supervisor._qualification_pause(
-                        context, packet, [descriptor]
-                    )
+                    self.assertTrue(supervisor._begin_watchdog_health_check())
+                    pause_started = threading.Event()
+                    pause_waits = (threading.Event(), threading.Event())
+                    wait_calls = [0]
+                    original_wait = supervisor._probe_condition.wait
+                    pause_values: list[dict] = []
+                    pause_errors: list[BaseException] = []
+
+                    def tracked_wait(timeout=None):
+                        index = min(wait_calls[0], len(pause_waits) - 1)
+                        wait_calls[0] += 1
+                        pause_waits[index].set()
+                        return original_wait(timeout)
+
+                    def open_pause() -> None:
+                        pause_started.set()
+                        try:
+                            pause_values.append(
+                                supervisor._qualification_pause(
+                                    context, packet, [descriptor]
+                                )
+                            )
+                        except BaseException as exc:
+                            pause_errors.append(exc)
+
+                    with mock.patch.object(
+                        supervisor._probe_condition,
+                        "wait",
+                        side_effect=tracked_wait,
+                    ):
+                        pause_thread = threading.Thread(target=open_pause)
+                        pause_thread.start()
+                        self.assertTrue(pause_started.wait(timeout=1))
+                        self.assertTrue(pause_waits[0].wait(timeout=1))
+                        self.assertIsNone(supervisor._qualification_connection_id)
+                        with supervisor._probe_condition:
+                            supervisor._active_probes.add(
+                                "fixture-watchdog-probe"
+                            )
+                        supervisor._finish_watchdog_health_check()
+                        self.assertTrue(pause_waits[1].wait(timeout=1))
+                        self.assertIsNone(supervisor._qualification_connection_id)
+                        with supervisor._probe_condition:
+                            supervisor._active_probes.remove(
+                                "fixture-watchdog-probe"
+                            )
+                            supervisor._probe_condition.notify_all()
+                        pause_thread.join(timeout=3)
+                    self.assertFalse(pause_thread.is_alive())
+                    self.assertEqual(pause_errors, [])
+                    self.assertEqual(len(pause_values), 1)
+                    paused = pause_values[0]
                     self.assertTrue(paused["ok"])
+                    self.assertFalse(supervisor._begin_watchdog_health_check())
                     self.assertEqual(
                         paused["deadline_monotonic_ns"],
                         packet["deadline_monotonic_ns"],

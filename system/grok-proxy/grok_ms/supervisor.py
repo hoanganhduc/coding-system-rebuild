@@ -839,6 +839,7 @@ class Supervisor:
         self._connection_slots = 0
         self._threads: set[threading.Thread] = set()
         self._active_probes: set[str] = set()
+        self._watchdog_check_owners: set[int] = set()
         self._replays: OrderedDict[tuple[str, ...], _Replay] = OrderedDict()
         self._diagnostics: deque[dict[str, Any]] = deque(maxlen=_MAX_DIAGNOSTICS)
         self._sequence = 0
@@ -2330,7 +2331,16 @@ class Supervisor:
         )
         installed = False
         try:
-            with self._state_lock:
+            with self._probe_condition:
+                while self._active_probes or self._watchdog_check_owners:
+                    remaining = (
+                        deadline_monotonic_ns - time.monotonic_ns()
+                    ) / 1_000_000_000
+                    if remaining <= 0:
+                        raise AdmissionError(
+                            "qualification-pause could not quiesce live probes"
+                        )
+                    self._probe_condition.wait(min(0.1, remaining))
                 if context.leases or context.qualification_pause_id is not None:
                     raise AdmissionError(
                         "qualification-pause requires a dedicated control connection"
@@ -3862,13 +3872,32 @@ class Supervisor:
     def _drain_epoch(self) -> None:
         # DRAINING is terminal for this epoch. Wake a watchdog probe before
         # waiting for exact scope cleanup; qualification uses the transition
-        # cancellation event set at the linearization point.
+        # cancellation event set at the linearization point.  A foreign
+        # watchdog decision must quiesce before this thread takes the
+        # transition lock: a fatal watchdog repair can itself need that lock
+        # to force the same epoch down.
         self._stop.set()
+        contract = self.contract
+        stop_ms = contract.timeout_policy.stop_ms if contract is not None else 5_000
+        probe_deadline = time.monotonic() + stop_ms / 1_000
+        current = threading.get_ident()
+        watchdog_error: str | None = None
+        with self._probe_condition:
+            while any(
+                owner != current for owner in self._watchdog_check_owners
+            ):
+                remaining = probe_deadline - time.monotonic()
+                if remaining <= 0:
+                    watchdog_error = (
+                        "watchdog health-check cleanup exceeded the stop deadline"
+                    )
+                    break
+                self._probe_condition.wait(min(0.1, remaining))
         with self._transition_lock:
             with self._state_lock:
                 errors = list(self._lease_cleanup_errors)
-            contract = self.contract
-            stop_ms = contract.timeout_policy.stop_ms if contract is not None else 5_000
+            if watchdog_error is not None:
+                errors.append(watchdog_error)
             if self.frontend is not None:
                 try:
                     self.frontend.revoke(stop_ms / 1_000)
@@ -3890,7 +3919,6 @@ class Supervisor:
                     )
                 except ProviderError as exc:
                     errors.append(str(exc))
-            probe_deadline = time.monotonic() + stop_ms / 1_000
             with self._probe_condition:
                 while self._active_probes:
                     remaining = probe_deadline - time.monotonic()
@@ -3898,6 +3926,12 @@ class Supervisor:
                         errors.append("probe cleanup exceeded the stop deadline")
                         break
                     self._probe_condition.wait(min(0.1, remaining))
+                if watchdog_error is None and any(
+                    owner != current for owner in self._watchdog_check_owners
+                ):
+                    errors.append(
+                        "watchdog health-check ownership reopened during drain"
+                    )
             if self.recovery is not None:
                 try:
                     if self.recovery.list_probes():
@@ -4039,6 +4073,34 @@ class Supervisor:
             self._record("watchdog-probe", result="failed", reason=str(exc))
             return False
 
+    def _begin_watchdog_health_check(self) -> bool:
+        """Reserve one watchdog check unless qualification owns the epoch."""
+
+        with self._probe_condition:
+            if (
+                self._stop.is_set()
+                or self.phase == "DRAINING"
+                or self._qualification_connection_id is not None
+            ):
+                return False
+            owner = threading.get_ident()
+            if owner in self._watchdog_check_owners:
+                raise RuntimeSecurityError(
+                    "watchdog health-check ownership is recursive"
+                )
+            self._watchdog_check_owners.add(owner)
+            return True
+
+    def _finish_watchdog_health_check(self) -> None:
+        with self._probe_condition:
+            owner = threading.get_ident()
+            if owner not in self._watchdog_check_owners:
+                raise RuntimeSecurityError(
+                    "watchdog health-check ownership is missing"
+                )
+            self._watchdog_check_owners.remove(owner)
+            self._probe_condition.notify_all()
+
     def _watchdog_loop(self) -> None:
         current = threading.current_thread()
         failed_generation: int | None = None
@@ -4068,26 +4130,34 @@ class Supervisor:
                     self._stop.set()
                     return
                 if active is not None:
-                    if self._health_check(active):
+                    if not self._begin_watchdog_health_check():
                         failed_generation = None
                         consecutive_failures = 0
                         continue
-                    if failed_generation != active.request.generation:
-                        failed_generation = active.request.generation
-                        consecutive_failures = 0
-                    consecutive_failures += 1
-                    self._record(
-                        "watchdog",
-                        result="unhealthy",
-                        rung=active.request.rung,
-                        generation=active.request.generation,
-                        consecutive_failures=consecutive_failures,
-                        failure_threshold=self._watchdog_failures,
-                    )
-                    if consecutive_failures >= self._watchdog_failures:
-                        self._repair_active(active)
-                        failed_generation = None
-                        consecutive_failures = 0
+                    try:
+                        healthy = self._health_check(active)
+                        if healthy:
+                            failed_generation = None
+                            consecutive_failures = 0
+                            continue
+                        if failed_generation != active.request.generation:
+                            failed_generation = active.request.generation
+                            consecutive_failures = 0
+                        consecutive_failures += 1
+                        self._record(
+                            "watchdog",
+                            result="unhealthy",
+                            rung=active.request.rung,
+                            generation=active.request.generation,
+                            consecutive_failures=consecutive_failures,
+                            failure_threshold=self._watchdog_failures,
+                        )
+                        if consecutive_failures >= self._watchdog_failures:
+                            self._repair_active(active)
+                            failed_generation = None
+                            consecutive_failures = 0
+                    finally:
+                        self._finish_watchdog_health_check()
         finally:
             with self._state_lock:
                 self._threads.discard(current)

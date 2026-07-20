@@ -2954,6 +2954,26 @@ qualification failures. Every post-spawn OS error must first kill and reap the
 exact helper; otherwise retries could accumulate unowned children. Neither
 change accepts an invalid status or relaxes an authority check.
 
+The next two signed canaries reached repaired status and then failed the
+recovery-authority scan. Their suppressed hashes matched
+`cannot inventory descriptors for PID ...` for two different PIDs. The
+qualification pause froze its two client scopes but did not serialize against
+the supervisor watchdog's short-lived health probe and possible repair
+decision. The authority scan could therefore capture a durable probe identity
+as that probe exited. Publish the qualification fence only after active probes
+and the complete in-flight watchdog decision quiesce, and refuse new watchdog
+checks while that fence owns the epoch. Do not suppress provider-transition
+qualification probes used by the authenticated repair itself.
+
+The first owner-set repair exposed a second-order lock cycle: a fatal watchdog
+repair releases the provider-transition lock before forcing shutdown, so a
+foreign drain could take that lock and then wait for the watchdog owner while
+the owner tried to reacquire it. Terminal drain must close new watchdog
+reservations and quiesce foreign owners before taking the transition lock. It
+may wait for active probes under that lock, but never a watchdog owner; a
+quiescence timeout is retained as a cleanup error while cleanup is still
+attempted.
+
 ### Metadata
 
 - Reproducible: yes; live qualification plus deterministic regressions
