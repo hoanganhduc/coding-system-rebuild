@@ -2545,6 +2545,309 @@ class LiveVerifierHelperTests(unittest.TestCase):
         exact_signal.assert_not_called()
         prove_authority.assert_not_called()
 
+    def test_cleanup_accepts_a_captured_supervisor_exit_race_only_after_clean_proof(
+        self,
+    ) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        checkpoint = {"clean": True}
+        with mock.patch.object(
+            VERIFY,
+            "cleanup_fence",
+            side_effect=((epoch, "READY"), None, None, None),
+        ), mock.patch.object(
+            VERIFY, "process_matches", side_effect=(True, False)
+        ), mock.patch.object(
+            VERIFY, "status", return_value=None
+        ), mock.patch.object(
+            VERIFY, "_stop_wrappers_bounded", return_value=[]
+        ) as stop_wrappers, mock.patch.object(
+            VERIFY, "wait_clean", return_value=checkpoint
+        ) as wait_clean, mock.patch.object(
+            VERIFY, "exact_signal"
+        ) as exact_signal, mock.patch.object(
+            VERIFY, "invoke"
+        ) as invoke:
+            self.assertEqual(
+                VERIFY.cleanup(
+                    Path("/entrypoint"),
+                    {},
+                    (),
+                    {},
+                    authority,
+                    deadline_monotonic_ns=time.monotonic_ns()
+                    + 5_000_000_000,
+                ),
+                checkpoint,
+            )
+        stop_wrappers.assert_called_once()
+        wait_clean.assert_called_once()
+        exact_signal.assert_not_called()
+        invoke.assert_not_called()
+
+    def test_cleanup_exit_race_never_accepts_a_replacement_epoch(self) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        replacement_identity = VERIFY.ProcessIdentity(
+            101, 11, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        replacement = VERIFY.CleanupAuthority(
+            "a" * 64, "epoch-b", replacement_identity
+        )
+        with mock.patch.object(
+            VERIFY,
+            "cleanup_fence",
+            side_effect=((epoch, "READY"), (replacement, "READY")),
+        ), mock.patch.object(
+            VERIFY, "process_matches", side_effect=(True, False)
+        ), mock.patch.object(
+            VERIFY, "status", return_value=None
+        ), mock.patch.object(
+            VERIFY, "_stop_wrappers_bounded", return_value=[]
+        ) as stop_wrappers, mock.patch.object(
+            VERIFY, "wait_clean"
+        ) as wait_clean, mock.patch.object(
+            VERIFY, "exact_signal"
+        ) as exact_signal, mock.patch.object(
+            VERIFY, "invoke"
+        ) as invoke:
+            with self.assertRaisesRegex(
+                VERIFY.VerificationError, "replacement epoch"
+            ):
+                VERIFY.cleanup(
+                    Path("/entrypoint"),
+                    {},
+                    (),
+                    {},
+                    authority,
+                    deadline_monotonic_ns=time.monotonic_ns()
+                    + 5_000_000_000,
+                )
+        stop_wrappers.assert_called_once()
+        wait_clean.assert_not_called()
+        exact_signal.assert_not_called()
+        invoke.assert_not_called()
+
+    def test_cleanup_status_exit_with_exact_fence_recovers_then_proves_clean(
+        self,
+    ) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        response = mock.Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "recovered": True,
+                    "owner_epoch": "epoch-a",
+                    "provider_records": 0,
+                    "child_records": 0,
+                    "probe_records": 0,
+                }
+            ),
+            stderr="",
+        )
+        checkpoint = {"clean": True}
+        with mock.patch.object(
+            VERIFY, "cleanup_fence", return_value=(epoch, "READY")
+        ), mock.patch.object(
+            VERIFY, "process_matches", side_effect=(True, False, False)
+        ), mock.patch.object(
+            VERIFY, "status", return_value=None
+        ), mock.patch.object(
+            VERIFY, "_stop_wrappers_bounded", return_value=[]
+        ), mock.patch.object(
+            VERIFY, "wait_clean", return_value=checkpoint
+        ) as wait_clean, mock.patch.object(
+            VERIFY, "exact_signal"
+        ) as exact_signal, mock.patch.object(
+            VERIFY, "invoke", return_value=response
+        ) as invoke:
+            self.assertEqual(
+                VERIFY.cleanup(
+                    Path("/entrypoint"),
+                    {},
+                    (),
+                    {},
+                    authority,
+                    deadline_monotonic_ns=time.monotonic_ns()
+                    + 5_000_000_000,
+                ),
+                checkpoint,
+            )
+        exact_signal.assert_not_called()
+        invoke.assert_called_once()
+        self.assertEqual(invoke.call_args.args[2], "recover")
+        recovery_env = invoke.call_args.args[1]
+        self.assertEqual(
+            recovery_env["GROK_RECOVERY_EXPECT_OWNER_EPOCH"], "epoch-a"
+        )
+        self.assertEqual(recovery_env["GROK_RECOVERY_EXPECT_PID"], "100")
+        wait_clean.assert_called_once()
+
+    def test_cleanup_accepts_pidfd_open_exit_only_after_absence_recheck(
+        self,
+    ) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        checkpoint = {"clean": True}
+        with mock.patch.object(
+            VERIFY,
+            "cleanup_fence",
+            side_effect=((epoch, "READY"), None, None, None),
+        ), mock.patch.object(
+            VERIFY, "process_matches", side_effect=(True, False)
+        ), mock.patch.object(
+            VERIFY, "status", return_value={"fixture": True}
+        ), mock.patch.object(
+            VERIFY, "recovery_authorities", return_value={"fixture": True}
+        ), mock.patch.object(
+            VERIFY, "prove_exclusive_epoch_authority", return_value=authority
+        ) as prove_authority, mock.patch.object(
+            VERIFY,
+            "open_exact_pidfd",
+            side_effect=VERIFY.VerificationError("fixture supervisor exited"),
+        ) as open_pidfd, mock.patch.object(
+            VERIFY, "exact_signal"
+        ) as exact_signal, mock.patch.object(
+            VERIFY, "wait_exact_pidfd_exit"
+        ) as wait_pidfd, mock.patch.object(
+            VERIFY, "_stop_wrappers_bounded", return_value=[]
+        ), mock.patch.object(
+            VERIFY, "wait_clean", return_value=checkpoint
+        ) as wait_clean, mock.patch.object(
+            VERIFY, "invoke"
+        ) as invoke:
+            self.assertEqual(
+                VERIFY.cleanup(
+                    Path("/entrypoint"),
+                    {},
+                    (),
+                    {},
+                    authority,
+                    deadline_monotonic_ns=time.monotonic_ns()
+                    + 5_000_000_000,
+                ),
+                checkpoint,
+            )
+        prove_authority.assert_called_once()
+        open_pidfd.assert_called_once_with(identity)
+        exact_signal.assert_not_called()
+        wait_pidfd.assert_not_called()
+        invoke.assert_not_called()
+        wait_clean.assert_called_once()
+
+    def test_cleanup_exit_race_rejects_a_malformed_fence_recheck(self) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        malformed = VERIFY.VerificationError(
+            "recovery fence has a non-exact cleanup schema"
+        )
+        with mock.patch.object(
+            VERIFY,
+            "cleanup_fence",
+            side_effect=((epoch, "READY"), malformed),
+        ), mock.patch.object(
+            VERIFY, "process_matches", return_value=True
+        ), mock.patch.object(
+            VERIFY, "status", return_value=None
+        ), mock.patch.object(
+            VERIFY, "_stop_wrappers_bounded", return_value=[]
+        ) as stop_wrappers, mock.patch.object(
+            VERIFY, "wait_clean"
+        ) as wait_clean, mock.patch.object(
+            VERIFY, "exact_signal"
+        ) as exact_signal, mock.patch.object(
+            VERIFY, "invoke"
+        ) as invoke:
+            with self.assertRaisesRegex(
+                VERIFY.VerificationError, "non-exact cleanup schema"
+            ):
+                VERIFY.cleanup(
+                    Path("/entrypoint"),
+                    {},
+                    (),
+                    {},
+                    authority,
+                    deadline_monotonic_ns=time.monotonic_ns()
+                    + 5_000_000_000,
+                )
+        stop_wrappers.assert_called_once()
+        wait_clean.assert_not_called()
+        exact_signal.assert_not_called()
+        invoke.assert_not_called()
+
+    def test_cleanup_exit_convergence_still_requires_the_complete_clean_proof(
+        self,
+    ) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        with mock.patch.object(
+            VERIFY,
+            "cleanup_fence",
+            side_effect=((epoch, "READY"), None, None, None),
+        ), mock.patch.object(
+            VERIFY, "process_matches", side_effect=(True, False)
+        ), mock.patch.object(
+            VERIFY, "status", return_value=None
+        ), mock.patch.object(
+            VERIFY, "_stop_wrappers_bounded", return_value=[]
+        ), mock.patch.object(
+            VERIFY,
+            "wait_clean",
+            side_effect=VERIFY.VerificationError(
+                "fixture exhaustive clean proof failed"
+            ),
+        ) as wait_clean, mock.patch.object(
+            VERIFY, "exact_signal"
+        ) as exact_signal, mock.patch.object(
+            VERIFY, "invoke"
+        ) as invoke:
+            with self.assertRaisesRegex(
+                VERIFY.VerificationError, "exhaustive clean proof failed"
+            ):
+                VERIFY.cleanup(
+                    Path("/entrypoint"),
+                    {},
+                    (),
+                    {},
+                    authority,
+                    deadline_monotonic_ns=time.monotonic_ns()
+                    + 5_000_000_000,
+                )
+        wait_clean.assert_called_once()
+        exact_signal.assert_not_called()
+        invoke.assert_not_called()
+
     def test_status_normalizes_timeout_as_unavailable_sample(self) -> None:
         with mock.patch.object(
             VERIFY,
@@ -3310,6 +3613,188 @@ class LiveVerifierHelperTests(unittest.TestCase):
         self.assertLessEqual(sum(term_waits), VERIFY.CLEANUP_WRAPPER_TERM_SECONDS)
         self.assertTrue(all(wrapper.closed for wrapper in wrappers))
         self.assertTrue(all(wrapper.process.returncode == -signal.SIGKILL for wrapper in wrappers))
+
+    def test_wrapper_cleanup_discards_a_signal_error_after_exit_is_proved(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+
+            def wait(self, timeout: float) -> int:
+                self.returncode = 0
+                return self.returncode
+
+        class FakeWrapper:
+            def __init__(self) -> None:
+                self.process = FakeProcess()
+                self.identity = VERIFY.ProcessIdentity(
+                    10_000,
+                    20_000,
+                    "11111111-2222-3333-4444-555555555555",
+                )
+                self.pidfd = 30_000
+                self.closed = False
+
+            def close_pidfd(self) -> None:
+                self.closed = True
+
+        wrapper = FakeWrapper()
+        with mock.patch.object(
+            VERIFY,
+            "exact_signal",
+            side_effect=VERIFY.VerificationError("fixture process disappeared"),
+        ):
+            errors = VERIFY._stop_wrappers_bounded((wrapper,))
+        self.assertEqual(errors, [])
+        self.assertEqual(wrapper.process.returncode, 0)
+        self.assertTrue(wrapper.closed)
+
+    def test_wrapper_cleanup_discards_a_kill_signal_error_after_exit_is_proved(
+        self,
+    ) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+                self.wait_count = 0
+
+            def wait(self, timeout: float) -> int:
+                self.wait_count += 1
+                if self.wait_count == 1:
+                    raise subprocess.TimeoutExpired(["fixture"], timeout)
+                self.returncode = 0
+                return self.returncode
+
+        class FakeWrapper:
+            def __init__(self) -> None:
+                self.process = FakeProcess()
+                self.identity = VERIFY.ProcessIdentity(
+                    10_000,
+                    20_000,
+                    "11111111-2222-3333-4444-555555555555",
+                )
+                self.pidfd = 30_000
+                self.closed = False
+
+            def close_pidfd(self) -> None:
+                self.closed = True
+
+        wrapper = FakeWrapper()
+        signals: list[int] = []
+
+        def exact_signal(_identity, signum, _pidfd) -> None:
+            signals.append(signum)
+            if signum == signal.SIGKILL:
+                raise VERIFY.VerificationError("fixture process disappeared")
+
+        with mock.patch.object(
+            VERIFY, "exact_signal", side_effect=exact_signal
+        ):
+            errors = VERIFY._stop_wrappers_bounded((wrapper,))
+        self.assertEqual(errors, [])
+        self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual(wrapper.process.wait_count, 2)
+        self.assertEqual(wrapper.process.returncode, 0)
+        self.assertTrue(wrapper.closed)
+
+    def test_wrapper_cleanup_surfaces_persistent_term_and_kill_failures(
+        self,
+    ) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+
+            def wait(self, timeout: float) -> int:
+                raise subprocess.TimeoutExpired(["fixture"], timeout)
+
+        class FakeWrapper:
+            def __init__(self) -> None:
+                self.process = FakeProcess()
+                self.identity = VERIFY.ProcessIdentity(
+                    10_000,
+                    20_000,
+                    "11111111-2222-3333-4444-555555555555",
+                )
+                self.pidfd = 30_000
+                self.closed = False
+
+            def close_pidfd(self) -> None:
+                self.closed = True
+
+        wrapper = FakeWrapper()
+
+        def exact_signal(_identity, signum, _pidfd) -> None:
+            name = "TERM" if signum == signal.SIGTERM else "KILL"
+            raise VERIFY.VerificationError(f"fixture {name} failure")
+
+        with mock.patch.object(
+            VERIFY, "exact_signal", side_effect=exact_signal
+        ):
+            errors = VERIFY._stop_wrappers_bounded((wrapper,))
+        self.assertEqual(len(errors), 3)
+        self.assertTrue(any("wrapper TERM failed" in item for item in errors))
+        self.assertTrue(any("wrapper KILL failed" in item for item in errors))
+        self.assertTrue(any("wrapper KILL wait failed" in item for item in errors))
+        self.assertIsNone(wrapper.process.returncode)
+        self.assertTrue(wrapper.closed)
+
+    def test_real_pair_reports_primary_plus_cleanup_with_one_closed_code(self) -> None:
+        context = VERIFY.QualificationContext(
+            release_id="a" * 64,
+            nonce="b" * 64,
+            canary_kind="rung",
+            rung="direct",
+            route_profile="direct",
+            contract_sha256="c" * 64,
+            grok_release_id="grok-release",
+            model_id="grok-model",
+            auth_fd=-1,
+        )
+
+        class FakeContract:
+            @staticmethod
+            def digest() -> str:
+                return "d" * 64
+
+        class FakeSampler:
+            def __init__(self, _path: Path) -> None:
+                self._thread = SimpleNamespace(is_alive=lambda: False)
+
+            def start(self) -> None:
+                pass
+
+        now = time.monotonic_ns()
+        with mock.patch.object(
+            VERIFY, "_real_environment", return_value={}
+        ), mock.patch.object(
+            VERIFY,
+            "_qualification_deadlines_ns",
+            return_value=(now + 5_000_000_000, now + 10_000_000_000),
+        ), mock.patch.object(
+            VERIFY,
+            "_real_contracts",
+            return_value=(FakeContract(), FakeContract()),
+        ), mock.patch.object(
+            VERIFY, "_root_and_user_clean_checkpoint", return_value={}
+        ), mock.patch.object(
+            VERIFY, "CacheSampler", FakeSampler
+        ), mock.patch.object(
+            VERIFY,
+            "_spawn_models_wrapper",
+            side_effect=VERIFY.VerificationError("dynamic primary detail"),
+        ), mock.patch.object(
+            VERIFY,
+            "cleanup",
+            side_effect=VERIFY.VerificationError("dynamic cleanup detail"),
+        ):
+            with self.assertRaises(VERIFY.QualificationStageError) as caught:
+                VERIFY.run_real_pair(Path("/entrypoint"), context, {})
+        self.assertEqual(
+            caught.exception.error_code, "real-pair-cleanup-after-primary"
+        )
+        self.assertNotIn("dynamic", caught.exception.error_code)
+        self.assertIn(
+            caught.exception.error_code,
+            VERIFY.QUALIFICATION_FAILURE_CODES["real-pair"],
+        )
 
     def test_failure_stage_codes_are_closed_and_cleanup_overrides_primary(self) -> None:
         stage = VERIFY.QualificationStage("load32")

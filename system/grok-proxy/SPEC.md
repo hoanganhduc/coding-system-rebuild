@@ -309,6 +309,13 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   exception text, provider stderr, paths, and process identities are never
   returned. Cleanup uncertainty overrides any earlier stage code, and failed or
   blocked results remain nonpersistent while the canary fence stays active.
+- Real-pair cleanup may treat the already-captured supervisor's natural exit
+  between an exact-live sample and status/pidfd revalidation as convergence,
+  but only while the recovery fence still names that exact epoch (or has already
+  been removed by it), the captured process identity is absent, and the normal
+  exhaustive clean checkpoint subsequently succeeds. A malformed or replacement
+  fence remains fatal and grants no signal or recovery authority. Wrapper signal
+  errors are likewise ignored only when waiting on that exact child proves exit.
 - The cgroup PID contract counts Linux tasks, including threads. Load
   qualification budgets six tasks per held client (wrapper, Grok child,
   supervisor control, frontend stream, provider stream, and verifier echo)

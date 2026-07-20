@@ -43,6 +43,7 @@ from grok_ms.contract import (
     TimeoutPolicy,
     VpnPolicy,
 )
+from grok_ms.detached_scope import DetachedScopeStore
 from grok_ms.grok_exec import grok_release_id
 from grok_ms.managed_profile import (
     ActivationCommitUncertain,
@@ -52,6 +53,8 @@ from grok_ms.managed_profile import (
     load_activation_record,
     write_content_addressed_profile,
 )
+from grok_ms.runtime import FenceRecord, FenceStore, IntentStore, SecureRuntime
+from grok_ms.supervisor import RecoveryStore
 
 MODULE_PATH = ROOT / "install-release.py"
 SPEC = importlib.util.spec_from_file_location("grok_release_installer", MODULE_PATH)
@@ -5665,6 +5668,200 @@ os._exit(0)
                     self.assertEqual(result.returncode, 0)
                     self.assertTrue(dispatched.exists())
             installer.abort_restore(release_id)
+
+    def test_profile_auto_direct_cleanup_reenters_selected_gate_with_exact_fence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            prefix = base / "prefix"
+            home = Path("/home/caller")
+            openvpn = base / "openvpn"
+            openvpn.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+            openvpn.chmod(0o700)
+            layout = release_installer.Layout.defaults(
+                ROOT,
+                prefix=prefix,
+                home=home,
+                test_openvpn_binary=openvpn,
+            )
+            runtime_files = release_installer._default_runtime_files(ROOT)
+            installer = release_installer.ReleaseInstaller(
+                layout,
+                runtime_files=runtime_files,
+                root_files=release_installer._default_root_files(runtime_files),
+            )
+            installer.validate_apply_prerequisites()
+            release_id = installer.install().release_id
+            complete_release_qualification(installer, release_id)
+
+            profile, _grok = make_activation_profile(base, release_id)
+            profile_path = write_content_addressed_profile(
+                layout.profile_root,
+                profile,
+                owner_uid=layout.target_uid,
+                owner_gid=layout.target_gid,
+            )
+            profile_sha256 = profile.digest()
+            self.assertEqual(profile_path.name, f"{profile_sha256}.json")
+            installer.begin_rung_canary(
+                release_id=release_id,
+                rung="direct",
+                profile_sha256=profile_sha256,
+            )
+            canary = installer._read_rung_canary()
+            self.assertEqual(canary["canary_kind"], "rung")
+            self.assertEqual(canary["rung"], "direct")
+            self.assertEqual(canary["route_profile"], "auto")
+            self.assertEqual(canary["contract_sha256"], profile.contract_sha256)
+            self.assertEqual(canary["profile_sha256"], profile_sha256)
+            catalog_path = layout.qualified_rung_catalog_path(release_id)
+            catalog = json.loads(catalog_path.read_text(encoding="ascii"))
+            self.assertEqual(catalog["qualified_rungs"], [])
+
+            runtime = SecureRuntime(layout.multi_control)
+            runtime.initialize()
+            IntentStore(runtime)
+            RecoveryStore(runtime)
+            DetachedScopeStore(layout.multi_control)
+            for name in ("bootstrap.lock", "compatibility.lock"):
+                descriptor = os.open(
+                    layout.multi_control / name,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | os.O_CLOEXEC
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                os.close(descriptor)
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+                encoding="ascii"
+            ).strip()
+            owner_epoch = "dead-auto-direct-owner"
+            fence = FenceRecord(
+                schema_version=release_installer.CONTROL_SCHEMA_VERSION,
+                release_id=release_id,
+                owner_epoch=owner_epoch,
+                pid=2_147_483_000,
+                pid_start_ticks=1,
+                boot_id=boot_id,
+                phase="READY",
+            )
+            self.assertTrue(FenceStore(runtime).publish(fence))
+
+            canary_before = layout.rung_canary.read_bytes()
+            deny_before = layout.rollback_deny.read_bytes()
+            selection_before = layout.root_selected.read_bytes()
+            catalog_before = catalog_path.read_bytes()
+            auth_before = layout.canary_auth.stat()
+            fence_before = layout.recovery_fence.read_bytes()
+            auth_fd = os.open(
+                layout.canary_auth,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                environment = installer._canary_environment(auth_fd, canary)
+                environment.update(
+                    {
+                        "GROK_QUALIFICATION_DIRECT_RECOVERY": "1",
+                        "GROK_RECOVERY_EXPECT_RELEASE_ID": release_id,
+                        "GROK_RECOVERY_EXPECT_OWNER_EPOCH": owner_epoch,
+                        "GROK_RECOVERY_EXPECT_PID": str(fence.pid),
+                        "GROK_RECOVERY_EXPECT_PID_START_TICKS": str(
+                            fence.pid_start_ticks
+                        ),
+                        "GROK_RECOVERY_EXPECT_BOOT_ID": boot_id,
+                    }
+                )
+
+                wrong_owner = subprocess.run(
+                    [str(layout.entrypoint), "recover"],
+                    cwd=base,
+                    env={
+                        **environment,
+                        "GROK_RECOVERY_EXPECT_OWNER_EPOCH": "wrong-owner",
+                    },
+                    pass_fds=(auth_fd,),
+                    text=True,
+                    capture_output=True,
+                    timeout=20,
+                    check=False,
+                )
+                self.assertEqual(wrong_owner.returncode, 2, wrong_owner.stderr)
+                self.assertIn(
+                    "recovery fence differs from the exact expected supervisor epoch",
+                    wrong_owner.stderr,
+                )
+                self.assertEqual(layout.recovery_fence.read_bytes(), fence_before)
+
+                partial = dict(environment)
+                partial.pop("GROK_RELEASE_CANARY_CONTRACT")
+                unauthenticated = subprocess.run(
+                    [str(layout.entrypoint), "recover"],
+                    cwd=base,
+                    env=partial,
+                    pass_fds=(auth_fd,),
+                    text=True,
+                    capture_output=True,
+                    timeout=20,
+                    check=False,
+                )
+                self.assertEqual(
+                    unauthenticated.returncode, 78, unauthenticated.stderr
+                )
+                self.assertIn(
+                    "rung canary authorization record is invalid",
+                    unauthenticated.stderr,
+                )
+                self.assertEqual(layout.recovery_fence.read_bytes(), fence_before)
+
+                recovered = subprocess.run(
+                    [str(layout.entrypoint), "recover"],
+                    cwd=base,
+                    env=environment,
+                    pass_fds=(auth_fd,),
+                    text=True,
+                    capture_output=True,
+                    timeout=20,
+                    check=False,
+                )
+            finally:
+                os.close(auth_fd)
+
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual(recovered.stderr, "")
+            self.assertEqual(
+                json.loads(recovered.stdout),
+                {
+                    "recovered": True,
+                    "owner_epoch": owner_epoch,
+                    "provider_records": 0,
+                    "child_records": 0,
+                    "probe_records": 0,
+                },
+            )
+            self.assertFalse(layout.recovery_fence.exists())
+            self.assertFalse(layout.supervisor_socket.exists())
+            self.assertFalse(layout.supervisor_ready.exists())
+            for root in (
+                layout.intent_root,
+                layout.provider_root,
+                layout.qualify_root,
+                layout.leader_root,
+                *layout.recovery_record_roots,
+            ):
+                if root.exists():
+                    self.assertEqual(tuple(root.iterdir()), ())
+            self.assertEqual(layout.rung_canary.read_bytes(), canary_before)
+            self.assertEqual(layout.rollback_deny.read_bytes(), deny_before)
+            self.assertEqual(layout.root_selected.read_bytes(), selection_before)
+            self.assertEqual(catalog_path.read_bytes(), catalog_before)
+            auth_after = layout.canary_auth.stat()
+            self.assertEqual(
+                (auth_after.st_dev, auth_after.st_ino),
+                (auth_before.st_dev, auth_before.st_ino),
+            )
 
     def test_manual_canary_keeps_parent_death_containment_when_runner_scopes_required(
         self,

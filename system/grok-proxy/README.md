@@ -427,6 +427,11 @@ fails closed rather than becoming freshly qualifiable. Keep the exact installer
 bytes frozen for a reproducible live install, qualification, rollback, and
 reinstall exercise; a future reset/migration workflow is required before
 supporting changed-generator same-ID requalification.
+During real-pair teardown, the captured supervisor can finish naturally between
+two liveness samples. That is accepted only as convergence of the same fenced
+epoch and only after the complete user/root/listener/cgroup clean proof passes;
+a replacement or malformed fence still fails closed. Cleanup-only failure and
+cleanup after an earlier primary failure have separate fixed diagnostic codes.
 
 ## How failure is handled
 

@@ -120,6 +120,10 @@
   exact FD-backed direct release/rung canary authentication; keep initial
   supervisor reconciliation unchanged and the authorization marker out of
   ordinary status/control and Grok child environments.
+- [x] Accept a captured real-pair supervisor's natural cleanup exit only at
+  exact liveness revalidation boundaries and only after the unchanged exhaustive
+  clean proof; reject replacement epochs and retain a distinct closed code for
+  cleanup that follows an earlier primary failure.
 
 ## Verification and delivery
 

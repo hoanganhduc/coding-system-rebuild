@@ -2901,3 +2901,49 @@ be omitted when disposable infrastructure makes deletion unnecessary.
   `system/grok-proxy/tests/test_bootstrap.py`, `docs/CI.md`
 
 ---
+
+## [ERR-20260720-067] real-pair-cleanup-misreported-natural-exit
+
+**Logged**: 2026-07-20T13:15:00Z
+**Priority**: high
+**Status**: testing
+
+### Summary
+
+The live direct real-pair qualification completed its authenticated provider
+fault and repair, then reported `real-pair-cleanup` even though the final host
+inventory was empty. The verifier had sampled its exact supervisor as live,
+but the supervisor could finish naturally before the following status or pidfd
+revalidation. That expected exit was treated as lost destructive authority.
+Wrapper signaling had the same reporting race when the exact child exited
+between signal validation and `Popen.wait()`.
+
+### Response
+
+Allow exit convergence only at the two exact-liveness revalidation boundaries.
+Re-read and bind the recovery fence to the captured epoch, require that exact
+process identity to be absent, retain exact-fence recovery when needed, and
+still require the existing exhaustive clean checkpoint before success. Reject
+replacement or malformed fences without signaling or recovery. Suppress a
+wrapper signal error only when waiting on that exact child proves exit, and use
+the closed `real-pair-cleanup-after-primary` code when cleanup follows another
+failure so the primary cause is not collapsed.
+
+### Prevention
+
+Process-exit races are convergence only when identity, ownership, and terminal
+state are all independently proved. Add seen-to-fail regressions for natural
+supervisor exit, replacement epoch rejection, wrapper signal/exit ordering,
+primary-plus-cleanup diagnostics, and the generated selected-gate exact-fence
+recovery composition. Do not promote or push until the patched signed release
+passes a real-pair canary and two simultaneous real sessions locally.
+
+### Metadata
+
+- Reproducible: yes; live qualification plus deterministic regressions
+- Related Files: `system/grok-proxy/grok_ms/qualification_verifier.py`,
+  `system/grok-proxy/install-release.py`,
+  `system/grok-proxy/tests/test_live_multi_verify.py`,
+  `system/grok-proxy/tests/test_release_installer.py`
+
+---

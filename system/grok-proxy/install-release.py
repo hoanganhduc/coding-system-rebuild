@@ -442,7 +442,8 @@ QUALIFICATION_FAILURE_CODES = {
             "real-pair-old-generation",
             "real-pair-repair", "real-pair-reconnect", "real-pair-resume",
             "real-pair-completion",
-            "real-pair-runtime", "real-pair-cleanup", "real-pair-internal",
+            "real-pair-runtime", "real-pair-cleanup",
+            "real-pair-cleanup-after-primary", "real-pair-internal",
         }
     ),
 }

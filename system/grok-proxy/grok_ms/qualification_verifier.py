@@ -195,6 +195,7 @@ QUALIFICATION_FAILURE_CODES = {
             "real-pair-completion",
             "real-pair-runtime",
             "real-pair-cleanup",
+            "real-pair-cleanup-after-primary",
             "real-pair-internal",
         }
     ),
@@ -3797,12 +3798,13 @@ def _stop_wrappers_bounded(
         deadline_monotonic_ns
     )
     errors: list[str] = []
+    term_signal_errors: dict[ProcessIdentity, str] = {}
     candidates = [wrapper for wrapper in wrappers if wrapper.process.returncode is None]
     for wrapper in candidates:
         try:
             exact_signal(wrapper.identity, signal.SIGTERM, wrapper.pidfd)
         except (OSError, VerificationError) as exc:
-            errors.append(f"wrapper TERM failed: {exc}")
+            term_signal_errors[wrapper.identity] = f"wrapper TERM failed: {exc}"
 
     term_deadline = min(
         time.monotonic() + CLEANUP_WRAPPER_TERM_SECONDS,
@@ -3817,15 +3819,20 @@ def _stop_wrappers_bounded(
             pass
         except OSError as exc:
             errors.append(f"wrapper TERM wait failed: {exc}")
+        if wrapper.process.returncode is None:
+            signal_error = term_signal_errors.get(wrapper.identity)
+            if signal_error is not None:
+                errors.append(signal_error)
 
     survivors = [
         wrapper for wrapper in candidates if wrapper.process.returncode is None
     ]
+    kill_signal_errors: dict[ProcessIdentity, str] = {}
     for wrapper in survivors:
         try:
             exact_signal(wrapper.identity, signal.SIGKILL, wrapper.pidfd)
         except (OSError, VerificationError) as exc:
-            errors.append(f"wrapper KILL failed: {exc}")
+            kill_signal_errors[wrapper.identity] = f"wrapper KILL failed: {exc}"
 
     kill_deadline = min(
         time.monotonic() + CLEANUP_WRAPPER_KILL_SECONDS,
@@ -3838,6 +3845,10 @@ def _stop_wrappers_bounded(
             wrapper.process.wait(timeout=max(0.0, kill_deadline - time.monotonic()))
         except (OSError, subprocess.TimeoutExpired) as exc:
             errors.append(f"wrapper KILL wait failed: {exc}")
+        if wrapper.process.returncode is None:
+            signal_error = kill_signal_errors.get(wrapper.identity)
+            if signal_error is not None:
+                errors.append(signal_error)
     for wrapper in wrappers:
         wrapper.close_pidfd()
     return errors
@@ -3862,6 +3873,7 @@ def cleanup(
     errors: list[str] = []
     epoch = authority.epoch if authority is not None else None
     global_mutation_allowed = False
+    exit_convergence_allowed = False
     control = account_control()
     try:
         if epoch is not None:
@@ -3874,11 +3886,13 @@ def cleanup(
                     raise VerificationError(
                         "cleanup deadline expired before authority revalidation"
                     )
+                exit_convergence_allowed = True
                 current = status(
                     entrypoint, env, timeout=status_timeout
                 )
                 if current is None:
                     raise VerificationError("cleanup cannot re-read its live supervisor")
+                exit_convergence_allowed = False
                 current_authorities = recovery_authorities(
                     control,
                     expected_rung=expected_rung,
@@ -3903,6 +3917,7 @@ def cleanup(
                 )
                 if renewed != authority:
                     raise VerificationError("cleanup exclusivity proof changed")
+                exit_convergence_allowed = True
                 supervisor_pidfd = open_exact_pidfd(epoch.supervisor)
                 try:
                     exact_signal(epoch.supervisor, signal.SIGKILL, supervisor_pidfd)
@@ -3919,7 +3934,30 @@ def cleanup(
                     os.close(supervisor_pidfd)
             global_mutation_allowed = True
     except (OSError, subprocess.SubprocessError, UnicodeError, VerificationError) as exc:
-        errors.append(f"cleanup destructive authority refused: {exc}")
+        authority_error = f"cleanup destructive authority refused: {exc}"
+        try:
+            if not exit_convergence_allowed:
+                raise VerificationError(
+                    "cleanup failed before an exit-convergence boundary"
+                )
+            assert epoch is not None
+            current_fence = cleanup_fence(control)
+            _assert_cleanup_fence_owner(current_fence, epoch)
+            supervisor_absent = not process_matches(epoch.supervisor)
+        except (OSError, VerificationError) as recheck_error:
+            errors.append(
+                f"{authority_error}; cleanup exit recheck failed: {recheck_error}"
+            )
+        else:
+            if supervisor_absent:
+                # The captured supervisor can naturally drain between the
+                # exact-live sample and status/pidfd revalidation.  This grants
+                # no new target authority: later recovery is still bound to the
+                # same fence, and success still requires the complete clean
+                # checkpoint below.
+                global_mutation_allowed = True
+            else:
+                errors.append(authority_error)
     finally:
         errors.extend(
             _stop_wrappers_bounded(
@@ -7291,12 +7329,14 @@ def run_real_pair(
             cleanup_errors.append(f"{type(exc).__name__}: {exc}")
         if cleanup_errors:
             detail = "cleanup failures: " + "; ".join(cleanup_errors)
+            cleanup_error_code = "real-pair-cleanup"
             if primary is not None:
                 detail = (
                     f"primary failure: {type(primary).__name__}: {primary}; "
                     + detail
                 )
-            primary = QualificationStageError("real-pair-cleanup", detail)
+                cleanup_error_code = "real-pair-cleanup-after-primary"
+            primary = QualificationStageError(cleanup_error_code, detail)
     if primary is not None:
         raise primary
     assert result is not None
