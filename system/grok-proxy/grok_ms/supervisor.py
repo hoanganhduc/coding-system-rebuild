@@ -735,6 +735,15 @@ class _Replay:
     response: dict[str, Any]
 
 
+@dataclass(slots=True)
+class _QualificationRepairJob:
+    failed: ProviderResult
+    started: bool = False
+    done: bool = False
+    result: dict[str, Any] | None = None
+    error: BaseException | None = None
+
+
 Qualifier = Callable[
     [Endpoint, ProviderRequest, TransitionDeadline, threading.Event | None],
     QualificationEvidence,
@@ -832,6 +841,7 @@ class Supervisor:
         self._probe_condition = threading.Condition(self._state_lock)
         self._generation_worker: threading.Thread | None = None
         self._generation_error: BaseException | None = None
+        self._qualification_repair_job: _QualificationRepairJob | None = None
         self._stop = threading.Event()
         self._cancel_transition = threading.Event()
         self._leases: dict[str, _Lease] = {}
@@ -3092,10 +3102,9 @@ class Supervisor:
         }
         if not _atomic_create_json(marker, prepared):
             raise AdmissionError("qualification provider fault marker raced")
-        outcome = self._repair_active(
+        outcome = self._qualification_repair_on_generation_worker(
             failed,
-            reason="qualification-fault",
-            require_same_rung=True,
+            guard,
         )
         if self._qualification_fault_guard(
             context,
@@ -3160,6 +3169,69 @@ class Supervisor:
         except OSError:
             return True
 
+    def _qualification_repair_on_generation_worker(
+        self,
+        failed: ProviderResult,
+        guard: _Connection,
+    ) -> dict[str, Any]:
+        """Run a canary repair on the epoch's persistent provider owner."""
+
+        deadline_ns = guard.qualification_deadline_ns
+        if type(deadline_ns) is not int or deadline_ns <= time.monotonic_ns():
+            raise AdmissionError("qualification repair owner has no live deadline")
+        job = _QualificationRepairJob(failed)
+        with self._generation_condition:
+            worker = self._generation_worker
+            if (
+                self._stop.is_set()
+                or self.phase == "DRAINING"
+                or self._generation_error is not None
+                or worker is None
+                or not worker.is_alive()
+            ):
+                raise AdmissionError(
+                    "qualification repair has no live generation owner"
+                )
+            if self._qualification_repair_job is not None:
+                raise AdmissionError("another qualification repair is already pending")
+            self._qualification_repair_job = job
+            self._generation_condition.notify_all()
+            while not job.done:
+                remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+                if remaining <= 0:
+                    # A started mutation remains owned by the persistent worker
+                    # and fenced until epoch shutdown.  Only an unstarted job
+                    # can be withdrawn without making its outcome ambiguous.
+                    if (
+                        not job.started
+                        and self._qualification_repair_job is job
+                    ):
+                        self._qualification_repair_job = None
+                        self._generation_condition.notify_all()
+                    raise AdmissionError(
+                        "qualification repair owner exceeded its deadline"
+                    )
+                self._generation_condition.wait(timeout=min(0.1, remaining))
+                if not job.done and not worker.is_alive():
+                    if self._qualification_repair_job is job:
+                        self._qualification_repair_job = None
+                        self._generation_condition.notify_all()
+                    raise AdmissionError(
+                        "qualification generation owner exited during repair"
+                    )
+            if self._qualification_repair_job is job:
+                self._qualification_repair_job = None
+                self._generation_condition.notify_all()
+            error = job.error
+            result = job.result
+        if error is not None:
+            raise error
+        if type(result) is not dict:
+            raise RuntimeSecurityError(
+                "qualification generation owner returned no repair result"
+            )
+        return result
+
     def _generation_worker_main(self) -> None:
         current = threading.current_thread()
         error: BaseException | None = None
@@ -3178,11 +3250,57 @@ class Supervisor:
             self._generation_error = error
             self._generation_condition.notify_all()
         # Linux PR_SET_PDEATHSIG is tied to the *creating thread* in a
-        # multithreaded parent. Providers launched during the initial
-        # transition therefore require this owner thread to live for the whole
-        # epoch; otherwise returning here kills an otherwise committed backend.
-        if error is None:
-            self._stop.wait()
+        # multithreaded parent.  This worker therefore owns both the initial
+        # provider and the authenticated qualification replacement, and stays
+        # alive for the whole epoch after either one commits.
+        while error is None:
+            with self._generation_condition:
+                while (
+                    not self._stop.is_set()
+                    and self._qualification_repair_job is None
+                ):
+                    self._generation_condition.wait(timeout=0.1)
+                if self._stop.is_set():
+                    pending = self._qualification_repair_job
+                    if pending is not None and not pending.done:
+                        pending.error = EpochDraining(
+                            "qualification repair lost its live epoch"
+                        )
+                        pending.done = True
+                        self._generation_condition.notify_all()
+                    break
+                job = self._qualification_repair_job
+                assert job is not None
+                if job.done:
+                    self._generation_condition.wait(timeout=0.1)
+                    continue
+                job.started = True
+            try:
+                outcome = self._repair_active(
+                    job.failed,
+                    reason="qualification-fault",
+                    require_same_rung=True,
+                )
+            except BaseException as exc:
+                outcome = None
+                job_error: BaseException | None = exc
+            else:
+                job_error = None
+            with self._generation_condition:
+                if self._qualification_repair_job is not job:
+                    job_error = RuntimeSecurityError(
+                        "qualification repair ownership changed during execution"
+                    )
+                    outcome = None
+                job.result = outcome
+                job.error = job_error
+                job.done = True
+                self._generation_condition.notify_all()
+                while (
+                    self._qualification_repair_job is job
+                    and not self._stop.is_set()
+                ):
+                    self._generation_condition.wait(timeout=0.1)
         with self._generation_condition:
             if self._generation_worker is current:
                 self._generation_worker = None

@@ -2936,8 +2936,10 @@ raise SystemExit(88)
                 qualification_deadline_ns=time.monotonic_ns() + 30_000_000_000,
                 qualification_fault_in_progress=False,
             )
+            repair_threads: list[threading.Thread] = []
 
             def repaired(*_args, **_kwargs):
+                repair_threads.append(threading.current_thread())
                 qualification_frontend.generation = 2
                 qualification_frontend.accepting = True
                 return {
@@ -2984,11 +2986,360 @@ raise SystemExit(88)
                     finally:
                         replay.close()
                     repair.assert_called_once()
+                    self.assertEqual(
+                        repair_threads,
+                        [running.supervisor._generation_worker],
+                    )
             finally:
                 running.supervisor.frontend = real_frontend
         finally:
             os.close(descriptor)
             fault.close()
+            lease.close()
+            running.finish()
+
+    def test_qualification_repair_requires_one_live_generation_owner(self) -> None:
+        wanted = dataclasses.replace(
+            contract(ladder=("direct",)), route_mode=RouteMode.DIRECT
+        )
+        provider = ScriptedProvider(
+            (ScriptedStep("start"), ScriptedStep("stop"))
+        )
+        running = RunningSupervisor(wanted, provider)
+        lease = running.connect()
+        try:
+            self.assertTrue(request(lease, register_packet(wanted))["ok"])
+            failed = running.supervisor.active_result
+            self.assertIsNotNone(failed)
+            assert failed is not None
+            guard = SimpleNamespace(
+                qualification_deadline_ns=time.monotonic_ns()
+                + 30_000_000_000,
+            )
+            with running.supervisor._generation_condition:
+                worker = running.supervisor._generation_worker
+                self.assertIsNotNone(worker)
+                running.supervisor._generation_worker = None
+            try:
+                with self.assertRaisesRegex(
+                    supervisor_module.AdmissionError,
+                    "no live generation owner",
+                ):
+                    running.supervisor._qualification_repair_on_generation_worker(
+                        failed, guard
+                    )
+            finally:
+                with running.supervisor._generation_condition:
+                    running.supervisor._generation_worker = worker
+                    running.supervisor._generation_condition.notify_all()
+
+            repair_started = threading.Event()
+            release_repair = threading.Event()
+            outcomes: list[dict[str, object]] = []
+            errors: list[BaseException] = []
+
+            def blocked_repair(*_args, **_kwargs):
+                repair_started.set()
+                self.assertTrue(release_repair.wait(timeout=3))
+                return {
+                    "duration_ms": 1,
+                    "generation_after": 2,
+                    "repaired": True,
+                }
+
+            def first_repair() -> None:
+                try:
+                    outcomes.append(
+                        running.supervisor._qualification_repair_on_generation_worker(
+                            failed, guard
+                        )
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with mock.patch.object(
+                running.supervisor,
+                "_repair_active",
+                side_effect=blocked_repair,
+            ) as repair:
+                first = threading.Thread(target=first_repair)
+                first.start()
+                self.assertTrue(repair_started.wait(timeout=3))
+                with self.assertRaisesRegex(
+                    supervisor_module.AdmissionError,
+                    "already pending",
+                ):
+                    running.supervisor._qualification_repair_on_generation_worker(
+                        failed, guard
+                    )
+                release_repair.set()
+                first.join(timeout=3)
+                self.assertFalse(first.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(
+                    outcomes,
+                    [
+                        {
+                            "duration_ms": 1,
+                            "generation_after": 2,
+                            "repaired": True,
+                        }
+                    ],
+                )
+                repair.assert_called_once()
+                with running.supervisor._generation_condition:
+                    self.assertIsNone(
+                        running.supervisor._qualification_repair_job
+                    )
+        finally:
+            lease.close()
+            running.finish()
+
+    def test_qualification_replacement_outlives_transient_repair_caller(self) -> None:
+        wanted = dataclasses.replace(
+            contract(ladder=("direct",)), route_mode=RouteMode.DIRECT
+        )
+        backend = FakeScopeBackend()
+        running = RunningSupervisor(
+            wanted,
+            ScriptedProvider(()),
+            process_scopes=backend,
+        )
+        running.supervisor._provided["*"] = running.supervisor._direct_provider
+        lease = running.connect()
+        repair_result: list[dict[str, object]] = []
+        repair_errors: list[BaseException] = []
+        replacement_pidfd = -1
+        caller: threading.Thread | None = None
+        try:
+            self.assertTrue(request(lease, register_packet(wanted))["ok"])
+            failed = running.supervisor.active_result
+            self.assertIsNotNone(failed)
+            assert failed is not None
+            worker = running.supervisor._generation_worker
+            self.assertIsNotNone(worker)
+            assert worker is not None
+            guard = SimpleNamespace(
+                qualification_deadline_ns=time.monotonic_ns()
+                + 30_000_000_000,
+            )
+
+            def repair_from_transient_caller() -> None:
+                try:
+                    repair_result.append(
+                        running.supervisor._qualification_repair_on_generation_worker(
+                            failed, guard
+                        )
+                    )
+                except BaseException as exc:
+                    repair_errors.append(exc)
+
+            caller = threading.Thread(
+                target=repair_from_transient_caller,
+                name="test-transient-qualification-repair",
+            )
+            caller.start()
+            caller.join(timeout=10)
+            self.assertFalse(caller.is_alive())
+            self.assertEqual(repair_errors, [])
+            self.assertEqual(repair_result[0]["generation_after"], 2)
+            self.assertTrue(worker.is_alive())
+            self.assertIs(running.supervisor._generation_worker, worker)
+
+            replacement = running.supervisor.active_result
+            self.assertIsNotNone(replacement)
+            assert replacement is not None
+            self.assertEqual(replacement.request.generation, 2)
+            replacement_identity = replacement.resources.processes[0]
+            replacement_pidfd = os.pidfd_open(replacement_identity.pid, 0)
+            readable, _, _ = select.select([replacement_pidfd], [], [], 0.2)
+            self.assertEqual(readable, [])
+            with socket.socket() as probe:
+                probe.settimeout(1)
+                self.assertEqual(
+                    probe.connect_ex(
+                        (
+                            replacement.request.private_endpoint.host,
+                            replacement.request.private_endpoint.port,
+                        )
+                    ),
+                    0,
+                )
+        finally:
+            if replacement_pidfd >= 0:
+                os.close(replacement_pidfd)
+            if caller is not None:
+                caller.join(timeout=1)
+            lease.close()
+            running.finish()
+
+    def test_qualification_stop_before_owner_pickup_releases_pending_waiter(
+        self,
+    ) -> None:
+        wanted = dataclasses.replace(
+            contract(ladder=("direct",)), route_mode=RouteMode.DIRECT
+        )
+        provider = ScriptedProvider(
+            (ScriptedStep("start"), ScriptedStep("stop"))
+        )
+        running = RunningSupervisor(wanted, provider)
+        lease = running.connect()
+        try:
+            self.assertTrue(request(lease, register_packet(wanted))["ok"])
+            failed = running.supervisor.active_result
+            self.assertIsNotNone(failed)
+            assert failed is not None
+            worker = running.supervisor._generation_worker
+            self.assertIsNotNone(worker)
+            assert worker is not None
+            guard = SimpleNamespace(
+                qualification_deadline_ns=time.monotonic_ns()
+                + 30_000_000_000,
+            )
+            original_notify_all = running.supervisor._generation_condition.notify_all
+            stop_injected = threading.Event()
+
+            def stop_on_enqueue() -> None:
+                job = running.supervisor._qualification_repair_job
+                if (
+                    not stop_injected.is_set()
+                    and job is not None
+                    and not job.started
+                ):
+                    stop_injected.set()
+                    running.supervisor._stop.set()
+                original_notify_all()
+
+            with mock.patch.object(
+                running.supervisor._generation_condition,
+                "notify_all",
+                side_effect=stop_on_enqueue,
+            ), self.assertRaisesRegex(
+                supervisor_module.EpochDraining,
+                "qualification repair lost its live epoch",
+            ):
+                running.supervisor._qualification_repair_on_generation_worker(
+                    failed, guard
+                )
+
+            self.assertTrue(stop_injected.is_set())
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            with running.supervisor._generation_condition:
+                self.assertIsNone(running.supervisor._qualification_repair_job)
+                self.assertIsNone(running.supervisor._generation_worker)
+        finally:
+            lease.close()
+            running.finish()
+
+    def test_started_qualification_deadline_stays_owned_until_stop(self) -> None:
+        wanted = dataclasses.replace(
+            contract(ladder=("direct",)), route_mode=RouteMode.DIRECT
+        )
+        provider = ScriptedProvider(
+            (ScriptedStep("start"), ScriptedStep("stop"))
+        )
+        running = RunningSupervisor(wanted, provider)
+        lease = running.connect()
+        repair_started = threading.Event()
+        deadline_expired = threading.Event()
+        release_repair = threading.Event()
+        repair_errors: list[BaseException] = []
+        caller: threading.Thread | None = None
+        try:
+            self.assertTrue(request(lease, register_packet(wanted))["ok"])
+            failed = running.supervisor.active_result
+            self.assertIsNotNone(failed)
+            assert failed is not None
+            worker = running.supervisor._generation_worker
+            self.assertIsNotNone(worker)
+            assert worker is not None
+            guard = SimpleNamespace(qualification_deadline_ns=10_000_000_000)
+
+            def controlled_clock() -> int:
+                return (
+                    guard.qualification_deadline_ns + 1
+                    if deadline_expired.is_set()
+                    else 1_000_000_000
+                )
+
+            def blocked_repair(*_args, **_kwargs):
+                repair_started.set()
+                deadline_expired.set()
+                with running.supervisor._generation_condition:
+                    running.supervisor._generation_condition.notify_all()
+                if not release_repair.wait(timeout=3):
+                    raise AssertionError("repair release gate timed out")
+                return {
+                    "duration_ms": 7,
+                    "generation_after": 2,
+                    "repaired": True,
+                }
+
+            def request_repair() -> None:
+                try:
+                    running.supervisor._qualification_repair_on_generation_worker(
+                        failed, guard
+                    )
+                except BaseException as exc:
+                    repair_errors.append(exc)
+
+            with mock.patch.object(
+                supervisor_module.time,
+                "monotonic_ns",
+                side_effect=controlled_clock,
+            ), mock.patch.object(
+                running.supervisor,
+                "_repair_active",
+                side_effect=blocked_repair,
+            ) as repair:
+                caller = threading.Thread(
+                    target=request_repair,
+                    name="test-expired-qualification-repair",
+                )
+                caller.start()
+                self.assertTrue(repair_started.wait(timeout=2))
+                caller.join(timeout=2)
+                self.assertFalse(caller.is_alive())
+                self.assertEqual(len(repair_errors), 1)
+                self.assertIsInstance(
+                    repair_errors[0], supervisor_module.AdmissionError
+                )
+                self.assertIn("exceeded its deadline", str(repair_errors[0]))
+
+                with running.supervisor._generation_condition:
+                    pending = running.supervisor._qualification_repair_job
+                    self.assertIsNotNone(pending)
+                    assert pending is not None
+                    self.assertTrue(pending.started)
+                    self.assertFalse(pending.done)
+
+                deadline_expired.clear()
+                with self.assertRaisesRegex(
+                    supervisor_module.AdmissionError,
+                    "already pending",
+                ):
+                    running.supervisor._qualification_repair_on_generation_worker(
+                        failed, guard
+                    )
+
+                running.supervisor._stop.set()
+                with running.supervisor._generation_condition:
+                    running.supervisor._generation_condition.notify_all()
+                release_repair.set()
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
+                repair.assert_called_once()
+                with running.supervisor._generation_condition:
+                    self.assertIs(running.supervisor._qualification_repair_job, pending)
+                    self.assertTrue(pending.done)
+                    self.assertIsNone(pending.error)
+                    running.supervisor._qualification_repair_job = None
+                    running.supervisor._generation_condition.notify_all()
+        finally:
+            release_repair.set()
+            if caller is not None:
+                caller.join(timeout=1)
             lease.close()
             running.finish()
 
