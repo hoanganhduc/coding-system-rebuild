@@ -3,7 +3,17 @@
 # Usage: SECRETS=/path/to/secrets.zip bin/install.sh   (degraded without SECRETS)
 # Env:   PHASE=n  resume from phase n;  SKIP_* forwarded to prepare.sh
 set -euo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${CSR_INSTALL_REPO_ROOT:-}" ]]; then
+  REPO="$CSR_INSTALL_REPO_ROOT"
+  unset CSR_INSTALL_REPO_ROOT
+  [[ "$REPO" == /* && "$REPO" != / && -d "$REPO" && ! -L "$REPO" ]] \
+    || { echo "ERROR: invalid descriptor-bound install root" >&2; exit 2; }
+  canonical_repo="$(cd -- "$REPO" && pwd -P)"
+  [[ "$canonical_repo" == "$REPO" ]] \
+    || { echo "ERROR: non-canonical descriptor-bound install root" >&2; exit 2; }
+else
+  REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 START="${PHASE:-1}"
 DEGRADED_MODE=0
 [[ -z "${SECRETS:-}" ]] && DEGRADED_MODE=1

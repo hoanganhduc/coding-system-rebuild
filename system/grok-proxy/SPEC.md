@@ -61,6 +61,15 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   `flock`, writable delegated cgroup v2, Python 3.12+, OpenSSH, Tailscale,
   OpenVPN, `ip`, `ss`, and `sudo`. Feature-on fails closed when cgroup-v2
   descendant containment is unavailable; it has no process-group fallback.
+- The scheduled/manual degraded-install rehearsal must place the installer in
+  the fixed `installer` subgroup of a bounded system-manager transient service
+  delegated to the target UID. Its preflight may enable only `cpu`, `memory`,
+  and `pids`, and must prove the production runner-parent predicate selects the
+  transient service's exact direct parent. An ambient user-manager fallback is
+  not valid rehearsal evidence. CI output is byte-capped and an overflow fails
+  the job. The transient resource envelope is not a sandbox for privileged
+  systemd units deliberately started by the installer; structured post-install
+  state gates remain the evidence for those effects.
 - iPhone and home-PC peers are already enrolled/configured; setup remains an
   explicit maintenance operation.
 - Provider availability is external. An unavailable provider blocks its live

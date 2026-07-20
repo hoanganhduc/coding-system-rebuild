@@ -207,7 +207,7 @@ jobs:
           df -h / | tail -1
       - name: Bootstrap deps
         run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml build-essential dbus-user-session libssl-dev openssl pkg-config
-      - name: Prepare delegated user manager for the Grok installer
+      - name: Prepare user bus for the Grok installer
         run: |
           uid="$(id -u)"
           sudo loginctl enable-linger "$USER"
@@ -304,7 +304,9 @@ jobs:
           sudo install -o root -g root -m 0444 \
             "$bootstrap_tmp/selected-release" "$bootstrap_root/selected-release"
 
-          /usr/bin/python3 - <<'PY' | tee bootstrap-preflight.log
+          /usr/bin/python3 - <<'PY' | /usr/bin/python3 -I -B \
+            "$GITHUB_WORKSPACE/bin/lib/ci_bounded_tee.py" \
+            --output bootstrap-preflight.log --limit 1048576
           import hashlib
           import json
           import os
@@ -476,30 +478,56 @@ jobs:
           AAS_PYTHON: /bin/false
           PYTHONPATH: /tmp/csr-hostile-aas-pythonpath
         run: |
-          set -o pipefail
+          set -euo pipefail
+          uid="$(id -u)"
+          gid="$(id -g)"
+          [[ "$uid" =~ ^[1-9][0-9]*$ && "$gid" =~ ^[1-9][0-9]*$ ]]
           set +e
-          /usr/bin/cat bootstrap-preflight.log > install.log
-          /usr/bin/systemd-run --user --wait --pipe --collect --quiet \
+          # The fixed capture writes at most 4 MiB to both destinations and
+          # detects even a one-byte overflow before failing the pipeline.
+          /usr/bin/sudo -n -- /usr/bin/systemd-run \
+            --wait --pipe --collect --quiet \
             --expand-environment=no --service-type=exec \
-            --same-dir \
+            --same-dir --uid="$uid" --gid="$gid" \
             --property=Delegate=yes \
+            --property=DelegateSubgroup=installer \
             --property=CPUAccounting=yes \
             --property=MemoryAccounting=yes \
             --property=TasksAccounting=yes \
+            --property=MemoryMax=6442450944 \
+            --property=MemorySwapMax=0 \
+            --property=TasksMax=2048 \
+            --property=CPUQuota=400% \
+            --property=RuntimeMaxSec=45min \
+            --property=TimeoutStopSec=30s \
+            --property=KillMode=control-group \
+            --property=OOMPolicy=stop \
+            --property=UMask=0022 \
             --setenv=SKIP_LATEX="$SKIP_LATEX" \
             --setenv=SKIP_DOCKER_IMAGES="$SKIP_DOCKER_IMAGES" \
             --setenv=AAS_PYTHON="$AAS_PYTHON" \
             --setenv=PYTHONPATH="$PYTHONPATH" \
-            /usr/bin/bash bin/install.sh 2>&1 | tee -a install.log
+            /usr/bin/python3 -I -B \
+              "$GITHUB_WORKSPACE/system/grok-proxy/tests/ci_delegated_install.py" \
+            2>&1 | /usr/bin/python3 -I -B \
+              "$GITHUB_WORKSPACE/bin/lib/ci_bounded_tee.py" \
+              --prefix bootstrap-preflight.log \
+              --output install.log --limit 4194304
           pipeline_status=("${PIPESTATUS[@]}")
           set -e
           installer_rc="${pipeline_status[0]:-125}"
-          tee_rc="${pipeline_status[1]:-125}"
-          printf '%s\n' "$installer_rc" > install.exit
+          capture_rc="${pipeline_status[1]:-125}"
+          if ! printf '%s\n' "$installer_rc" | /usr/bin/python3 -I -B \
+            "$GITHUB_WORKSPACE/bin/lib/ci_bounded_tee.py" \
+            --output install.exit --limit 16 >/dev/null
+          then
+            echo "failed to create installer exit ledger" >&2
+            exit 125
+          fi
           if [ "$installer_rc" -ne 0 ]; then
             exit "$installer_rc"
           fi
-          exit "$tee_rc"
+          exit "$capture_rc"
       - name: Assert key phases succeeded
         if: always()
         run: |
@@ -545,6 +573,7 @@ jobs:
 
           expected = {
               "install.bootstrap.preflight",
+              "install.delegated-cgroup.preflight",
               "install.phase6.grok-bootstrap-status",
               "install.phase6.grok-install",
               "install.phase6.grok-status",
@@ -599,6 +628,12 @@ jobs:
               and preflight.get("mutable_source_used") is False
           ):
               errors.append("structured signed-bootstrap preflight is invalid")
+          delegated = records.get("install.delegated-cgroup.preflight", {})
+          if not (
+              delegated.get("exact_parent") is True
+              and delegated.get("required_controllers") == ["cpu", "memory", "pids"]
+          ):
+              errors.append("structured delegated-cgroup preflight is invalid")
           workflow_source = Path(".github/workflows/rehearsal.yml").read_text(
               encoding="utf-8"
           )

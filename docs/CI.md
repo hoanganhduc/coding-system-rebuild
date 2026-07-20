@@ -25,9 +25,19 @@ render, Python env rebuild, systemd unit render, and `verify`. It proves the ins
 It does **not** verify the live OpenClaw gateway starting, channel round-trips, or full
 secret restore — those need the complete encrypted archive and production-like host and
 service state (and the zip is never uploaded). The workflow starts a transient systemd
-user manager and D-Bus session only to test the installer's delegated cgroup boundary;
-that is not a live-service rehearsal. Full verification remains the manual VM rehearsal
-(docs/BACKUP-RESTORE.md). To also clone the private
+user manager only to provide the D-Bus session used by later user-unit registration. The
+installer itself runs as the target UID in a bounded system-manager service whose direct
+parent is delegated and whose main process is isolated in an `installer` subgroup. A
+fixed-purpose preflight enables only the CPU, memory, and PID controllers, then requires
+the production cgroup predicate to select that exact direct parent; fallback to an
+ambient user-manager cgroup fails closed. This is not a live-service rehearsal. Full
+installer output is capped at 4 MiB before it reaches the Actions log/artifact
+path; exceeding that ceiling fails the job. The transient service limits the
+launcher and cooperating descendants, but is not a sandbox for the deliberately
+privileged install operations: a unit started through `sudo systemctl` has its
+own systemd lifecycle. The structured post-install gates, rather than the
+transient cgroup, prove those operations reached the expected state. Full
+verification remains the manual VM rehearsal (docs/BACKUP-RESTORE.md). To also clone the private
 `openclaw-bot` / `ai-agents-skills` components in CI, add a `COMPONENTS_TOKEN` repo secret
 (a fine-grained PAT with read access to those repos); without it those phases are skipped.
 

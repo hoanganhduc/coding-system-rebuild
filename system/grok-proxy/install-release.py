@@ -78,7 +78,8 @@ def _load_runtime_dependencies() -> None:
     eligible_selected_rungs = selected_rungs
 
 
-if __name__ != "__main__":
+_RUNNER_CGROUP_PROBE_IMPORT = globals().get("_RUNNER_CGROUP_PROBE_IMPORT") is True
+if __name__ != "__main__" and not _RUNNER_CGROUP_PROBE_IMPORT:
     _load_runtime_dependencies()
 
 

@@ -41,6 +41,7 @@ UNITTEST_CASES = (
     ("grok.python.ms-client", "test_grok_ms_client.py"),
     ("grok.python.managed-profile", "test_managed_profile.py"),
     ("grok.python.rung-admission", "test_rung_admission.py"),
+    ("grok.python.ci-delegated-install", "test_ci_delegated_install.py"),
     ("grok.python.bootstrap", "test_bootstrap.py"),
     ("grok.python.bootstrap-publisher", "test_bootstrap_publisher.py"),
     ("grok.python.process-scope", "test_grok_ms_process_scope.py"),

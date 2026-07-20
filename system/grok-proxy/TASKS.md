@@ -520,3 +520,21 @@
   profile, real-pair qualify/promote direct, and activate it.
 - [ ] Prove two simultaneous real `grok-remote` sessions share the promoted
   direct contract/generation, then verify final cleanup and release inventory.
+
+## Scheduled degraded-install cgroup correction — 2026-07-20
+
+- [x] Inspect the completed hosted-runner job and prove OpenVPN was installed
+  before phase 6; retain the intentionally redacted 178-byte stderr as
+  undecoded rather than guessing its preimage.
+- [x] Reproduce that a transient user service has no direct `user.delegate`
+  authority and that the prior local pass silently selected the ambient
+  `user@UID.service` fallback.
+- [x] Replace that launcher with a target-UID system-manager service, fixed
+  `installer` subgroup, bounded resources, closed environment, and a
+  fixed-purpose preflight that requires the production predicate to select the
+  exact direct parent.
+- [x] Add fail-closed helper and workflow regressions for subgroup identity,
+  empty parent, required controllers, fallback rejection, environment closure,
+  structured evidence, and exit-ledger preservation.
+- [ ] Pass the clean repository gate, push the default branch, and require an
+  exact-commit manual `install-degraded` Actions run to pass before deployment.

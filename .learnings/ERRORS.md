@@ -2579,7 +2579,7 @@ fully qualified focused command.
 
 **Logged**: 2026-07-20T10:20:00Z
 **Priority**: high
-**Status**: resolved
+**Status**: testing
 
 ### Summary
 
@@ -2592,20 +2592,24 @@ hosted runner service.
 
 ### Response
 
-Prepared the target user's systemd manager and moved the full installer into a
-transient user service. The service explicitly delegates its cgroup and enables
-CPU, memory, and task accounting, while forwarding only the four deliberate
-install-step variables. A local exact preflight caught that accounting
-properties without `Delegate=yes` still omit controller files; the corrected
-service shape passes the installer's own `_runner_cgroup_parent` check and
-preserves a nonzero child exit through the existing pipeline ledger.
+The first attempted correction moved the installer into a transient user
+service, but the hosted run failed identically. Reinspection proved that unit
+had no direct `user.delegate` marker; the local predicate had silently selected
+the host's already-delegated `user@UID.service` fallback. The replacement uses
+a target-UID system-manager service with `Delegate=yes`, a fixed `installer`
+subgroup, and bounded CPU/memory/PID resources. A fixed-purpose launcher enables
+only those three controllers, closes the environment, and rejects the run
+unless the production predicate selects the transient service's exact direct
+parent. The existing pipeline ledger still preserves the child exit.
 
 ### Prevention
 
 Exercise schedule/manual-only jobs after changing production-only installer
-preconditions. Keep a static workflow regression for the delegated service
-properties, and probe the installer's actual cgroup predicate before relying on
-a syntactically valid `systemd-run` command.
+preconditions. A cgroup probe must assert the selected parent identity, not
+only that *some* ancestor passes. Keep static workflow coverage for the system
+manager, target identity, delegated subgroup, finite limits, four-value
+environment allowlist, exact-parent preflight, and exit ledger. This entry
+remains in testing until an exact hosted manual run passes.
 
 ### Metadata
 
@@ -2613,7 +2617,9 @@ a syntactically valid `systemd-run` command.
   service preflight reproduced locally
 - Related Files: `.github/workflows/rehearsal.yml`,
   `system/grok-proxy/install-release.py`,
-  `system/grok-proxy/tests/test_bootstrap.py`
+  `system/grok-proxy/tests/ci_delegated_install.py`,
+  `system/grok-proxy/tests/test_bootstrap.py`,
+  `system/grok-proxy/tests/test_ci_delegated_install.py`
 
 ---
 
@@ -2648,5 +2654,134 @@ whose effective checkout permissions vary across runners or shared clones.
 - Reproducible: yes; the normalized group-writable candidate failed both E2E
   tests before this correction
 - Related Files: `system/grok-proxy/tests/test_multi_feature_e2e.py`
+
+---
+
+## [ERR-20260720-060] delegated-launcher-probe-executed-real-installer
+
+**Logged**: 2026-07-20T11:01:51Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+An integration probe for the replacement system-manager launcher invoked the
+fixed-purpose helper without substituting a harmless terminal command. The
+helper passed its cgroup preflight and therefore executed the real degraded
+`bin/install.sh` on the production host.
+
+### Response
+
+No signal, stop, or kill was sent. The transient unit exited naturally with
+`Result=success`. Read-only reconciliation found no repository changes and no
+change to the Grok bootstrap selector, active user/root release selectors,
+canary/deny records, or their pre-incident timestamps. The install may have
+idempotently rendered or verified non-Grok assets; those cannot be proven
+unchanged without a before-snapshot. Subsequent helper tests mock `execve` or
+use filesystem fixtures instead of launching an integration command.
+
+### Prevention
+
+Never live-probe a fixed-purpose exec helper until its terminal action is
+injectable and replaced with an inert identity/exit stub, or the entire target
+filesystem is disposable. Confirm the captured execution handle before a
+long-running command yields. Treat a successful preflight as authority to run
+the terminal action, not as a dry run.
+
+### Metadata
+
+- Reproducible: yes; caused by the explicit local probe
+- Related Files: `system/grok-proxy/tests/ci_delegated_install.py`,
+  `.github/workflows/rehearsal.yml`
+
+---
+
+## [ERR-20260720-061] combined-unittest-file-and-module-selectors
+
+**Logged**: 2026-07-20T11:04:00Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+A focused command passed both the test file and an unqualified class selector
+to `python -m unittest`. The file's 31 tests passed, then unittest treated the
+class token as a second top-level module and returned a loader error.
+
+### Response
+
+Reran the inspected test file as its sole selector; all 31 tests passed. The
+failure was command composition only and did not exercise a product failure.
+
+### Prevention
+
+Use exactly one selector style per unittest command: either a file path for the
+whole module, or one fully qualified dotted test name. Never append a class or
+method token after a file selector.
+
+### Metadata
+
+- Reproducible: yes; loader-only failure after the real tests passed
+- Related Files: `system/grok-proxy/tests/test_bootstrap.py`
+
+---
+
+## [ERR-20260720-062] ledger-list-subcommand-required-kind
+
+**Logged**: 2026-07-20T11:15:00Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+After reading only the verification ledger's top-level help, a check invoked
+`list` without its required `--kind` option. The ledger self-test passed, but
+the chained command stopped before the focused tests.
+
+### Response
+
+Reran `list --kind unittest`, confirmed the new launcher case was present, and
+then ran the focused launcher and bootstrap suites successfully.
+
+### Prevention
+
+For CLIs with subcommands, inspect the selected subcommand's help before
+composing it, even when top-level help has already been read.
+
+### Metadata
+
+- Reproducible: yes; argument-validation failure only
+- Related Files: `system/grok-proxy/tests/verification_ledger.py`
+
+---
+
+## [ERR-20260720-063] isolated-launcher-has-no-help-mode
+
+**Logged**: 2026-07-20T11:42:19Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+A documentation check invoked `run-isolated.sh --help`, but this fixed-purpose
+launcher accepts only its explicit launch protocol and rejected the unknown
+mode before doing any substantive work.
+
+### Response
+
+Inspected the launcher source and retained the repository-required `--launch`
+invocation for the normalized full gate. No test, installer, signal, or host
+mutation occurred during the rejected help call.
+
+### Prevention
+
+Inspect this fixed-purpose launcher's source-defined dispatch before invoking
+it; do not assume conventional `--help` support when no help contract is
+documented.
+
+### Metadata
+
+- Reproducible: yes; mode-validation failure only
+- Related Files: `system/grok-proxy/tests/run-isolated.sh`
 
 ---

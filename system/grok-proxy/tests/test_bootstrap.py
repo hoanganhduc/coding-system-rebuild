@@ -1452,13 +1452,20 @@ class BootstrapTests(unittest.TestCase):
             build_step,
         )
         self.assertNotIn("BUILD_DIR", build_step)
+        self.assertIn(
+            '"$GITHUB_WORKSPACE/bin/lib/ci_bounded_tee.py"', build_step
+        )
+        self.assertIn(
+            "--output bootstrap-preflight.log --limit 1048576", build_step
+        )
+        self.assertNotIn("| tee bootstrap-preflight.log", build_step)
 
         self.assertIn(
-            "      - name: Prepare delegated user manager for the Grok installer\n",
+            "      - name: Prepare user bus for the Grok installer\n",
             job,
         )
         manager_step = job.split(
-            "      - name: Prepare delegated user manager for the Grok installer\n",
+            "      - name: Prepare user bus for the Grok installer\n",
             1,
         )[1].split(
             "      - name: Provision ephemeral signed Grok bootstrap trust fixture\n",
@@ -1474,7 +1481,7 @@ class BootstrapTests(unittest.TestCase):
         ):
             self.assertIn(required, manager_step)
         bootstrap_deps = job.split("      - name: Bootstrap deps\n", 1)[1].split(
-            "      - name: Prepare delegated user manager", 1
+            "      - name: Prepare user bus", 1
         )[0]
         self.assertIn("dbus-user-session", bootstrap_deps)
         install_step_marker = (
@@ -1487,23 +1494,52 @@ class BootstrapTests(unittest.TestCase):
             next_install_step, 1
         )[0]
         self.assertIn(
-            "/usr/bin/systemd-run --user --wait --pipe --collect --quiet",
+            "/usr/bin/sudo -n -- /usr/bin/systemd-run \\\n"
+            "            --wait --pipe --collect --quiet",
             install_step,
         )
+        self.assertNotIn("systemd-run --user", install_step)
         for required in (
             "--expand-environment=no",
             "--service-type=exec",
             "--same-dir",
+            '--uid="$uid"',
+            '--gid="$gid"',
             "--property=Delegate=yes",
+            "--property=DelegateSubgroup=installer",
             "--property=CPUAccounting=yes",
             "--property=MemoryAccounting=yes",
             "--property=TasksAccounting=yes",
+            "--property=MemoryMax=6442450944",
+            "--property=MemorySwapMax=0",
+            "--property=TasksMax=2048",
+            "--property=CPUQuota=400%",
+            "--property=RuntimeMaxSec=45min",
+            "--property=TimeoutStopSec=30s",
+            "--property=KillMode=control-group",
+            "--property=OOMPolicy=stop",
+            "--property=UMask=0022",
             '--setenv=SKIP_LATEX="$SKIP_LATEX"',
             '--setenv=SKIP_DOCKER_IMAGES="$SKIP_DOCKER_IMAGES"',
             '--setenv=AAS_PYTHON="$AAS_PYTHON"',
             '--setenv=PYTHONPATH="$PYTHONPATH"',
+            "/usr/bin/python3 -I -B",
+            '"$GITHUB_WORKSPACE/system/grok-proxy/tests/'
+            'ci_delegated_install.py"',
+            '"$GITHUB_WORKSPACE/bin/lib/ci_bounded_tee.py"',
+            "--prefix bootstrap-preflight.log",
+            "--output install.log --limit 4194304",
         ):
             self.assertIn(required, install_step)
+        self.assertEqual(install_step.count("--setenv="), 4)
+        self.assertIn('installer_rc="${pipeline_status[0]:-125}"', install_step)
+        self.assertIn('capture_rc="${pipeline_status[1]:-125}"', install_step)
+        self.assertIn("--output install.exit --limit 16", install_step)
+        self.assertNotIn("/usr/bin/tee", install_step)
+        self.assertNotIn("/usr/bin/head", install_step)
+        self.assertNotIn("> install.log", install_step)
+        self.assertNotIn("> install.exit", install_step)
+        self.assertIn('"install.delegated-cgroup.preflight"', job)
 
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
             source = Path(directory) / "bootstrap"
