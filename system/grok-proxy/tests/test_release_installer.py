@@ -612,7 +612,7 @@ def process_is_running(pid: int) -> bool:
 
     try:
         raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
     close = raw.rfind(")")
     if close < 0:
@@ -766,6 +766,11 @@ def prepare_promotable_rung(
 
 
 class ReleaseInstallerTests(unittest.TestCase):
+    def test_process_is_running_treats_procfs_esrch_as_stopped(self) -> None:
+        error = ProcessLookupError(errno.ESRCH, "No such process")
+        with mock.patch.object(Path, "read_text", side_effect=error):
+            self.assertFalse(process_is_running(12345))
+
     def test_invocation_lane_rejects_commands_and_explicit_options_before_discovery(
         self,
     ) -> None:
