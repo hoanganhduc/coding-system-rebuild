@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # full history for leak-scan-history
+          persist-credentials: false
       - name: Install minimal deps
         run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml bubblewrap build-essential dbus-user-session iproute2 libssl-dev openssl pkg-config
       - name: Prepare delegated user manager for isolated coding verification
@@ -48,7 +49,37 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: No-secrets rehearsal (make ci)
         run: |
-          set -o pipefail
+          set -euo pipefail
+          # Ubuntu 24.04 restricts unprivileged user namespaces by default.
+          # This no-secrets ephemeral job needs them for the reviewed sandbox.
+          userns_restriction_path=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          userns_restriction_before=
+          restore_userns_restriction() {
+            rc=$?
+            trap - EXIT
+            if [[ "$userns_restriction_before" == 0 \
+                || "$userns_restriction_before" == 1 ]]; then
+              if ! sudo -n -- /usr/sbin/sysctl -q -w \
+                  "kernel.apparmor_restrict_unprivileged_userns=$userns_restriction_before" \
+                  || [[ "$(< "$userns_restriction_path")" \
+                      != "$userns_restriction_before" ]]; then
+                echo 'failed to restore AppArmor user-namespace restriction' >&2
+                (( rc == 0 )) && rc=2
+              fi
+            fi
+            exit "$rc"
+          }
+          trap restore_userns_restriction EXIT
+          if [[ -r "$userns_restriction_path" ]]; then
+            IFS= read -r userns_restriction_before < "$userns_restriction_path"
+            [[ "$userns_restriction_before" == 0 \
+                || "$userns_restriction_before" == 1 ]]
+            if [[ "$userns_restriction_before" == 1 ]]; then
+              sudo -n -- /usr/sbin/sysctl -q -w \
+                kernel.apparmor_restrict_unprivileged_userns=0
+            fi
+            [[ "$(< "$userns_restriction_path")" == 0 ]]
+          fi
           make ci 2>&1 | tee ci.log
           grep -Fqx 'verification-ledger: selftest passed' ci.log
           /usr/bin/python3 -I -B - <<'PY'
