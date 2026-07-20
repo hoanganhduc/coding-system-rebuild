@@ -2813,10 +2813,9 @@ matching the hosted artifact byte for byte. The workflow now first proves the
 entire disposable state root is absent, then mirrors the package-owned
 root:root state: mode-0755 release control, an empty single-link mode-0600
 operation lock, and a mode-0700 runner-scope journal. Its preflight validates
-those identities before invoking the installer. Unconditional cleanup is
-authorized only by a root-owned, run-specific marker created after every fixed
-fixture root was proved absent; missing or unsafe markers leave host state
-untouched.
+those identities before invoking the installer. The hosted VM is disposable,
+so the workflow performs no recursive deletion of those fixed root paths; the
+private signing key remains covered by its separate temporary-directory trap.
 
 ### Prevention
 
@@ -2864,5 +2863,41 @@ directory before verification.
 
 - Reproducible: yes; verification-fixture construction only
 - Related Files: `.git`, `Makefile`
+
+---
+
+## [ERR-20260720-066] cleanup-marker-did-not-bind-created-root-inodes
+
+**Logged**: 2026-07-20T12:42:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+An attempted guard for the workflow's unconditional root cleanup proved that
+the job intended to create a fixture, but did not bind later deletion to the
+exact directory inodes created by that run. A privileged race, root swap, or
+nested mount could therefore make pathname-based recursive cleanup exceed its
+ownership proof.
+
+### Response
+
+Removed the recursive fixed-root cleanup entirely. GitHub-hosted runners are
+discarded after the job, the fixed fixture contains no private signing key,
+and the key's private temporary directory already has its own scoped trap.
+Static coverage now rejects reintroduction of the root cleanup step and its
+`rm -rf` command.
+
+### Prevention
+
+An intent marker is not an inode authority. Destructive cleanup must either
+retain descriptor-bound identity for every target and reject nested mounts, or
+be omitted when disposable infrastructure makes deletion unnecessary.
+
+### Metadata
+
+- Reproducible: review finding; no destructive local command was run
+- Related Files: `.github/workflows/rehearsal.yml`,
+  `system/grok-proxy/tests/test_bootstrap.py`, `docs/CI.md`
 
 ---

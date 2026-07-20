@@ -1462,12 +1462,9 @@ class BootstrapTests(unittest.TestCase):
         for required in (
             "state_root=/var/lib/grok-proxy",
             'release_control_root="$state_root/release-control"',
-            'ownership_marker="/run/grok-bootstrap-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.owned"',
             'for path in "$bootstrap_root" "$release_root" "$state_root"; do',
             'sudo test ! -e "$path"',
             'sudo test ! -L "$path"',
-            "sudo install -o root -g root -m 0400",
-            '"$bootstrap_tmp/ownership-marker" "$ownership_marker"',
             "sudo install -d -o root -g root -m 0755",
             '"$state_root" "$release_control_root"',
             "sudo install -o root -g root -m 0600 /dev/null",
@@ -1484,10 +1481,6 @@ class BootstrapTests(unittest.TestCase):
             self.assertIn(required, build_step)
         self.assertLess(
             build_step.index('sudo test ! -e "$path"'),
-            build_step.index('"$bootstrap_tmp/ownership-marker" "$ownership_marker"'),
-        )
-        self.assertLess(
-            build_step.index('"$bootstrap_tmp/ownership-marker" "$ownership_marker"'),
             build_step.index('"$release_control_root/operation.lock"'),
         )
 
@@ -1573,25 +1566,11 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn('"install.delegated-cgroup.preflight"', job)
         self.assertIn('preflight.get("operation_lock_valid") is True', job)
         self.assertIn('preflight.get("runner_scopes_valid") is True', job)
-        cleanup_step = job.split(
+        self.assertNotIn(
             "      - name: Remove disposable signed-bootstrap trust fixture\n",
-            1,
-        )[1]
-        self.assertIn("            /var/lib/grok-proxy\n", cleanup_step)
-        for required in (
-            'ownership_marker="/run/grok-bootstrap-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.owned"',
-            'if ! sudo test -e "$ownership_marker"; then',
-            'echo "disposable Grok fixture was not created; cleanup skipped"',
-            'expected = b"grok-bootstrap-ci-owned-v1\\n"',
-            'stat.S_IMODE(opened.st_mode) != 0o400',
-            'sudo /usr/bin/mountpoint -q "$path"',
-            'sudo rm -f -- "$ownership_marker"',
-        ):
-            self.assertIn(required, cleanup_step)
-        self.assertLess(
-            cleanup_step.index('if ! sudo test -e "$ownership_marker"; then'),
-            cleanup_step.index("          for path in \\\n"),
+            job,
         )
+        self.assertNotIn("sudo rm -rf --", job)
 
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
             source = Path(directory) / "bootstrap"

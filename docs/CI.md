@@ -34,9 +34,11 @@ ambient user-manager cgroup fails closed. The fresh-runner fixture also mirrors 
 production package activator's persistent state anchors: a preserved empty root-owned
 `release-control/operation.lock` and the root-owned `runner-scopes` journal directory.
 The preflight validates both before install; the production installer remains forbidden
-from creating or repairing its own operation lock. A root-owned run-specific marker is
-published only after every fixed fixture root is proved absent, so unconditional Actions
-cleanup cannot remove pre-existing host state. This is not a live-service rehearsal. Full
+from creating or repairing its own operation lock. The job does not recursively delete
+fixed root paths afterward: the GitHub-hosted VM is discarded, while the private signing
+key is already removed by its narrowly scoped temporary-directory trap. This avoids
+turning an unconditional cleanup step into authority over pre-existing host state. This is
+not a live-service rehearsal. Full
 installer output is capped at 4 MiB before it reaches the Actions log/artifact
 path; exceeding that ceiling fails the job. The transient service limits the
 launcher and cooperating descendants, but is not a sandbox for the deliberately

@@ -290,19 +290,10 @@ jobs:
           release_root=/usr/local/libexec/grok-proxy/bootstrap-releases
           state_root=/var/lib/grok-proxy
           release_control_root="$state_root/release-control"
-          [[ "${GITHUB_RUN_ID:?}" =~ ^[1-9][0-9]*$ ]]
-          [[ "${GITHUB_RUN_ATTEMPT:?}" =~ ^[1-9][0-9]*$ ]]
-          ownership_marker="/run/grok-bootstrap-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.owned"
-          sudo test ! -e "$ownership_marker"
-          sudo test ! -L "$ownership_marker"
           for path in "$bootstrap_root" "$release_root" "$state_root"; do
             sudo test ! -e "$path"
             sudo test ! -L "$path"
           done
-          printf '%s\n' 'grok-bootstrap-ci-owned-v1' \
-            > "$bootstrap_tmp/ownership-marker"
-          sudo install -o root -g root -m 0400 \
-            "$bootstrap_tmp/ownership-marker" "$ownership_marker"
           sudo install -d -o root -g root -m 0755 "$bootstrap_root" "$release_root"
           sudo install -o root -g root -m 0555 \
             "$native_build/grok-bootstrap" "$bootstrap_root/grok-bootstrap"
@@ -851,74 +842,3 @@ jobs:
             install.log
             install.exit
             bootstrap-preflight.log
-      - name: Remove disposable signed-bootstrap trust fixture
-        if: always()
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_RUN_ID:?}" =~ ^[1-9][0-9]*$ ]]
-          [[ "${GITHUB_RUN_ATTEMPT:?}" =~ ^[1-9][0-9]*$ ]]
-          ownership_marker="/run/grok-bootstrap-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.owned"
-          if sudo test -L "$ownership_marker"; then
-            echo "refusing cleanup through a linked ownership marker" >&2
-            exit 2
-          fi
-          if ! sudo test -e "$ownership_marker"; then
-            echo "disposable Grok fixture was not created; cleanup skipped"
-            exit 0
-          fi
-          if ! sudo /usr/bin/python3 -I -B - "$ownership_marker" <<'PY'
-          import os
-          from pathlib import Path
-          import stat
-          import sys
-
-          expected = b"grok-bootstrap-ci-owned-v1\n"
-          marker = Path(sys.argv[1])
-          descriptor = os.open(
-              marker,
-              os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
-          )
-          try:
-              named = marker.lstat()
-              opened = os.fstat(descriptor)
-              raw = os.read(descriptor, len(expected) + 1)
-              current = marker.lstat()
-              snapshots = {
-                  (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
-                   value.st_gid, value.st_nlink, value.st_size)
-                  for value in (named, opened, current)
-              }
-              if (
-                  len(snapshots) != 1
-                  or not stat.S_ISREG(opened.st_mode)
-                  or (opened.st_uid, opened.st_gid) != (0, 0)
-                  or stat.S_IMODE(opened.st_mode) != 0o400
-                  or opened.st_nlink != 1
-                  or raw != expected
-              ):
-                  raise SystemExit(1)
-          finally:
-              os.close(descriptor)
-          PY
-          then
-            echo "refusing cleanup without the exact ownership marker" >&2
-            exit 2
-          fi
-          for path in \
-            /usr/local/libexec/grok-proxy/bootstrap \
-            /usr/local/libexec/grok-proxy/bootstrap-releases \
-            /var/lib/grok-proxy
-          do
-            if sudo test -L "$path"; then
-              echo "refusing to remove linked disposable bootstrap path: $path" >&2
-              exit 2
-            fi
-            if sudo test -e "$path"; then
-              if sudo /usr/bin/mountpoint -q "$path"; then
-                echo "refusing to remove mounted disposable bootstrap path: $path" >&2
-                exit 2
-              fi
-              sudo rm -rf -- "$path"
-            fi
-          done
-          sudo rm -f -- "$ownership_marker"
