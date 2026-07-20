@@ -288,8 +288,21 @@ jobs:
 
           bootstrap_root=/usr/local/libexec/grok-proxy/bootstrap
           release_root=/usr/local/libexec/grok-proxy/bootstrap-releases
-          sudo test ! -e "$bootstrap_root"
-          sudo test ! -e "$release_root"
+          state_root=/var/lib/grok-proxy
+          release_control_root="$state_root/release-control"
+          [[ "${GITHUB_RUN_ID:?}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT:?}" =~ ^[1-9][0-9]*$ ]]
+          ownership_marker="/run/grok-bootstrap-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.owned"
+          sudo test ! -e "$ownership_marker"
+          sudo test ! -L "$ownership_marker"
+          for path in "$bootstrap_root" "$release_root" "$state_root"; do
+            sudo test ! -e "$path"
+            sudo test ! -L "$path"
+          done
+          printf '%s\n' 'grok-bootstrap-ci-owned-v1' \
+            > "$bootstrap_tmp/ownership-marker"
+          sudo install -o root -g root -m 0400 \
+            "$bootstrap_tmp/ownership-marker" "$ownership_marker"
           sudo install -d -o root -g root -m 0755 "$bootstrap_root" "$release_root"
           sudo install -o root -g root -m 0555 \
             "$native_build/grok-bootstrap" "$bootstrap_root/grok-bootstrap"
@@ -303,6 +316,15 @@ jobs:
           printf '%s\n' "$release_id" > "$bootstrap_tmp/selected-release"
           sudo install -o root -g root -m 0444 \
             "$bootstrap_tmp/selected-release" "$bootstrap_root/selected-release"
+          # Mirror the state anchors created by the production package
+          # activator. The live installer deliberately never creates or
+          # repairs this stable operation-lock inode.
+          sudo install -d -o root -g root -m 0755 \
+            "$state_root" "$release_control_root"
+          sudo install -o root -g root -m 0600 /dev/null \
+            "$release_control_root/operation.lock"
+          sudo install -d -o root -g root -m 0700 \
+            "$release_control_root/runner-scopes"
 
           /usr/bin/python3 - <<'PY' | /usr/bin/python3 -I -B \
             "$GITHUB_WORKSPACE/bin/lib/ci_bounded_tee.py" \
@@ -346,8 +368,25 @@ jobs:
 
           root = Path("/usr/local/libexec/grok-proxy/bootstrap")
           store = Path("/usr/local/libexec/grok-proxy/bootstrap-releases")
+          state_root = Path("/var/lib/grok-proxy")
+          release_control = state_root / "release-control"
+          operation_lock = release_control / "operation.lock"
+          runner_scopes = release_control / "runner-scopes"
           require_directory(root, 0o755)
           require_directory(store, 0o755)
+          require_directory(state_root, 0o755)
+          require_directory(release_control, 0o755)
+          require_directory(runner_scopes, 0o700)
+          operation_lock_info = operation_lock.lstat()
+          if (
+              operation_lock.is_symlink()
+              or not stat.S_ISREG(operation_lock_info.st_mode)
+              or (operation_lock_info.st_uid, operation_lock_info.st_gid) != (0, 0)
+              or stat.S_IMODE(operation_lock_info.st_mode) != 0o600
+              or operation_lock_info.st_nlink != 1
+              or operation_lock_info.st_size != 0
+          ):
+              raise PreflightError("unsafe package-provisioned operation lock")
           binary = root / "grok-bootstrap"
           binary_info = binary.lstat()
           if (
@@ -453,7 +492,9 @@ jobs:
               "case_id": "install.bootstrap.preflight",
               "mutable_source_used": False,
               "native_binary_valid": True,
+              "operation_lock_valid": True,
               "output_limit_bytes": OUTPUT_LIMIT,
+              "runner_scopes_valid": True,
               "schema_version": 1,
               "signed_application_valid": True,
               "signed_dispatcher_status_valid": True,
@@ -622,7 +663,9 @@ jobs:
               and re.fullmatch(r"[0-9a-f]{64}", bootstrap_release_id)
               and preflight.get("capture_backend") == "temporary-files"
               and preflight.get("native_binary_valid") is True
+              and preflight.get("operation_lock_valid") is True
               and preflight.get("output_limit_bytes") == 1024 * 1024
+              and preflight.get("runner_scopes_valid") is True
               and preflight.get("signed_application_valid") is True
               and preflight.get("signed_dispatcher_status_valid") is True
               and preflight.get("mutable_source_used") is False
@@ -812,15 +855,70 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          [[ "${GITHUB_RUN_ID:?}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT:?}" =~ ^[1-9][0-9]*$ ]]
+          ownership_marker="/run/grok-bootstrap-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.owned"
+          if sudo test -L "$ownership_marker"; then
+            echo "refusing cleanup through a linked ownership marker" >&2
+            exit 2
+          fi
+          if ! sudo test -e "$ownership_marker"; then
+            echo "disposable Grok fixture was not created; cleanup skipped"
+            exit 0
+          fi
+          if ! sudo /usr/bin/python3 -I -B - "$ownership_marker" <<'PY'
+          import os
+          from pathlib import Path
+          import stat
+          import sys
+
+          expected = b"grok-bootstrap-ci-owned-v1\n"
+          marker = Path(sys.argv[1])
+          descriptor = os.open(
+              marker,
+              os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+          )
+          try:
+              named = marker.lstat()
+              opened = os.fstat(descriptor)
+              raw = os.read(descriptor, len(expected) + 1)
+              current = marker.lstat()
+              snapshots = {
+                  (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+                   value.st_gid, value.st_nlink, value.st_size)
+                  for value in (named, opened, current)
+              }
+              if (
+                  len(snapshots) != 1
+                  or not stat.S_ISREG(opened.st_mode)
+                  or (opened.st_uid, opened.st_gid) != (0, 0)
+                  or stat.S_IMODE(opened.st_mode) != 0o400
+                  or opened.st_nlink != 1
+                  or raw != expected
+              ):
+                  raise SystemExit(1)
+          finally:
+              os.close(descriptor)
+          PY
+          then
+            echo "refusing cleanup without the exact ownership marker" >&2
+            exit 2
+          fi
           for path in \
             /usr/local/libexec/grok-proxy/bootstrap \
-            /usr/local/libexec/grok-proxy/bootstrap-releases
+            /usr/local/libexec/grok-proxy/bootstrap-releases \
+            /var/lib/grok-proxy
           do
             if sudo test -L "$path"; then
               echo "refusing to remove linked disposable bootstrap path: $path" >&2
               exit 2
             fi
             if sudo test -e "$path"; then
+              if sudo /usr/bin/mountpoint -q "$path"; then
+                echo "refusing to remove mounted disposable bootstrap path: $path" >&2
+                exit 2
+              fi
               sudo rm -rf -- "$path"
             fi
           done
+          sudo rm -f -- "$ownership_marker"

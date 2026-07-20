@@ -536,5 +536,10 @@
 - [x] Add fail-closed helper and workflow regressions for subgroup identity,
   empty parent, required controllers, fallback rejection, environment closure,
   structured evidence, and exit-ledger preservation.
-- [ ] Pass the clean repository gate, push the default branch, and require an
-  exact-commit manual `install-degraded` Actions run to pass before deployment.
+- [x] Run the clean repository gate, push the default branch, and prove the
+  exact delegated parent on the hosted manual lane.
+- [x] Recover the remaining 178-byte failure exactly and identify the distinct
+  omitted package-provisioned `operation.lock` before any cgroup runner starts.
+- [ ] Provision and preflight the disposable package state anchors, rerun the
+  clean gate, and require an exact-commit manual `install-degraded` Actions run
+  to pass before deployment.

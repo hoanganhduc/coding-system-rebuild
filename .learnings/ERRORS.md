@@ -2579,7 +2579,7 @@ fully qualified focused command.
 
 **Logged**: 2026-07-20T10:20:00Z
 **Priority**: high
-**Status**: testing
+**Status**: resolved
 
 ### Summary
 
@@ -2602,14 +2602,19 @@ only those three controllers, closes the environment, and rejects the run
 unless the production predicate selects the transient service's exact direct
 parent. The existing pipeline ledger still preserves the child exit.
 
+The exact hosted rerun proved this direct-parent preflight passed. The same
+178-byte phase-6 fingerprint then recurred before any runner scope was created,
+so this was a necessary production-precondition correction but not the cause
+of that fingerprint; see ERR-20260720-064.
+
 ### Prevention
 
 Exercise schedule/manual-only jobs after changing production-only installer
 preconditions. A cgroup probe must assert the selected parent identity, not
 only that *some* ancestor passes. Keep static workflow coverage for the system
 manager, target identity, delegated subgroup, finite limits, four-value
-environment allowlist, exact-parent preflight, and exit ledger. This entry
-remains in testing until an exact hosted manual run passes.
+environment allowlist, exact-parent preflight, and exit ledger. Do not infer
+that a passed cgroup preflight explains an earlier opaque child error.
 
 ### Metadata
 
@@ -2783,5 +2788,81 @@ documented.
 
 - Reproducible: yes; mode-validation failure only
 - Related Files: `system/grok-proxy/tests/run-isolated.sh`
+
+---
+
+## [ERR-20260720-064] degraded-fixture-omitted-package-operation-lock
+
+**Logged**: 2026-07-20T12:20:00Z
+**Priority**: high
+**Status**: testing
+
+### Summary
+
+The ephemeral signed-bootstrap fixture installed the native verifier, signed
+application, selector, and bootstrap update lock, but did not mirror the
+production package activator's distinct release-control state anchors. The
+live installer intentionally refuses to create or repair the stable
+`/var/lib/grok-proxy/release-control/operation.lock` inode.
+
+### Response
+
+The exact current error line, including its newline, is 178 bytes with SHA-256
+`e4c82359b8159fa41c7ceac62679311a68b6120e508e46ddaf36e9cb1ddf6fdc`,
+matching the hosted artifact byte for byte. The workflow now first proves the
+entire disposable state root is absent, then mirrors the package-owned
+root:root state: mode-0755 release control, an empty single-link mode-0600
+operation lock, and a mode-0700 runner-scope journal. Its preflight validates
+those identities before invoking the installer. Unconditional cleanup is
+authorized only by a root-owned, run-specific marker created after every fixed
+fixture root was proved absent; missing or unsafe markers leave host state
+untouched.
+
+### Prevention
+
+A production bootstrap rehearsal must reproduce both executable trust
+artifacts and package-owned persistent lock/journal anchors. Never weaken the
+installer to auto-create a missing production lock, and never replace or
+truncate an existing lock inode. Keep the hosted gate in testing until the
+exact manual full-install job passes.
+
+### Metadata
+
+- Reproducible: yes; exact error bytes and digest matched the hosted artifact
+- Related Files: `.github/workflows/rehearsal.yml`,
+  `system/grok-proxy/bootstrap/activate_package.py`,
+  `system/grok-proxy/tests/test_bootstrap.py`,
+  `system/grok-proxy/tests/test_release_installer.py`
+
+---
+
+## [ERR-20260720-065] verification-overlay-copied-worktree-git-pointer
+
+**Logged**: 2026-07-20T12:28:00Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+The first clean-candidate overlay excluded `.git/` as a directory only. The
+source was a linked worktree whose `.git` is a regular pointer file, so rsync
+copied that pointer over the disposable clone's ordinary `.git` directory and
+the leak gate correctly rejected its absolute home path.
+
+### Response
+
+No product test ran or failed. Recreate the disposable clone and exclude the
+name `.git` regardless of file type before rerunning the unchanged gate.
+
+### Prevention
+
+When normalizing from a possible linked worktree, use an exclusion that matches
+both `.git` files and `.git` directories, then assert the candidate `.git` is a
+directory before verification.
+
+### Metadata
+
+- Reproducible: yes; verification-fixture construction only
+- Related Files: `.git`, `Makefile`
 
 ---
