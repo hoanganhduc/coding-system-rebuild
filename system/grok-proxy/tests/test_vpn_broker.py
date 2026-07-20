@@ -103,6 +103,7 @@ class FakeBroker(module.Broker):
         self.stop_failure = False
         self.spawned_helper: Path | None = None
         self.current_vpn: dict[str, object] | None = None
+        self.invoked_guards: list[Path] = []
 
     def _relay_pidfile(self, request):
         del request
@@ -177,7 +178,8 @@ class FakeBroker(module.Broker):
         vpn,
         relay,
     ):
-        del broker_guard, phase, relay
+        self.invoked_guards.append(Path(broker_guard))
+        del phase, relay
         result = self.runner(
             [str(helper), operation],
             stdin=subprocess.DEVNULL,
@@ -265,6 +267,11 @@ class BrokerTests(unittest.TestCase):
             "operation": "install",
             "selection_phase": "READY",
             "evidence_sha256": "1" * 64,
+            "target_uid": self.uid,
+            "target_gid": os.getgid(),
+            "user_root": str(base / "home/.local/lib/grok-proxy"),
+            "root_root": str(base),
+            "root_control": str(selection.parent),
         }), encoding="utf-8")
         selection.chmod(0o444)
         (selection.parent / "install.lock").write_bytes(b"")
@@ -306,6 +313,163 @@ class BrokerTests(unittest.TestCase):
             port,
             **policy,
         )
+
+    def test_bootstrap_recovery_authority_retains_every_exact_lock(self) -> None:
+        target_release_id = "b" * 64
+        target = self.layout.releases / target_release_id
+        target.mkdir()
+        entries: list[dict[str, object]] = []
+        for role, name in self.root_files.items():
+            destination = target / name
+            source = ROOT / "vpn-broker" if role == "broker" else self.release / name
+            shutil.copyfile(source, destination)
+            destination.chmod(0o444 if role == "sanitizer" else 0o555)
+            payload = destination.read_bytes()
+            entries.append(
+                {
+                    "role": role,
+                    "path": name,
+                    "mode": "0444" if role == "sanitizer" else "0555",
+                    "size": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            )
+        manifest = target / "release.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "kind": "root",
+                    "release_id": target_release_id,
+                    "files": entries,
+                }
+            ),
+            encoding="ascii",
+        )
+        manifest.chmod(0o444)
+        target.chmod(0o555)
+
+        home = self.base / "home"
+        control = home / ".local/state/grok-proxy/control"
+        legacy_parent = home / "grok-proxy"
+        control.mkdir(parents=True, mode=0o700)
+        legacy_parent.mkdir(mode=0o700)
+        authorities = {
+            "GROK_RELEASE_CANARY_FD": self.layout.selection.parent
+            / "canary-auth.lock",
+            "GROK_BOOTSTRAP_RECOVERY_OPERATION_FD": self.layout.selection.parent
+            / "operation.lock",
+            "GROK_BOOTSTRAP_RECOVERY_BOOTSTRAP_LOCK_FD": control
+            / "bootstrap.lock",
+            "GROK_BOOTSTRAP_RECOVERY_COMPATIBILITY_LOCK_FD": control
+            / "compatibility.lock",
+            "GROK_BOOTSTRAP_RECOVERY_LEGACY_LOCK_FD": legacy_parent
+            / ".grok-remote.lock",
+        }
+        for path in authorities.values():
+            path.write_bytes(b"")
+            path.chmod(0o600)
+
+        parent_fds: list[int] = []
+        inherited_fds: list[int] = []
+        environment = {
+            "GROK_BOOTSTRAP_RECOVERY": "1",
+            "GROK_BOOTSTRAP_RECOVERY_TARGET_RELEASE_ID": target_release_id,
+            "GROK_TESTING": "1",
+        }
+        try:
+            for name, path in authorities.items():
+                parent_fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+                if name != "GROK_RELEASE_CANARY_FD":
+                    fcntl.flock(parent_fd, fcntl.LOCK_EX)
+                inherited_fd = os.dup(parent_fd)
+                parent_fds.append(parent_fd)
+                inherited_fds.append(inherited_fd)
+                environment[name] = str(inherited_fd)
+
+            with mock.patch.object(module, "__file__", str(target / "vpn-broker")):
+                guard, retained = module._authorize_bootstrap_recovery(
+                    self.layout,
+                    self.handoff_request("recover"),
+                    environment,
+                    expected_root_uid=self.uid,
+                    expected_root_gid=os.getgid(),
+                )
+            self.assertEqual(guard, target / "vpn-broker")
+            self.assertEqual(set(retained), set(inherited_fds))
+
+            for descriptor in parent_fds:
+                os.close(descriptor)
+            parent_fds.clear()
+            for name, path in authorities.items():
+                if name == "GROK_RELEASE_CANARY_FD":
+                    continue
+                probe = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(probe)
+
+            for descriptor in retained:
+                os.close(descriptor)
+            inherited_fds.clear()
+            for name, path in authorities.items():
+                if name == "GROK_RELEASE_CANARY_FD":
+                    continue
+                probe = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(probe, fcntl.LOCK_UN)
+                finally:
+                    os.close(probe)
+        finally:
+            for descriptor in (*parent_fds, *inherited_fds):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    def test_bootstrap_recovery_separates_authority_pid_from_ledger_uid(self) -> None:
+        authority = module.Request(
+            operation="recover",
+            mode="compatibility-handoff",
+            caller_uid=self.uid + 1,
+            release_id=self.release_id,
+            owner_epoch="dead-supervisor-owner",
+            generation=1,
+            listen_port=1080,
+            caller_pid=os.getpid(),
+            caller_start_ticks=self.broker._proc_start_ticks(os.getpid()),
+            caller_boot_id=self.broker._boot_id(),
+            deadline_monotonic_ns=time.monotonic_ns() + 1_000_000_000,
+            caller_process_uid=self.uid,
+        )
+        authority.validate()
+        self.assertTrue(self.broker._caller_matches(authority))
+        without_override = module.replace(authority, caller_process_uid=None)
+        self.assertFalse(self.broker._caller_matches(without_override))
+        ledger = {
+            "caller_uid": self.uid + 1,
+            "release_id": self.release_id,
+            "owner_epoch": f"compat-{self.uid + 1}",
+            "generation": 0,
+            "listen_port": 1080,
+            "contract_digest": "0" * 64,
+            "vpn_policy": {
+                "max_tries": 1,
+                "ranking_version": "vpngate-score-uptime-v1",
+                "countries": [],
+                "prefer_countries": [],
+                "blocked_countries": [],
+            },
+        }
+        cleanup = self.broker._request_from_ledger(
+            ledger, "recover", authority
+        )
+        self.assertEqual(cleanup.caller_uid, self.uid + 1)
+        self.assertEqual(cleanup.caller_process_uid, self.uid)
+        self.assertTrue(self.broker._caller_matches(cleanup))
 
     def test_roleless_root_runtime_is_verified_without_becoming_a_helper(self) -> None:
         helpers = self.broker._helpers(self.release_id, self.root_files)
@@ -693,6 +857,19 @@ class BrokerTests(unittest.TestCase):
         fence.chmod(0o600)
         return fence
 
+    def write_dead_recovering_fence(self, home: Path, owner: str) -> Path:
+        fence = self.write_fence(home, owner)
+        record = self.fence_record(owner)
+        record.update(
+            {
+                "boot_id": "00000000-0000-0000-0000-000000000000",
+                "phase": "RECOVERING",
+            }
+        )
+        fence.write_text(json.dumps(record), encoding="ascii")
+        fence.chmod(0o600)
+        return fence
+
     def execute_handoff(self, operation: str = "migrate-legacy"):
         home = self.base / "handoff-home"
         self.write_fence(home, "handoff-test-epoch")
@@ -744,6 +921,166 @@ class BrokerTests(unittest.TestCase):
                     self.execute_handoff()
                 self.assertTrue(work.exists())
                 shutil.rmtree(work)
+
+    def test_public_handoff_recover_cannot_retire_compatibility_owner(self) -> None:
+        with mock.patch.object(
+            self.broker, "_home", return_value=self.base / "compat-start-home"
+        ):
+            self.broker.execute(self.request("up", port=1080))
+        home = self.base / "handoff-recovery-home"
+        fence = self.write_dead_recovering_fence(
+            home, "handoff-test-epoch"
+        )
+
+        with mock.patch.object(self.broker, "_home", return_value=home):
+            with self.assertRaisesRegex(
+                module.BrokerError, "requires signed bootstrap authority"
+            ):
+                self.broker.execute(self.handoff_request("recover"))
+
+        self.assertTrue(self.layout.ledger.exists())
+        self.assertTrue(self.runner.tun)
+        self.assertTrue(self.broker.relay_running)
+        self.assertTrue(fence.exists())
+
+    def test_bootstrap_handoff_cleanup_executes_only_candidate_broker_guard(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            self.broker, "_home", return_value=self.base / "bootstrap-start-home"
+        ):
+            self.broker.execute(self.request("up", port=1080))
+        self.broker.invoked_guards.clear()
+        home = self.base / "bootstrap-recovery-home"
+        self.write_dead_recovering_fence(home, "handoff-test-epoch")
+        with mock.patch.object(self.broker, "_home", return_value=home):
+            result = self.broker.execute(
+                self.handoff_request("recover"),
+                recovery_broker_guard=ROOT / "vpn-broker",
+            )
+        self.assertTrue(result["recovered"])
+        self.assertEqual(self.broker.invoked_guards, [ROOT / "vpn-broker"])
+        self.assertNotEqual(
+            self.broker.invoked_guards[0], self.release / self.root_files["broker"]
+        )
+
+    def test_handoff_recover_requires_dead_recovering_fence(self) -> None:
+        with mock.patch.object(
+            self.broker, "_home", return_value=self.base / "compat-live-start-home"
+        ):
+            self.broker.execute(self.request("up", port=1080))
+        home = self.base / "handoff-live-fence-home"
+        fence = self.write_fence(home, "handoff-test-epoch")
+        request = self.handoff_request("recover")
+        with mock.patch.object(self.broker, "_home", return_value=home):
+            with self.assertRaisesRegex(module.BrokerError, "RECOVERING"):
+                self.broker.execute(request)
+            record = self.fence_record("handoff-test-epoch")
+            record["phase"] = "RECOVERING"
+            fence.write_text(json.dumps(record), encoding="ascii")
+            fence.chmod(0o600)
+            with self.assertRaisesRegex(module.BrokerError, "still live"):
+                self.broker.execute(request)
+        self.assertTrue(self.layout.ledger.exists())
+        self.assertTrue(self.runner.tun)
+
+    def test_handoff_recover_rejects_noncompatibility_ledger(self) -> None:
+        home = self.base / "handoff-wrong-ledger-home"
+        supervisor = self.supervisor_request("up", port=1080)
+        self.write_fence(home, supervisor.owner_epoch)
+        with mock.patch.object(self.broker, "_home", return_value=home):
+            self.broker.execute(supervisor)
+        self.write_dead_recovering_fence(home, "handoff-test-epoch")
+        with mock.patch.object(self.broker, "_home", return_value=home):
+            with self.assertRaisesRegex(module.BrokerError, "exact legacy owner"):
+                self.broker.execute(self.handoff_request("recover"))
+        ledger = json.loads(self.layout.ledger.read_text(encoding="ascii"))
+        self.assertEqual(ledger["owner_epoch"], supervisor.owner_epoch)
+        self.assertEqual(ledger["phase"], "ACTIVE")
+
+    def test_handoff_recover_failure_retains_failed_ledger_and_fence(self) -> None:
+        with mock.patch.object(
+            self.broker, "_home", return_value=self.base / "compat-fail-start-home"
+        ):
+            self.broker.execute(self.request("up", port=1080))
+        home = self.base / "handoff-failed-recovery-home"
+        fence = self.write_dead_recovering_fence(
+            home, "handoff-test-epoch"
+        )
+        self.broker.stop_failure = True
+        with mock.patch.object(self.broker, "_home", return_value=home):
+            with self.assertRaises(module.BrokerError):
+                self.broker.execute(
+                    self.handoff_request("recover"),
+                    recovery_broker_guard=ROOT / "vpn-broker",
+                )
+        ledger = json.loads(self.layout.ledger.read_text(encoding="ascii"))
+        self.assertEqual(ledger["owner_epoch"], f"compat-{self.uid}")
+        self.assertEqual(ledger["phase"], "FAILED")
+        self.assertTrue(fence.exists())
+
+    def test_handoff_recover_retry_durably_syncs_an_absent_ledger(self) -> None:
+        with mock.patch.object(
+            self.broker, "_home", return_value=self.base / "compat-fsync-start-home"
+        ):
+            self.broker.execute(self.request("up", port=1080))
+        home = self.base / "handoff-fsync-recovery-home"
+        fence = self.write_dead_recovering_fence(
+            home, "handoff-test-epoch"
+        )
+        request = self.handoff_request("recover")
+        real_fsync = module._fsync_directory
+        failed = False
+
+        def fail_first_absence(path: Path) -> None:
+            nonlocal failed
+            if (
+                not failed
+                and path == self.layout.ledger.parent
+                and not self.layout.ledger.exists()
+            ):
+                failed = True
+                raise OSError("injected ledger-parent fsync failure")
+            real_fsync(path)
+
+        with (
+            mock.patch.object(self.broker, "_home", return_value=home),
+            mock.patch.object(
+                module, "_fsync_directory", side_effect=fail_first_absence
+            ),
+            self.assertRaisesRegex(OSError, "injected ledger-parent"),
+        ):
+            self.broker.execute(
+                request,
+                recovery_broker_guard=ROOT / "vpn-broker",
+            )
+
+        self.assertTrue(failed)
+        self.assertFalse(self.layout.ledger.exists())
+        absent_syncs = 0
+
+        def record_absence(path: Path) -> None:
+            nonlocal absent_syncs
+            if (
+                path == self.layout.ledger.parent
+                and not self.layout.ledger.exists()
+            ):
+                absent_syncs += 1
+            real_fsync(path)
+
+        with (
+            mock.patch.object(self.broker, "_home", return_value=home),
+            mock.patch.object(
+                module, "_fsync_directory", side_effect=record_absence
+            ),
+        ):
+            result = self.broker.execute(
+                request,
+                recovery_broker_guard=ROOT / "vpn-broker",
+            )
+        self.assertFalse(result["recovered"])
+        self.assertEqual(absent_syncs, 1)
+        self.assertTrue(fence.exists())
 
     def test_installer_bootstrap_migration_is_install_bound_and_idempotent(self) -> None:
         source_release = "b" * 64
@@ -1179,7 +1516,11 @@ class BrokerTests(unittest.TestCase):
         fake_broker.write_text(
             "#!/bin/bash\n"
             f"printf '%s\\0' \"$@\" > {str(argv_record)!r}\n"
-            "printf '{\"ok\":true}\\n'\n",
+            "if [[ \"${1:-}\" == --operation && \"${2:-}\" == status ]]; then\n"
+            "  printf '%s\\n' '{\"ok\":true,\"active\":false,\"namespace_alive\":false,\"tun_alive\":false,\"host_tun_alive\":false,\"vpn_alive\":false,\"relay_alive\":false,\"relay_pid\":null,\"root_artifact_residue\":false,\"ledger\":null}'\n"
+            "else\n"
+            "  printf '{\"ok\":true}\\n'\n"
+            "fi\n",
             encoding="utf-8",
         )
         fake_broker.chmod(0o755)
@@ -1218,6 +1559,74 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(parsed.operation, "migrate-legacy")
         self.assertEqual(parsed.mode, "compatibility-handoff")
 
+        recovery_environment = dict(environment)
+        recovery_environment["GROK_HANDOFF_RECOVERY_MODE"] = "1"
+        recovery_result = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                f'. {str(release / "egress.sh")!r}; vpn_broker_call recover 1 >/dev/null',
+            ],
+            text=True,
+            capture_output=True,
+            env=recovery_environment,
+            timeout=10,
+            check=False,
+        )
+        self.assertNotEqual(recovery_result.returncode, 0)
+
+        ordinary_result = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                f'. {str(release / "egress.sh")!r}; vpn_broker_call recover >/dev/null',
+            ],
+            text=True,
+            capture_output=True,
+            env=environment,
+            timeout=10,
+            check=False,
+        )
+        self.assertNotEqual(ordinary_result.returncode, 0)
+
+        status_result = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                f'. {str(release / "egress.sh")!r}; vpn_broker_call status >/dev/null',
+            ],
+            text=True,
+            capture_output=True,
+            env=environment,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        values = argv_record.read_bytes().rstrip(b"\0").decode("ascii").split("\0")
+        parsed = module._parser().parse_args(values)
+        self.assertEqual(parsed.operation, "status")
+        self.assertEqual(parsed.mode, "supervisor")
+
+        handoff_vpn_down = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                f'. {str(release / "egress.sh")!r}; vpn_down',
+            ],
+            text=True,
+            capture_output=True,
+            env=environment,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(
+            handoff_vpn_down.returncode, 0, handoff_vpn_down.stderr
+        )
+        values = argv_record.read_bytes().rstrip(b"\0").decode("ascii").split("\0")
+        parsed = module._parser().parse_args(values)
+        self.assertEqual(parsed.operation, "status")
+        self.assertEqual(parsed.mode, "supervisor")
+
         order = self.base / "handoff-order"
         shell = f'''
 . {str(release / "egress.sh")!r}
@@ -1229,12 +1638,17 @@ assert_legacy_lock_held() {{
 vpn_broker_call() {{
   assert_legacy_lock_held || return 91
   printf 'broker:%s\\n' "$1" >> {str(order)!r}
-  [[ "$1" != status ]] || printf '%s\\n' '{{"ok":true,"active":false,"namespace_alive":false,"tun_alive":false,"host_tun_alive":false,"vpn_alive":false,"relay_alive":false,"relay_pid":null,"root_artifact_residue":false,"ledger":null}}'
+  case "$1" in
+    migrate-legacy) ;;
+    status) printf '%s\\n' '{{"ok":true,"active":false,"namespace_alive":false,"tun_alive":false,"host_tun_alive":false,"vpn_alive":false,"relay_alive":false,"relay_pid":null,"root_artifact_residue":false,"ledger":null}}' ;;
+    *) return 94 ;;
+  esac
 }}
 local_down() {{ assert_legacy_lock_held || return 92; printf 'local-down\\n' >> {str(order)!r}; }}
-clear_active() {{ assert_legacy_lock_held || return 93; printf 'clear\\n' >> {str(order)!r}; }}
+clear_active() {{ assert_legacy_lock_held || return 93; printf 'clear\\n' >> {str(order)!r}; rm -f "$STATE"; }}
 port_owner_pid() {{ return 0; }}
 port_listening() {{ return 1; }}
+begin_recovery_transition
 compatibility_handoff_command
 '''
         result = subprocess.run(
@@ -1251,8 +1665,11 @@ compatibility_handoff_command
             [
                 "broker:migrate-legacy",
                 "local-down",
+                "broker:status",
+                "local-down",
+                "broker:status",
+                "clear",
                 "broker:migrate-legacy",
-                "broker:recover",
                 "broker:status",
                 "clear",
             ],
@@ -1841,7 +2258,9 @@ compatibility_handoff_command
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(
             effects.read_text(encoding="ascii").splitlines(),
-            ["migrate-legacy", "migrate-legacy", "recover", "status"],
+            [
+                "migrate-legacy", "migrate-legacy", "status",
+            ],
         )
 
     def test_owner_arbitration_idempotence_and_exact_cleanup(self) -> None:

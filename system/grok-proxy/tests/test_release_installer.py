@@ -783,6 +783,11 @@ class ReleaseInstallerTests(unittest.TestCase):
             (installed, ["install"], "installed"),
             (
                 installed,
+                ["recover-compatibility-ledger", "--apply"],
+                "installed",
+            ),
+            (
+                installed,
                 ["status", "--source", str(installed.parent)],
                 "explicit",
             ),
@@ -8428,6 +8433,152 @@ os._exit(0)
                 broker._helper(release_id),
                 layout.root_releases / release_id / "vpngate-connect.sh",
             )
+
+    def test_signed_bootstrap_recovery_stages_only_root_and_preserves_authority(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            fixture, _boot_id, _pid = write_proc_fixture(base / "fixture-prefix")
+            descriptor = os.open(
+                fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            )
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            installer, layout, source = make_installer(
+                base / "install", proc_authority=authority
+            )
+            selected_release = installer.install().release_id
+            write_source(source, "v2")
+            target_release = installer.plan_release().release_id
+            self.assertNotEqual(target_release, selected_release)
+
+            layout.multi_control.mkdir(parents=True, mode=0o700, exist_ok=True)
+            layout.multi_control.chmod(0o700)
+            for name in ("bootstrap.lock", "compatibility.lock"):
+                lock = layout.multi_control / name
+                lock.write_bytes(b"")
+                lock.chmod(0o600)
+            legacy = layout.user_root.parents[2] / "grok-proxy"
+            legacy.mkdir(mode=0o700, exist_ok=True)
+            legacy.chmod(0o700)
+            legacy_lock = legacy / ".grok-remote.lock"
+            legacy_lock.write_bytes(b"")
+            legacy_lock.chmod(0o600)
+            fence = {
+                "schema_version": release_installer.CONTROL_SCHEMA_VERSION,
+                "release_id": selected_release,
+                "owner_epoch": "dead-supervisor-owner",
+                "pid": 2_147_483_647,
+                "pid_start_ticks": 1,
+                "boot_id": "00000000-0000-0000-0000-000000000000",
+                "phase": "RECOVERING",
+            }
+            layout.recovery_fence.write_text(
+                json.dumps(fence, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="ascii",
+            )
+            layout.recovery_fence.chmod(0o600)
+
+            selected_before = layout.selected.read_bytes()
+            root_selected_before = layout.root_selected.read_bytes()
+            current_before = os.readlink(layout.current)
+            root_current_before = os.readlink(layout.root_current)
+            fence_before = layout.recovery_fence.read_bytes()
+            lock_paths = (
+                layout.multi_control / "bootstrap.lock",
+                layout.multi_control / "compatibility.lock",
+                legacy_lock,
+            )
+            authority_paths = (*lock_paths, layout.recovery_fence, layout.selected)
+            authority_inodes = tuple(
+                path.stat().st_ino for path in authority_paths
+            )
+            fence_drift = fence_before.rstrip() + b" \n"
+            selected_drift = selected_before.rstrip() + b" \n"
+
+            def committed_recovery(*_args, **_kwargs):
+                # Model target-UID pathname replacement after the child has
+                # authenticated every inherited descriptor but before it
+                # reports the already-committed root cleanup.
+                for path in lock_paths:
+                    payload = path.read_bytes()
+                    path.unlink()
+                    path.write_bytes(payload)
+                    path.chmod(0o600)
+                layout.recovery_fence.unlink()
+                layout.recovery_fence.write_bytes(fence_drift)
+                layout.recovery_fence.chmod(0o600)
+                layout.selected.unlink()
+                layout.selected.write_bytes(selected_drift)
+                layout.selected.chmod(0o444)
+                return release_installer.SmokeResult(
+                    0,
+                    b'{"active":false,"ok":true,"recovered":true}\n',
+                    b"",
+                    1,
+                )
+
+            with mock.patch.object(
+                installer, "_run_gate_smoke", side_effect=committed_recovery
+            ) as run_gate:
+                result = installer.recover_compatibility_ledger()
+
+            self.assertTrue(result["applied"])
+            self.assertTrue(result["root_recovered"])
+            self.assertTrue(result["public_recovery_required"])
+            self.assertEqual(result["selected_release_id"], selected_release)
+            self.assertEqual(result["target_release_id"], target_release)
+            self.assertTrue((layout.root_releases / target_release).is_dir())
+            self.assertFalse((layout.user_releases / target_release).exists())
+            self.assertEqual(layout.selected.read_bytes(), selected_drift)
+            self.assertEqual(layout.recovery_fence.read_bytes(), fence_drift)
+            self.assertEqual(layout.root_selected.read_bytes(), root_selected_before)
+            self.assertEqual(os.readlink(layout.current), current_before)
+            self.assertEqual(os.readlink(layout.root_current), root_current_before)
+            self.assertNotEqual(
+                tuple(path.stat().st_ino for path in authority_paths),
+                authority_inodes,
+            )
+            self.assertEqual(run_gate.call_count, 1)
+            for call in run_gate.call_args_list:
+                self.assertEqual(
+                    call.args[0],
+                    layout.root_releases / target_release / "vpn-broker",
+                )
+                self.assertEqual(
+                    set(call.kwargs["bootstrap_recovery_fds"]),
+                    {"operation", "bootstrap", "compatibility", "legacy"},
+                )
+                self.assertEqual(
+                    call.kwargs["bootstrap_recovery_target"], target_release
+                )
+
+    def test_signed_bootstrap_recovery_refuses_busy_stable_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, layout, _source = make_installer(Path(td))
+            layout.multi_control.mkdir(parents=True, mode=0o700)
+            layout.multi_control.chmod(0o700)
+            locks = []
+            for name in ("bootstrap.lock", "compatibility.lock"):
+                path = layout.multi_control / name
+                path.write_bytes(b"")
+                path.chmod(0o600)
+                locks.append(path)
+            held = os.open(locks[0], os.O_RDWR | os.O_CLOEXEC)
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                with self.assertRaisesRegex(
+                    release_installer.ReleaseError,
+                    "stable recovery lock is already held: bootstrap.lock",
+                ):
+                    with installer._offline_recovery_locks():
+                        self.fail("busy stable recovery lock was accepted")
+            finally:
+                fcntl.flock(held, fcntl.LOCK_UN)
+                os.close(held)
 
     def test_switch_refuses_broker_ledger_fence_and_live_epoch_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as td:

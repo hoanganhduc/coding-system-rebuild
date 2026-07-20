@@ -178,14 +178,30 @@ different `install` until the deny is cleared.
 Older interrupted targets may lack the authenticated legacy-migration broker
 endpoint. Current `resume` can still converge them only after root inventory
 proves the fixed legacy pathname absent. If `/var/lib/grok-vpngate` still
-exists, stop: do not run `resume`, and do not delete or move it ad hoc. This
-guide does not define a quarantine operation, and the public warm-handoff
-command is nonmutating. If a separately authorized and reviewed host-specific
-procedure has already made that exact pathname absent while retaining an
-independently verified root-only archive, `resume` rechecks every OpenVPN
-process, broker ledger, namespace, tun, listener, multi-session fence,
-workspace, reserved cgroup, and root inventory and fails closed on residue.
-Retain the archive through qualification, rollback, and reinstall.
+exists with an exact canonical compatibility ledger and a dead selected-release
+`RECOVERING` fence, do not delete or move it ad hoc. Use only the selected
+signed application's parameter-free rescue:
+
+```bash
+GROK_BOOTSTRAP=/usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap
+sudo -n -- "$GROK_BOOTSTRAP" --release-dir "$SIGNED_RELEASE_DIR" -- \
+  recover-compatibility-ledger --apply
+```
+
+Require `public_recovery_required:true`, unchanged root/user selectors, and an
+unchanged fence. The rescue stages only the signed candidate root release and
+retires only the exact target user's generation-zero compatibility root ledger;
+the authenticated broker result is its root commit point. Public handoff has no
+destructive ledger authority, and target-user pathname replacement after that
+commit cannot turn completed cleanup into a reported failure. The rescue has no
+force option and cannot be invoked from an installed release. Next
+run `env -u GROK_MULTI_SESSION grok-remote recover` so the old selected public
+transaction clears its own user state and fence. Only after that succeeds may
+the same signed application run `install --apply`. Any other residue still
+requires manual investigation rather than deletion. Release recovery rechecks
+every OpenVPN process, broker ledger, namespace, tun, listener, multi-session
+fence, workspace, reserved cgroup, and root inventory and fails closed on
+ambiguity.
 
 After `resume`, run `status` again and require `rollback_denied: false`, matching
 target root/user release IDs, `active_release_valid: true`,

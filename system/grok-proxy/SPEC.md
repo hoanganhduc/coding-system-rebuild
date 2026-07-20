@@ -100,6 +100,18 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   absent or exact `0`/`1` mode so dead state can be reconciled during a durable
   install/rollback deny. A present nonliteral mode remains compatibility and
   receives neither managed recovery nor deny-bypass authority.
+- Orphaned compatibility VPN recovery: only the authenticated signed-bootstrap
+  package may retire a root ledger, while it owns the root operation lock, both
+  stable user exclusion locks, and the historical singleton lock by exact
+  inherited descriptors. The immutable candidate broker independently binds an
+  exact dead `RECOVERING` fence to the selected release and target UID, and the
+  ledger must be the canonical `compat-<uid>` generation-zero, port-1080,
+  zero-contract compatibility owner. Cleanup identities come only from that
+  root-owned ledger and the selected immutable helper manifest. Any live,
+  mismatched, malformed, supervisor-owned, or incompletely cleaned state keeps
+  both ledger and fence and fails closed. Public `grok-remote recover` remains
+  root-nonmutating and can finish only after the signed bootstrap has committed
+  root cleanup; there is no force option.
 - Control socket: bounded JSON records over mode-`0600` Unix
   `SOCK_SEQPACKET` in a verified mode-`0700` runtime directory.
 - Stable production state: the passwd account home at
@@ -173,8 +185,24 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   in-place rotation is unsupported until an explicit bounded multi-key/new-ID
   migration is implemented.
   Candidate source and ordinary release installation cannot replace them.
-- Installer lanes: signed bootstrap applications may plan/install/rollback and
-  recover release publication. Post-install qualification, promotion, profile
+- Installer lanes: signed bootstrap applications may plan/install/rollback,
+  recover release publication, and run the closed parameter-free one-time
+  `recover-compatibility-ledger --apply` rescue. The rescue owns the
+  package-preserved operation lock and both compatibility singleton locks,
+  proves an exact dead `RECOVERING` fence, publishes only the signed
+  candidate's immutable root release without selecting it, and invokes that
+  candidate broker through inherited descriptor authorities. The candidate
+  broker may use the old selected immutable helper bytes bound by the old
+  ledger, but never executes the old broker implementation. It removes only
+  exact root compatibility resources and deliberately leaves user state and
+  the fence for the installed public `grok-remote recover` transaction. It
+  treats the authenticated broker's successful cleanup result as the root
+  commit point: target-user replacement of cooperative lock or fence pathnames
+  afterward cannot convert committed cleanup into a reported failure. Public
+  handoff has no destructive compatibility-ledger operation and therefore
+  cannot exploit a replacement lock domain. It accepts no caller paths,
+  release IDs, PIDs, resource identities, or force
+  controls and is unavailable from the installed lane. Post-install qualification, promotion, profile
   activation, and read-only status run only from the concrete root-selected
   immutable release. Installed commands reject caller `--source`, `--home`, and
   `--prefix`; prefix tests use only their inherited descriptor-bound proc

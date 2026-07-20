@@ -351,6 +351,11 @@ DIRECT_ADMISSION_PRODUCTION_BUNDLES = frozenset(
             "6af111e4b015016168e38d8d61257e3053e98f906ea8fb8b10d5c520dc6a90a1",
             "57d7c1b12d6f005ef6519403afe0259963542a3d1cb896b973ea7434c948ef0f",
         ),
+        (
+            "1c45779924a7ce462bb6f904f15e56932772b651cf5b00eef9bc3a2062328f82",
+            "5898d5d8002ed8dfb3b7d72dbba929a046b955fcb4f09ee7eb4281928f0106b3",
+            "57d7c1b12d6f005ef6519403afe0259963542a3d1cb896b973ea7434c948ef0f",
+        ),
     }
 )
 # Compatibility index for callers that enumerate the fixed path set.  Bundle
@@ -3827,7 +3832,7 @@ class ReleaseInstaller:
                 _assert_installed_release_authority(
                     self, self.installed_release_id
                 )
-            yield
+            yield fd
         finally:
             try:
                 if locked:
@@ -7700,15 +7705,19 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         return prepare
 
     @contextmanager
-    def _legacy_singleton_locked(self):
-        """Hold the stable compatibility lock across installer migration."""
+    def _legacy_singleton_locked(
+        self,
+        *,
+        recovery_committed: Callable[[], bool] | None = None,
+    ):
+        """Hold the historical singleton lock across installer migration."""
 
         parent = self.layout.user_root.parents[2] / "grok-proxy"
         parent_info = _lstat(parent)
         if parent_info is None:
             # A fresh account with no compatibility tree has no legacy lock
             # identity or legacy shell capable of recreating that tree.
-            yield
+            yield None
             return
         directory_flags = (
             os.O_RDONLY
@@ -7791,28 +7800,114 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             os.fsync(lock_fd)
             if created:
                 os.fsync(parent_fd)
-            yield
-            current = os.fstat(lock_fd)
-            named = os.stat(
-                ".grok-remote.lock", dir_fd=parent_fd, follow_symlinks=False
-            )
-            if (
-                not stat.S_ISREG(current.st_mode)
-                or current.st_uid != self.layout.target_uid
-                or current.st_gid != self.layout.target_gid
-                or stat.S_IMODE(current.st_mode) != 0o600
-                or current.st_size != 0
-                or current.st_nlink != 1
-                or (named.st_dev, named.st_ino)
-                != (current.st_dev, current.st_ino)
-            ):
-                raise ReleaseError("legacy singleton lock changed while held")
+            yield lock_fd
+            if recovery_committed is None or not recovery_committed():
+                current = os.fstat(lock_fd)
+                named = os.stat(
+                    ".grok-remote.lock", dir_fd=parent_fd, follow_symlinks=False
+                )
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or current.st_uid != self.layout.target_uid
+                    or current.st_gid != self.layout.target_gid
+                    or stat.S_IMODE(current.st_mode) != 0o600
+                    or current.st_size != 0
+                    or current.st_nlink != 1
+                    or (named.st_dev, named.st_ino)
+                    != (current.st_dev, current.st_ino)
+                ):
+                    raise ReleaseError("legacy singleton lock changed while held")
         finally:
             if lock_fd >= 0:
                 if locked:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 os.close(lock_fd)
             os.close(parent_fd)
+
+    @contextmanager
+    def _offline_recovery_locks(
+        self,
+        *,
+        recovery_committed: Callable[[], bool] | None = None,
+    ):
+        """Own both stable user recovery domains without creating authority."""
+
+        control = self.layout.multi_control
+        control_fd = _open_verified_directory(
+            control,
+            0o700,
+            self.layout.target_uid,
+            self.layout.target_gid,
+        )
+        descriptors: dict[str, int] = {}
+        identities: dict[str, os.stat_result] = {}
+        try:
+            for name in ("bootstrap.lock", "compatibility.lock"):
+                flags = (
+                    os.O_RDWR
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                named = os.stat(
+                    name, dir_fd=control_fd, follow_symlinks=False
+                )
+                descriptor = os.open(name, flags, dir_fd=control_fd)
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(named.st_mode)
+                    or not stat.S_ISREG(opened.st_mode)
+                    or (named.st_dev, named.st_ino)
+                    != (opened.st_dev, opened.st_ino)
+                    or (opened.st_uid, opened.st_gid)
+                    != (self.layout.target_uid, self.layout.target_gid)
+                    or stat.S_IMODE(opened.st_mode) != 0o600
+                    or opened.st_nlink != 1
+                    or opened.st_size != 0
+                ):
+                    os.close(descriptor)
+                    raise ReleaseError(
+                        f"stable recovery lock is unsafe: {name}"
+                    )
+                try:
+                    fcntl.flock(
+                        descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+                except BlockingIOError as exc:
+                    os.close(descriptor)
+                    raise ReleaseError(
+                        f"stable recovery lock is already held: {name}"
+                    ) from exc
+                descriptors[name] = descriptor
+                identities[name] = opened
+            yield descriptors
+            if recovery_committed is None or not recovery_committed():
+                for name, descriptor in descriptors.items():
+                    current = os.fstat(descriptor)
+                    named = os.stat(
+                        name, dir_fd=control_fd, follow_symlinks=False
+                    )
+                    original = identities[name]
+                    if (
+                        (current.st_dev, current.st_ino)
+                        != (original.st_dev, original.st_ino)
+                        or (named.st_dev, named.st_ino)
+                        != (original.st_dev, original.st_ino)
+                        or (current.st_uid, current.st_gid)
+                        != (self.layout.target_uid, self.layout.target_gid)
+                        or stat.S_IMODE(current.st_mode) != 0o600
+                        or current.st_nlink != 1
+                        or current.st_size != 0
+                    ):
+                        raise ReleaseError(
+                            f"stable recovery lock changed while held: {name}"
+                        )
+        finally:
+            for descriptor in reversed(tuple(descriptors.values())):
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
+            os.close(control_fd)
 
     def _run_gate_smoke(
         self,
@@ -7825,11 +7920,32 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         timeout: float = 15.0,
         output_limit: int = 128 * 1024,
         work_deadline_monotonic_ns: int | None = None,
+        bootstrap_recovery_fds: Mapping[str, int] | None = None,
+        bootstrap_recovery_target: str | None = None,
     ) -> SmokeResult:
         """Run a gate for ``timeout`` plus a fixed containment-only margin."""
 
         if timeout <= 0 or timeout > 60 or output_limit < 1024:
             raise ReleaseError("invalid release canary execution bounds")
+        if (bootstrap_recovery_fds is None) != (
+            bootstrap_recovery_target is None
+        ):
+            raise ReleaseError("bootstrap recovery authority is incomplete")
+        recovery_fds: dict[str, int] = {}
+        if bootstrap_recovery_fds is not None:
+            recovery_fds = dict(bootstrap_recovery_fds)
+            if (
+                set(recovery_fds)
+                != {"operation", "bootstrap", "compatibility", "legacy"}
+                or any(type(value) is not int or value < 3 for value in recovery_fds.values())
+                or len(set(recovery_fds.values())) != len(recovery_fds)
+                or bootstrap_recovery_target is None
+                or RELEASE_ID_RE.fullmatch(bootstrap_recovery_target) is None
+                or uid != self.layout.root_uid
+                or gid != self.layout.root_gid
+                or inventory_release_id is not None
+            ):
+                raise ReleaseError("bootstrap recovery authority is invalid")
         started_ns = time.monotonic_ns()
         local_deadline_monotonic_ns = started_ns + int(timeout * 1_000_000_000)
         if work_deadline_monotonic_ns is not None:
@@ -7904,6 +8020,40 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                             ),
                         }
                     )
+            if recovery_fds:
+                environment.update(
+                    {
+                        "SUDO_UID": str(self.layout.target_uid),
+                        "GROK_BOOTSTRAP_RECOVERY": "1",
+                        "GROK_BOOTSTRAP_RECOVERY_TARGET_RELEASE_ID": str(
+                            bootstrap_recovery_target
+                        ),
+                        "GROK_BOOTSTRAP_RECOVERY_OPERATION_FD": str(
+                            recovery_fds["operation"]
+                        ),
+                        "GROK_BOOTSTRAP_RECOVERY_BOOTSTRAP_LOCK_FD": str(
+                            recovery_fds["bootstrap"]
+                        ),
+                        "GROK_BOOTSTRAP_RECOVERY_COMPATIBILITY_LOCK_FD": str(
+                            recovery_fds["compatibility"]
+                        ),
+                        "GROK_BOOTSTRAP_RECOVERY_LEGACY_LOCK_FD": str(
+                            recovery_fds["legacy"]
+                        ),
+                    }
+                )
+                if self.layout.test_install:
+                    environment.update(
+                        {
+                            "GROK_TEST_ROOT_RELEASE_CONTROL": str(
+                                self.layout.root_control
+                            ),
+                            "GROK_TEST_ROOT_ROOT": str(self.layout.root_root),
+                            "GROK_TEST_BROKER_STATE": str(
+                                self.layout.broker_state
+                            ),
+                        }
+                    )
             demote = self._drop_identity(uid, gid)
             if self._runner_scopes_required():
                 runner_scope = self._create_runner_scope(
@@ -7913,11 +8063,10 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                     runner_kind="gate-smoke",
                     release_id=inventory_release_id,
                 )
-            inherited = (
-                (auth_fd, runner_scope.descriptor)
-                if runner_scope is not None
-                else (auth_fd,)
-            )
+            inherited_values = [auth_fd, *recovery_fds.values()]
+            if runner_scope is not None:
+                inherited_values.append(runner_scope.descriptor)
+            inherited = tuple(inherited_values)
             process = subprocess.Popen(
                 [str(gate), *argv],
                 stdin=subprocess.DEVNULL,
@@ -8134,6 +8283,246 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 "installer-authenticated legacy migration did not prove empty"
             )
         return value
+
+    def _dead_bootstrap_recovery_fence(
+        self,
+    ) -> tuple[dict[str, object], bytes]:
+        """Return the exact selected dead RECOVERING fence or refuse."""
+
+        layout = self.layout
+        _verify_dir(
+            layout.multi_control,
+            0o700,
+            layout.target_uid,
+            layout.target_gid,
+        )
+        raw, _mode = _read_regular(
+            layout.recovery_fence,
+            uid=layout.target_uid,
+            gid=layout.target_gid,
+            mode=0o600,
+            maximum=65_536,
+        )
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ReleaseError(
+                "bootstrap recovery fence is invalid JSON"
+            ) from exc
+        fields = {
+            "schema_version", "release_id", "owner_epoch", "pid",
+            "pid_start_ticks", "boot_id", "phase",
+        }
+        owner = value.get("owner_epoch") if isinstance(value, dict) else None
+        release_id = value.get("release_id") if isinstance(value, dict) else None
+        pid = value.get("pid") if isinstance(value, dict) else None
+        start_ticks = value.get("pid_start_ticks") if isinstance(value, dict) else None
+        boot_id = value.get("boot_id") if isinstance(value, dict) else None
+        if (
+            not isinstance(value, dict)
+            or set(value) != fields
+            or value.get("schema_version") != CONTROL_SCHEMA_VERSION
+            or type(release_id) is not str
+            or RELEASE_ID_RE.fullmatch(release_id) is None
+            or type(owner) is not str
+            or re.fullmatch(r"[A-Za-z0-9._:+@-]{1,256}", owner) is None
+            or type(pid) is not int
+            or not 1 <= pid <= 2**31 - 1
+            or type(start_ticks) is not int
+            or not 1 <= start_ticks <= 2**63 - 1
+            or type(boot_id) is not str
+            or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                r"[0-9a-f]{4}-[0-9a-f]{12}",
+                boot_id,
+            ) is None
+            or value.get("phase") != "RECOVERING"
+        ):
+            raise ReleaseError(
+                "bootstrap recovery requires an exact RECOVERING fence"
+            )
+        assert isinstance(release_id, str)
+        assert isinstance(pid, int) and isinstance(start_ticks, int)
+        assert isinstance(boot_id, str)
+        root_selection = self._read_json(
+            layout.root_selected,
+            uid=layout.root_uid,
+            gid=layout.root_gid,
+            mode=0o444,
+        )
+        if (
+            root_selection.get("release_id") != release_id
+            or root_selection.get("root_release_id") != release_id
+            or root_selection.get("user_release_id") != release_id
+            or root_selection.get("selection_phase") != "READY"
+            or root_selection.get("target_uid") != layout.target_uid
+            or root_selection.get("target_gid") != layout.target_gid
+            or self.active_release_id() != release_id
+            or self.root_active_release_id() != release_id
+        ):
+            raise ReleaseError(
+                "bootstrap recovery fence differs from the selected release"
+            )
+        running_boot = self._boot_id()
+        if boot_id == running_boot:
+            try:
+                process_raw = self.proc_authority.read_bytes(
+                    f"{pid}/stat",
+                    maximum=MAX_SWITCH_PROC_RECORD_BYTES,
+                    operation="bootstrap recovery owner inventory",
+                ).decode("ascii")
+            except FileNotFoundError:
+                process_raw = ""
+            except (OSError, UnicodeError) as exc:
+                raise ReleaseError(
+                    "cannot inspect bootstrap recovery fence owner"
+                ) from exc
+            if process_raw:
+                closing = process_raw.rfind(")")
+                process_fields = (
+                    process_raw[closing + 2 :].split()
+                    if closing >= 0 else []
+                )
+                if (
+                    len(process_fields) <= 19
+                    or len(process_fields[0]) != 1
+                    or not process_fields[19].isdecimal()
+                ):
+                    raise ReleaseError(
+                        "bootstrap recovery fence owner identity is malformed"
+                    )
+                if (
+                    int(process_fields[19]) == start_ticks
+                    and process_fields[0] not in {"Z", "X", "x"}
+                ):
+                    raise ReleaseError(
+                        "bootstrap recovery fence owner is still live"
+                    )
+        return value, raw
+
+    def _bootstrap_recovery_broker_argv(
+        self,
+        fence: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        caller_pid = os.getpid()
+        caller_start = self._proc_start_ticks(caller_pid)
+        deadline = time.monotonic_ns() + int(
+            min(60.0, self.switch_timeout) * 1_000_000_000
+        )
+        return (
+            "--operation", "recover",
+            "--mode", "compatibility-handoff",
+            "--release-id", str(fence["release_id"]),
+            "--owner-epoch", str(fence["owner_epoch"]),
+            "--generation", "1",
+            "--listen-port", "1080",
+            "--contract-digest", ZERO_DIGEST,
+            "--vpn-max-tries", "1",
+            "--vpn-ranking-version", "vpngate-score-uptime-v1",
+            "--vpn-countries", "",
+            "--vpn-prefer-countries", "",
+            "--vpn-blocked-countries", "",
+            "--caller-pid", str(caller_pid),
+            "--caller-start-ticks", str(caller_start),
+            "--caller-boot-id", self._boot_id(),
+            "--deadline-monotonic-ns", str(deadline),
+        )
+
+    @staticmethod
+    def _bootstrap_recovery_result(result: SmokeResult) -> dict[str, object]:
+        if result.returncode != 0:
+            raise ReleaseError(
+                "signed bootstrap compatibility recovery failed with exit "
+                f"{result.returncode}; "
+                + _bounded_output_diagnostic(result.stdout, result.stderr)
+            )
+        try:
+            value = json.loads(result.stdout)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ReleaseError(
+                "signed bootstrap compatibility recovery returned invalid JSON; "
+                + _bounded_output_diagnostic(result.stdout, result.stderr)
+            ) from exc
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"ok", "active", "recovered"}
+            or value.get("ok") is not True
+            or value.get("active") is not False
+            or type(value.get("recovered")) is not bool
+        ):
+            raise ReleaseError(
+                "signed bootstrap compatibility recovery result is invalid"
+            )
+        return value
+
+    def recover_compatibility_ledger(self) -> dict[str, object]:
+        """Stage the signed target broker and retire only an exact old ledger."""
+
+        root_recovery_committed = False
+
+        def committed() -> bool:
+            return root_recovery_committed
+
+        with self._locked() as operation_fd:
+            if any(
+                _present(path)
+                for path in (
+                    self.layout.rollback_deny,
+                    self.layout.canary_terminal,
+                    self.layout.rung_canary,
+                )
+            ):
+                raise ReleaseError(
+                    "bootstrap compatibility recovery conflicts with release mutation"
+                )
+            plan = self.plan_release()
+            with self._offline_recovery_locks(
+                recovery_committed=committed
+            ) as recovery_locks:
+                fence, _fence_raw = self._dead_bootstrap_recovery_fence()
+                with self._legacy_singleton_locked(
+                    recovery_committed=committed
+                ) as legacy_fd:
+                    if legacy_fd is None:
+                        raise ReleaseError(
+                            "bootstrap compatibility recovery has no legacy singleton"
+                        )
+                    root_stage, root_final = self._stage_release(plan, "root")
+                    self._publish_stage(root_stage, root_final)
+                    target_broker = root_final / dict(plan.root_files)["broker"]
+                    authorization = {
+                        "operation": operation_fd,
+                        "bootstrap": recovery_locks["bootstrap.lock"],
+                        "compatibility": recovery_locks["compatibility.lock"],
+                        "legacy": legacy_fd,
+                    }
+                    argv = self._bootstrap_recovery_broker_argv(fence)
+                    first = self._bootstrap_recovery_result(
+                        self._run_gate_smoke(
+                            target_broker,
+                            argv,
+                            uid=self.layout.root_uid,
+                            gid=self.layout.root_gid,
+                            timeout=min(60.0, self.switch_timeout),
+                            bootstrap_recovery_fds=authorization,
+                            bootstrap_recovery_target=plan.release_id,
+                        )
+                    )
+                    # This authenticated broker success is the irreversible
+                    # root commit point.  The target UID owns the cooperative
+                    # lock pathnames and recovery fence, so changes to those
+                    # names after this point cannot retroactively turn a
+                    # completed root cleanup into a reported failure.
+                    root_recovery_committed = True
+                    return {
+                        "schema_version": SCHEMA_VERSION,
+                        "operation": "recover-compatibility-ledger",
+                        "applied": True,
+                        "target_release_id": plan.release_id,
+                        "selected_release_id": fence["release_id"],
+                        "root_recovered": first["recovered"],
+                        "public_recovery_required": True,
+                    }
 
     def _produce_evidence(
         self,
@@ -12518,6 +12907,7 @@ def _default_root_files(runtime_files: Iterable[str]) -> dict[str, str]:
 _INVOCATION_COMMAND_OPTIONS = {
     "plan": frozenset(),
     "install": frozenset({"apply", "dry_run"}),
+    "recover-compatibility-ledger": frozenset({"apply"}),
     "rollback": frozenset({"release_id", "apply", "dry_run"}),
     "status": frozenset(),
     "resume": frozenset({"apply"}),
@@ -12541,7 +12931,10 @@ _INVOCATION_COMMAND_OPTIONS = {
     "activate-profile": frozenset({"profile_sha256", "apply"}),
 }
 _BOOTSTRAP_COMMANDS = frozenset(
-    {"plan", "install", "rollback", "status", "resume", "abort"}
+    {
+        "plan", "install", "rollback", "status", "resume", "abort",
+        "recover-compatibility-ledger",
+    }
 )
 _INSTALLED_COMMANDS = frozenset(
     {
@@ -12577,6 +12970,7 @@ def _parser() -> argparse.ArgumentParser:
         "command",
         choices=(
             "plan", "install", "rollback", "status", "resume", "abort",
+            "recover-compatibility-ledger",
             "revalidate", "begin-release-qualification", "begin-rung-canary",
             "canary-exec", "promote-rung", "activate-profile",
         ),
@@ -12932,6 +13326,7 @@ def _dispatch_main(
         "resume", "abort", "revalidate", "begin-release-qualification",
         "begin-rung-canary",
         "canary-exec", "promote-rung", "activate-profile",
+        "recover-compatibility-ledger",
     }
     if args.command in mutating and not args.apply:
         raise ReleaseError(f"{args.command} requires --apply")
@@ -12975,6 +13370,8 @@ def _dispatch_main(
                 "applied": True,
                 "profile_transition": installer.profile_transition,
             }
+    elif args.command == "recover-compatibility-ledger":
+        output = installer.recover_compatibility_ledger()
     elif args.command == "rollback":
         if not args.release_id:
             raise ReleaseError("rollback requires --release-id")

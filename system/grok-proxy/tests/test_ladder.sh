@@ -1889,8 +1889,8 @@ PY
   [[ ! -e "$STATE" && ! -e "$RECOVERY_MARKER" ]]
 )
 
-# A pending compatibility VPN transition remains fenced when the authenticated
-# handoff broker refuses the generation-0 legacy ledger.  Handoff must not
+# A pending compatibility VPN transition remains fenced when public handoff
+# proves signed-bootstrap root cleanup has not committed. Handoff must not
 # consume the marker or attempt user-side cleanup after that refusal.
 (
   export GROK_IPHONE_STATE_DIR="$tmp/handoff-pending-vpn-recovery-phone"
@@ -1907,7 +1907,8 @@ PY
   vpn_down(){ : > "$tmp/handoff-pending-vpn-recovery-vpn"; }
   iphone_down(){ : > "$tmp/handoff-pending-vpn-recovery-iphone"; }
   ! compatibility_handoff_locked
-  [[ "$(cat "$tmp/handoff-pending-vpn-recovery-log")" == broker:migrate-legacy ]]
+  [[ "$(cat "$tmp/handoff-pending-vpn-recovery-log")" == \
+     $'broker:migrate-legacy' ]]
   [[ "$(active_rung)" == vpn ]]
   recovery_transition_pending
   [[ ! -e "$tmp/handoff-pending-vpn-recovery-local" \
@@ -1939,7 +1940,7 @@ PY
   port_listening(){ return 1; }
   compatibility_handoff_locked
   [[ "$(cat "$tmp/handoff-pending-recovery-log")" == \
-     $'broker:migrate-legacy\nlocal\nvpn\niphone\nlocal\nvpn\niphone\nclear\nbroker:migrate-legacy\nbroker:recover\nbroker:status\nclear' ]]
+     $'broker:migrate-legacy\nlocal\nvpn\niphone\nlocal\nvpn\niphone\nclear\nbroker:migrate-legacy\nbroker:status\nclear' ]]
   [[ ! -e "$STATE" && ! -e "$RECOVERY_MARKER" ]]
 )
 

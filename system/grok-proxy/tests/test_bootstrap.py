@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import ast
 import fcntl
+import hashlib
 import json
 import importlib.util
 import os
@@ -16,7 +18,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -27,6 +31,8 @@ STAGER = BOOTSTRAP_ROOT / "stage_dispatcher.py"
 DISPATCHER_MAIN = BOOTSTRAP_ROOT / "dispatcher_main.py"
 SOURCE = BOOTSTRAP_ROOT / "bootstrap.c"
 PACKAGE_METADATA = BOOTSTRAP_ROOT / "package" / "grok-bootstrap-package.json"
+DEBIAN_PACKAGE_BUILDER = BOOTSTRAP_ROOT / "build_debian_package.py"
+DPKG_DEB = Path("/usr/bin/dpkg-deb")
 OPENSSL = Path("/usr/bin/openssl")
 KEY_ID = "test-key"
 DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
@@ -1401,7 +1407,352 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(
             metadata["package_requirements"]["administrative_signature_required"]
         )
+        debian_package = metadata["debian_package"]
+        self.assertEqual(debian_package["builder"], "build_debian_package.py")
+        self.assertIn("/usr/bin/dpkg-deb", debian_package["fixed_tools"])
+        self.assertEqual(
+            debian_package["postinst"]["activation"].split()[0],
+            "/usr/libexec/grok-bootstrap-package/"
+            "grok-bootstrap-package-activate",
+        )
+        self.assertFalse(debian_package["postinst"]["test_mode_hook"])
+        self.assertIn(
+            "signed-by", debian_package["authentication_requirement"]
+        )
         self.assertEqual(metadata["target_identity"]["native_invocation_uid"], 0)
+
+
+class DebianPackageBuilderTests(unittest.TestCase):
+    """Build and inspect the production package without acquiring root."""
+
+    VERSION = "1.0.0+test1"
+    SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+    SOURCE_DATE_EPOCH = 1_784_505_600
+    SOURCE_FILES = (
+        "Makefile",
+        "activate_package.py",
+        "bootstrap.c",
+        "build_debian_package.py",
+        "isolated_python_launcher.c",
+        "publish_signed_application.py",
+    )
+    DATA_ROOTS = {
+        "usr/lib/grok-bootstrap-package": {
+            "grok-bootstrap": 0o555,
+            "grok-bootstrap-publisher.py": 0o444,
+            "grok-bootstrap-publisher": 0o555,
+        },
+        "usr/libexec/grok-bootstrap-package": {
+            "activate_package.py": 0o444,
+            "grok-bootstrap-package-activate": 0o555,
+        },
+    }
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if os.geteuid() == 0 or os.getegid() == 0:
+            raise unittest.SkipTest("Debian package construction must be non-root")
+        required = (
+            "/usr/bin/cc",
+            "/usr/bin/dpkg-deb",
+            "/usr/bin/make",
+            "/usr/bin/nm",
+            "/usr/bin/openssl",
+            "/usr/bin/pkg-config",
+            "/usr/bin/readelf",
+        )
+        if any(not Path(path).is_file() for path in required):
+            raise unittest.SkipTest("Debian package build tools are required")
+        architecture = {"x86_64": "amd64", "aarch64": "arm64"}.get(
+            os.uname().machine
+        )
+        if architecture is None:
+            raise unittest.SkipTest("Debian package test requires x86_64 or AArch64")
+        cls.architecture = architecture
+        cls._temporary = tempfile.TemporaryDirectory(
+            prefix="grok-debian-package-tests-", dir=Path.home()
+        )
+        cls.root = Path(cls._temporary.name)
+        cls.root.chmod(0o700)
+        cls.source = cls.root / "source"
+        cls.source.mkdir(mode=0o700)
+        for name in cls.SOURCE_FILES:
+            shutil.copy2(BOOTSTRAP_ROOT / name, cls.source / name)
+        package_directory = cls.source / "package"
+        package_directory.mkdir(mode=0o700)
+        shutil.copy2(PACKAGE_METADATA, package_directory / PACKAGE_METADATA.name)
+
+        key = cls.root / "ephemeral-test-key.pem"
+        cls._run_checked(
+            [
+                "/usr/bin/openssl",
+                "genpkey",
+                "-algorithm",
+                "ED25519",
+                "-out",
+                os.fspath(key),
+            ]
+        )
+        key.chmod(0o600)
+        public = cls._run_checked(
+            [
+                "/usr/bin/openssl",
+                "pkey",
+                "-in",
+                os.fspath(key),
+                "-pubout",
+                "-outform",
+                "DER",
+            ]
+        ).stdout
+        if len(public) != len(DER_PREFIX) + 32 or not public.startswith(DER_PREFIX):
+            raise AssertionError("unexpected Ed25519 public-key encoding")
+        public_hex = public[len(DER_PREFIX) :].hex()
+        cls._run_checked(
+            [
+                "/usr/bin/make",
+                "-C",
+                os.fspath(cls.source),
+                "all",
+                "KEY_ID=debian-package-test-key",
+                f"PUBLIC_KEY_HEX={public_hex}",
+            ],
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+        cls.build_root = cls.source / "build"
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if hasattr(cls, "root"):
+            BootstrapTests._make_tree_removable(cls.root)
+        if hasattr(cls, "_temporary"):
+            cls._temporary.cleanup()
+
+    @classmethod
+    def _run_checked(
+        cls, command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=120,
+            **kwargs,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(
+                f"command failed ({completed.returncode}): {command!r}\n"
+                f"stdout: {completed.stdout!r}\nstderr: {completed.stderr!r}"
+            )
+        return completed
+
+    def _output_directory(self, label: str) -> Path:
+        output = self.root / f"{self._testMethodName}-{label}"
+        output.mkdir(mode=0o700)
+        output.chmod(0o700)
+        return output
+
+    def _package_path(self, output_directory: Path) -> Path:
+        return output_directory / (
+            f"grok-bootstrap_{self.VERSION}_{self.architecture}.deb"
+        )
+
+    def _build_command(
+        self,
+        output: Path,
+        *,
+        build_root: Path | None = None,
+        architecture: str | None = None,
+    ) -> list[str]:
+        if build_root is None:
+            build_root = self.build_root
+        if architecture is None:
+            architecture = self.architecture
+        return [
+            sys.executable,
+            "-I",
+            "-B",
+            os.fspath(self.source / "build_debian_package.py"),
+            "--build-root",
+            os.fspath(build_root),
+            "--output",
+            os.fspath(output),
+            "--version",
+            self.VERSION,
+            "--source-commit",
+            self.SOURCE_COMMIT,
+            "--architecture",
+            architecture,
+            "--source-date-epoch",
+            str(self.SOURCE_DATE_EPOCH),
+        ]
+
+    def test_debian_package_is_deterministic_closed_and_root_owned(self) -> None:
+        first_output = self._output_directory("first")
+        second_output = self._output_directory("second")
+        first = self._package_path(first_output)
+        second = self._package_path(second_output)
+        self._run_checked(self._build_command(first))
+        self._run_checked(self._build_command(second))
+
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o644)
+        fields = self._run_checked(
+            [os.fspath(DPKG_DEB), "--field", os.fspath(first)]
+        ).stdout.decode("utf-8")
+        self.assertIn("Package: grok-bootstrap\n", fields)
+        self.assertIn(f"Version: {self.VERSION}\n", fields)
+        self.assertIn(f"Architecture: {self.architecture}\n", fields)
+        self.assertIn(f"X-Grok-Source-Commit: {self.SOURCE_COMMIT}\n", fields)
+
+        listing = self._run_checked(
+            [os.fspath(DPKG_DEB), "--contents", os.fspath(first)]
+        ).stdout.decode("utf-8")
+        lines = listing.splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(" root/root " in line for line in lines))
+        listed_paths = {line.split()[-1] for line in lines}
+        self.assertEqual(
+            listed_paths,
+            {
+                "./",
+                "./usr/",
+                "./usr/lib/",
+                "./usr/lib/grok-bootstrap-package/",
+                "./usr/lib/grok-bootstrap-package/grok-bootstrap",
+                "./usr/lib/grok-bootstrap-package/grok-bootstrap-publisher.py",
+                "./usr/lib/grok-bootstrap-package/grok-bootstrap-publisher",
+                "./usr/libexec/",
+                "./usr/libexec/grok-bootstrap-package/",
+                "./usr/libexec/grok-bootstrap-package/activate_package.py",
+                "./usr/libexec/grok-bootstrap-package/grok-bootstrap-package-activate",
+            },
+        )
+
+        extracted = self.root / f"{self._testMethodName}-extracted"
+        control = self.root / f"{self._testMethodName}-control"
+        self._run_checked(
+            [os.fspath(DPKG_DEB), "--extract", os.fspath(first), os.fspath(extracted)]
+        )
+        self._run_checked(
+            [os.fspath(DPKG_DEB), "--control", os.fspath(first), os.fspath(control)]
+        )
+        for relative_root, expected_files in self.DATA_ROOTS.items():
+            root = extracted / relative_root
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o555)
+            self.assertEqual(
+                sorted(path.name for path in root.iterdir()), sorted(expected_files)
+            )
+            for name, mode in expected_files.items():
+                installed = root / name
+                built = self.build_root / name
+                self.assertEqual(installed.read_bytes(), built.read_bytes())
+                self.assertEqual(stat.S_IMODE(installed.stat().st_mode), mode)
+
+        postinst = control / "postinst"
+        postinst_raw = postinst.read_bytes()
+        self.assertEqual(stat.S_IMODE(postinst.stat().st_mode), 0o755)
+        self.assertTrue(postinst_raw.startswith(b"#!/usr/bin/python3 -IBS\n"))
+        ast.parse(postinst_raw.decode("utf-8"), filename="postinst", mode="exec")
+        self.assertIn(self.VERSION.encode("ascii"), postinst_raw)
+        self.assertIn(self.SOURCE_COMMIT.encode("ascii"), postinst_raw)
+        self.assertNotIn(b"GROK_BOOTSTRAP_PACKAGE_ACTIVATOR_TEST_MODE", postinst_raw)
+        self.assertNotIn(b"--test-root", postinst_raw)
+        for expected_files in self.DATA_ROOTS.values():
+            for name in expected_files:
+                raw = (self.build_root / name).read_bytes()
+                self.assertIn(hashlib.sha256(raw).hexdigest().encode("ascii"), postinst_raw)
+                self.assertIn(f"'size': {len(raw)}".encode("ascii"), postinst_raw)
+
+    def test_debian_package_builder_rejects_unsafe_or_drifted_inputs(self) -> None:
+        module_spec = importlib.util.spec_from_file_location(
+            "grok_debian_package_builder_supplementary_group_test",
+            self.source / "build_debian_package.py",
+        )
+        self.assertIsNotNone(module_spec)
+        self.assertIsNotNone(module_spec.loader)
+        builder_module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(builder_module)
+        with mock.patch.object(builder_module.os, "getgroups", return_value=[0]):
+            with self.assertRaisesRegex(
+                builder_module.PackageBuildError, "must run as non-root"
+            ):
+                builder_module.build_package(types.SimpleNamespace())
+
+        attacks = ("extra", "symlink", "mode", "python", "loader")
+        for attack in attacks:
+            with self.subTest(attack=attack):
+                build_root = self.root / f"bad-build-{attack}"
+                shutil.copytree(self.build_root, build_root, copy_function=shutil.copy2)
+                build_root.chmod(0o755)
+                if attack == "extra":
+                    (build_root / "unexpected").write_bytes(b"not in the contract\n")
+                elif attack == "symlink":
+                    target = build_root / "activate_package.py"
+                    target.unlink()
+                    target.symlink_to("grok-bootstrap-publisher.py")
+                elif attack == "mode":
+                    (build_root / "grok-bootstrap-publisher.py").chmod(0o644)
+                elif attack == "python":
+                    target = build_root / "grok-bootstrap-publisher.py"
+                    target.chmod(0o644)
+                    target.write_bytes(b"if invalid python\n")
+                    target.chmod(0o444)
+                else:
+                    target = build_root / "grok-bootstrap-publisher"
+                    target.chmod(0o755)
+                    with target.open("ab") as stream:
+                        stream.write(b"LD_PRELOAD\x00")
+                    target.chmod(0o555)
+                output_directory = self._output_directory(f"bad-output-{attack}")
+                output = self._package_path(output_directory)
+                completed = subprocess.run(
+                    self._build_command(output, build_root=build_root),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=30,
+                )
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stdout, b"")
+                self.assertTrue(
+                    completed.stderr.startswith(b"grok-bootstrap package builder: ")
+                )
+                self.assertFalse(output.exists())
+
+        other_architecture = "amd64" if self.architecture == "arm64" else "arm64"
+        output_directory = self._output_directory("wrong-architecture")
+        output = output_directory / (
+            f"grok-bootstrap_{self.VERSION}_{other_architecture}.deb"
+        )
+        completed = subprocess.run(
+            self._build_command(output, architecture=other_architecture),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn(b"does not match the build host", completed.stderr)
+        self.assertFalse(output.exists())
+
+        existing_directory = self._output_directory("existing")
+        existing = self._package_path(existing_directory)
+        existing.write_bytes(b"sentinel\n")
+        completed = subprocess.run(
+            self._build_command(existing),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(existing.read_bytes(), b"sentinel\n")
 
 
 if __name__ == "__main__":

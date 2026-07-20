@@ -3815,6 +3815,7 @@ class SupervisorRecoveryTests(unittest.TestCase):
                 r'''#!/bin/bash
 set -euo pipefail
 [[ "${1:-}" == compatibility-handoff ]]
+[[ -z "${GROK_HANDOFF_RECOVERY_MODE:-}" ]]
 marker="$(dirname "$0")/handoff-descendant.pid"
 ack="$(dirname "$0")/handoff-descendant.ack"
 (
@@ -3841,7 +3842,7 @@ exit 92
                     pid=current.pid,
                     pid_start_ticks=current.start_ticks,
                     boot_id=current.boot_id,
-                    phase="BOOTSTRAPPING",
+                    phase="RECOVERING",
                 )
             )
             store = DetachedScopeStore(root)

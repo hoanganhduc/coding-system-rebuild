@@ -24,7 +24,8 @@
     "bootstrap.c",
     "publish_signed_application.py",
     "activate_package.py",
-    "isolated_python_launcher.c"
+    "isolated_python_launcher.c",
+    "build_debian_package.py"
   ],
   "supported_launcher_architectures": ["x86_64", "aarch64"],
   "build_system": "make",
@@ -32,8 +33,43 @@
     "c11-compiler",
     "binutils-readelf-and-nm",
     "pkg-config",
-    "openssl-libcrypto>=3.0"
+    "openssl-libcrypto>=3.0",
+    "python3>=3.10",
+    "dpkg-deb-with-root-owner-group"
   ],
+  "debian_package": {
+    "builder": "build_debian_package.py",
+    "builder_uid": "non-root and non-root-group only",
+    "required_arguments": [
+      "absolute canonical exact five-file build root",
+      "Debian version",
+      "40-lowercase-hex source commit",
+      "host-matching amd64 or arm64 architecture",
+      "bounded SOURCE_DATE_EPOCH",
+      "absolute canonical no-clobber output path"
+    ],
+    "output_basename": "grok-bootstrap_<version>_<architecture>.deb",
+    "fixed_tools": [
+      "/usr/bin/dpkg-deb",
+      "/usr/bin/readelf",
+      "/usr/bin/nm"
+    ],
+    "archive_ownership": "dpkg-deb --root-owner-group",
+    "determinism": "closed environment, caller-supplied source epoch, one gzip thread, normalized directory/file modes and timestamps",
+    "atomic_publication": "same-directory hard-link no-clobber followed by directory fsync",
+    "source_binding_control_field": "X-Grok-Source-Commit",
+    "postinst": {
+      "interpreter": "/usr/bin/python3 -IBS",
+      "embedded_generation": "exact per-file mode, size, SHA-256 digest, semantic kind, package version, source commit, and architecture",
+      "ancestry_gate": "descriptor-relative no-symlink walk from /; every component root:root and non-group-or-other-writable; leaf roots exact mode 0555",
+      "file_gate": "exact closed leaf inventories; root:root single-link regular files; exact mode, size, SHA-256, identity, and pre/post-read snapshot",
+      "semantic_gate": "both Python sources AST-parse; all ELF files match the package machine; static launchers have no PT_INTERP, PT_DYNAMIC, DT_NEEDED, or undefined symbol and satisfy exact fixed-string contracts",
+      "final_recheck": "re-walk leaf roots and re-read/re-hash/re-snapshot every held file",
+      "activation": "/usr/libexec/grok-bootstrap-package/grok-bootstrap-package-activate descriptor-executed with argv[0] only and a fixed four-variable environment",
+      "test_mode_hook": false
+    },
+    "authentication_requirement": "install only through the separately reviewed signed APT repository pinned with signed-by; local/unsigned package installation is not authorized"
+  },
   "required_build_parameters": {
     "KEY_ID": "production Ed25519 key identifier matching [A-Za-z0-9._-]{1,64}",
     "PUBLIC_KEY_HEX": "raw 32-byte production Ed25519 public key as 64 lowercase hex characters"

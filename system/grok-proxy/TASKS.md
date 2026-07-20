@@ -147,6 +147,14 @@
 - [ ] Make the administrative package transaction own the verifier, signed
   application store, and exact root-owned selector; candidate install must not
   create or replace any of them.
+- [x] Add deterministic non-root Debian package construction for the exact
+  root-owner five-file generation, with source/version/architecture binding,
+  atomic output, and an authenticated post-install ancestry, inventory,
+  hash/snapshot, Python, and static-ELF gate before zero-argument activation.
+- [x] Add signed-bootstrap-only, owner-bound recovery for an orphaned
+  generation-zero compatibility ledger, followed by a root-nonmutating public
+  recovery that clears user state/fence, breaking old-broker deployment
+  circularity without a force path.
 - [x] Add the package-owned signed-application publisher with native compiled-key
   introspection, inode-stable update/release-operation locking, crash-reconciled
   selector audits, compare-and-swap reselection/rollback, and no signed-release

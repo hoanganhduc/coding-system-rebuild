@@ -1998,6 +1998,12 @@ socks_alive(){
   python3 -c 'import json,sys; v=json.load(sys.stdin); raise SystemExit(0 if v.get("relay_alive") is True and isinstance(v.get("relay_pid"), int) else 1)' \
     <<<"$status"
 }
+vpn_root_empty(){
+  local status
+  status="$(vpn_broker_call status 2>/dev/null)" || return 1
+  python3 -c 'import json,sys; v=json.load(sys.stdin); flags=("active","namespace_alive","tun_alive","host_tun_alive","vpn_alive","relay_alive","root_artifact_residue"); fields={"ok",*flags,"relay_pid","ledger"}; valid=type(v) is dict and set(v)==fields and v.get("ok") is True and all(type(v.get(name)) is bool for name in flags); residue=(not valid) or any(v.get(name) is True for name in flags) or v.get("ledger") is not None or v.get("relay_pid") is not None; raise SystemExit(1 if residue else 0)' \
+    <<<"$status"
+}
 vpn_tun_alive(){
   local status
   status="$(vpn_broker_call status 2>/dev/null)" || return 1
@@ -2006,7 +2012,12 @@ vpn_tun_alive(){
 }
 
 vpn_broker_call(){
-  local operation="$1" request_mode owner generation release contract_digest max_tries
+  [[ $# == 1 ]] || {
+    eg_err "invalid VPN broker request"
+    return 1
+  }
+  local operation="$1"
+  local request_mode owner generation release contract_digest max_tries
   local ranking countries blocked prefer countries_csv blocked_csv prefer_csv
   local caller_identity caller_pid caller_start caller_boot deadline_ns
   if (( PROVIDER_MODE == 1 )); then
@@ -2017,8 +2028,11 @@ vpn_broker_call(){
   elif (( HANDOFF_MODE == 1 )); then
     if [[ "$operation" == migrate-legacy ]]; then
       request_mode=compatibility-handoff
-    else
+    elif [[ "$operation" == status ]]; then
       request_mode=supervisor
+    else
+      eg_err "compatibility handoff permits only migration proof or status"
+      return 1
     fi
     owner="$GROK_HANDOFF_OWNER_EPOCH"
     generation=1
@@ -2141,6 +2155,10 @@ vpn_up(){
 vpn_alive(){ vpn_tun_alive && socks_alive; }
 vpn_down(){
   local rc=0
+  if (( HANDOFF_MODE == 1 )); then
+    vpn_root_empty
+    return
+  fi
   vpn_broker_call down >/dev/null 2>&1 || rc=1
   (( rc != 0 )) || socks_down || rc=1
   return "$rc"
@@ -3093,10 +3111,11 @@ legacy_session_lock_check(){
 }
 
 compatibility_handoff_locked(){
-  local rung="" pid="" status
+  local rung="" pid=""
   legacy_session_lock_check || return 1
-  # This root-authenticated proof runs before any provider teardown.  A live
-  # legacy VPN is deliberately refused; it is never adopted into a new ledger.
+  # Public handoff remains nonmutating at the root boundary.  An orphaned
+  # generation-zero ledger must first be retired by the signed bootstrap
+  # package; this call proves that root cleanup has already committed.
   vpn_broker_call migrate-legacy >/dev/null || return 1
   legacy_session_lock_check || return 1
   if recovery_transition_pending; then
@@ -3141,16 +3160,11 @@ compatibility_handoff_locked(){
       && legacy_session_lock_check || return 1
   fi
   # Repeat the authenticated migration after user-side teardown.  This closes
-  # a legacy-launch/recreation window before recovery and final status.
+  # a legacy-launch/recreation window before the final status proof.
   legacy_session_lock_check || return 1
   vpn_broker_call migrate-legacy >/dev/null || return 1
   legacy_session_lock_check || return 1
-  vpn_broker_call recover >/dev/null || return 1
-  legacy_session_lock_check || return 1
-  status="$(vpn_broker_call status 2>/dev/null)" || return 1
-  legacy_session_lock_check || return 1
-  python3 -c 'import json,sys; v=json.load(sys.stdin); flags=("active","namespace_alive","tun_alive","host_tun_alive","vpn_alive","relay_alive","root_artifact_residue"); fields={"ok",*flags,"relay_pid","ledger"}; valid=type(v) is dict and set(v)==fields and v.get("ok") is True and all(type(v.get(name)) is bool for name in flags); residue=(not valid) or any(v.get(name) is True for name in flags) or v.get("ledger") is not None or v.get("relay_pid") is not None; raise SystemExit(1 if residue else 0)' \
-    <<<"$status" || return 1
+  vpn_root_empty || return 1
   clear_active || return 1
   legacy_session_lock_check || return 1
   [[ ! -e "$CTL" && ! -L "$CTL" \

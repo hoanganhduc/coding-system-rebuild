@@ -213,6 +213,50 @@ the fixed `/usr/bin/python3 -I -B -S` prefix and exact environment before
 forwarding at most 64 administrative CLI arguments; a larger vector fails with
 exit `126`.
 
+### Exact orphaned-compatibility rescue
+
+An older selected runtime can be unable to finish public recovery when it left
+an exact generation-zero compatibility VPN ledger and a later supervisor died
+with its fence in `RECOVERING`. Do not remove the ledger, fence, namespace, or
+PID records manually. After the new signed application has been published and
+selected by the package-owned publisher, invoke its closed rescue command:
+
+```bash
+sudo -n -- /usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap \
+  --release-dir /usr/local/libexec/grok-proxy/bootstrap-releases/<signed-app-id> \
+  -- recover-compatibility-ledger --apply
+```
+
+The command accepts no caller paths, release IDs, PIDs, identities, or force
+option. It owns the package-preserved operation lock, both stable compatibility
+locks, and the historical singleton; requires the selected target UID/release,
+an exact dead `RECOVERING` fence, and the canonical `compat-<uid>` generation-0
+port-1080 zero-contract root ledger; stages only the signed candidate root
+release without selecting it; and executes only the staged candidate broker.
+That broker may use the old selected immutable VPN/relay helper bytes bound by
+the ledger, but it never executes the old broker implementation. The command
+must report `public_recovery_required:true` and deliberately leaves the user
+state and fence unchanged. Its authenticated broker success is the root commit
+point; later target-user replacement of cooperative lock or fence pathnames
+cannot retroactively turn committed cleanup into failure. Public handoff has no
+destructive compatibility-ledger authority and can proceed only after this
+root cleanup proves empty.
+
+Then finish the old installed public transaction and only afterward run the
+normal signed install:
+
+```bash
+env -u GROK_MULTI_SESSION grok-remote recover
+
+sudo -n -- /usr/local/libexec/grok-proxy/bootstrap/grok-bootstrap \
+  --release-dir /usr/local/libexec/grok-proxy/bootstrap-releases/<signed-app-id> \
+  -- install --apply
+```
+
+Any mismatch or incomplete cleanup retains the ledger/fence and fails closed.
+The rescue is unavailable from an installed runtime and is not a general reset
+or teardown interface.
+
 ## Production build and package contract
 
 The production public key is mandatory non-root build input:
@@ -230,6 +274,36 @@ any recipe can reject hostile input, so a root recipe cannot establish the
 privilege boundary. The `install` target always refuses; `install-test` is an
 explicit non-root-only test harness.
 
+After `make all`, build the architecture-bound Debian artifact as the same
+non-root build user. The version, exact 40-hex source commit, Debian
+architecture, and reproducible source epoch are mandatory inputs, and the
+output basename is fixed by the package name, version, and architecture:
+
+```bash
+python3 -I -B build_debian_package.py \
+  --build-root /absolute/non-root/build \
+  --output /absolute/output/grok-bootstrap_<version>_<architecture>.deb \
+  --version <version> \
+  --source-commit <40-lowercase-hex-commit> \
+  --architecture <amd64-or-arm64> \
+  --source-date-epoch <commit-epoch>
+```
+
+The builder uses only fixed `dpkg-deb`, `readelf`, and `nm` paths with closed
+subprocess environments. It requires the build directory to contain exactly
+the declared five single-link artifacts with the declared modes, validates
+both Python sources and the host-ABI/static-launcher contracts, and creates a
+deterministic root-owner archive through an atomic no-clobber publication.
+The package control metadata binds the version, architecture, and source
+commit. Each generated `postinst` embeds the exact size and SHA-256 digest of
+all five artifacts.
+
+The `.deb` is not independently authorized merely because it was built by
+this script. Production installation must retrieve it through a separately
+reviewed, signed APT repository pinned to the intended archive key with
+`signed-by`. Direct `dpkg -i`, `apt install ./package.deb`, or an unsigned
+repository does not satisfy the administrative-signature requirement.
+
 `package/grok-bootstrap-package.json` records the closed five-file build output,
 ownership, modes, dependency, key-provisioning, and package-hook requirements.
 The package manager installs the exact three-file payload at the fixed
@@ -238,8 +312,14 @@ two-file activator at fixed root-owned mode-`0555`
 `/usr/libexec/grok-bootstrap-package`. Before execution, package metadata
 requires every component of both ancestries to be root-owned and not group- or
 other-writable, and every file to be a root-owned, single-link regular file with
-its declared exact mode. The package manager then invokes exactly, with no
-arguments:
+its declared exact mode. The authenticated `postinst` descriptor-walks the
+complete ancestry without following links, requires the exact two leaf
+directories and their closed inventories, snapshots and hashes every file,
+AST-parses both Python sources, and checks the three ELF machines. It also
+requires both static launchers to have no `PT_INTERP`, `PT_DYNAMIC`,
+`DT_NEEDED`, or undefined symbol and to contain each fixed argv/environment/
+contract string exactly once. It rechecks every held directory and file before
+descriptor-executing exactly, with no arguments:
 
 ```bash
 /usr/libexec/grok-bootstrap-package/grok-bootstrap-package-activate

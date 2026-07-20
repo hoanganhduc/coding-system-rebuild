@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import fcntl
 import hashlib
 import json
@@ -427,6 +427,7 @@ class Request:
     caller_start_ticks: int = 0
     caller_boot_id: str = ""
     deadline_monotonic_ns: int = 0
+    caller_process_uid: int | None = None
 
     def validate(self) -> None:
         if self.operation not in _OPERATIONS:
@@ -435,6 +436,13 @@ class Request:
             raise BrokerError("unsupported broker mode")
         if type(self.caller_uid) is not int or not 0 <= self.caller_uid <= 2**31 - 1:
             raise BrokerError("invalid caller UID")
+        if self.caller_process_uid is not None and (
+            type(self.caller_process_uid) is not int
+            or not 0 <= self.caller_process_uid <= 2**31 - 1
+            or self.operation != "recover"
+            or self.mode != "compatibility-handoff"
+        ):
+            raise BrokerError("invalid internal caller process UID")
         if _RELEASE.fullmatch(self.release_id) is None:
             raise BrokerError("invalid release ID")
         if _TOKEN.fullmatch(self.owner_epoch) is None:
@@ -445,8 +453,12 @@ class Request:
             raise BrokerError("invalid private relay port")
         if self.operation == "migrate-legacy" and self.mode != "compatibility-handoff":
             raise BrokerError("legacy migration requires compatibility-handoff mode")
-        if self.mode == "compatibility-handoff" and self.operation != "migrate-legacy":
-            raise BrokerError("compatibility-handoff mode permits only legacy migration")
+        if self.mode == "compatibility-handoff" and self.operation not in {
+            "migrate-legacy", "recover",
+        }:
+            raise BrokerError(
+                "compatibility-handoff mode permits only migration or recovery"
+            )
         if self.mode == "compatibility":
             if self.owner_epoch != f"compat-{self.caller_uid}" or self.generation != 0:
                 raise BrokerError("invalid compatibility owner identity")
@@ -1731,7 +1743,7 @@ class Broker:
         try:
             self.layout.ledger.unlink()
         except FileNotFoundError:
-            return
+            pass
         _fsync_directory(self.layout.ledger.parent)
 
     def _stop_relay(self, record: dict[str, Any], request: Request, relay: Path) -> None:
@@ -1768,12 +1780,12 @@ class Broker:
             raise BrokerError("private relay listener remains after teardown")
         self._remove_relay_pidfile(record, request)
 
-    def _fence(self, request: Request) -> None:
+    def _fence(self, request: Request) -> dict[str, Any] | None:
         fence_path = self._home(request.caller_uid) / ".local/state/grok-proxy/control/recovery.fence"
         if request.mode == "compatibility":
             if fence_path.exists() or fence_path.is_symlink():
                 raise BrokerError("multi-session recovery fence blocks compatibility VPN mutation")
-            return
+            return None
         info = fence_path.lstat()
         if (
             fence_path.is_symlink()
@@ -1808,6 +1820,64 @@ class Broker:
             or fence["release_id"] != request.release_id
         ):
             raise BrokerError("supervisor request does not own the durable recovery fence")
+        return fence
+
+    def _assert_dead_recovering_fence(
+        self,
+        request: Request,
+        fence: dict[str, Any] | None,
+    ) -> None:
+        """Bind destructive handoff recovery to one exact dead supervisor."""
+
+        if (
+            request.mode != "compatibility-handoff"
+            or request.operation != "recover"
+            or fence is None
+            or fence.get("phase") != "RECOVERING"
+        ):
+            raise BrokerError(
+                "compatibility recovery requires an exact RECOVERING fence"
+            )
+        if fence["boot_id"] != self._boot_id():
+            return
+        path = self.layout.proc / str(fence["pid"])
+        try:
+            raw = (path / "stat").read_text(encoding="ascii")
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError) as exc:
+            raise BrokerError(
+                "cannot inspect compatibility recovery fence owner"
+            ) from exc
+        closing = raw.rfind(")")
+        fields = raw[closing + 2 :].split() if closing >= 0 else []
+        if (
+            len(fields) <= 19
+            or len(fields[0]) != 1
+            or not fields[19].isdecimal()
+        ):
+            raise BrokerError(
+                "compatibility recovery fence owner identity is malformed"
+            )
+        if (
+            int(fields[19]) != fence["pid_start_ticks"]
+            or fields[0] in {"Z", "X", "x"}
+        ):
+            return
+        raise BrokerError("compatibility recovery fence owner is still live")
+
+    @staticmethod
+    def _compatibility_ledger_matches_handoff(
+        ledger: dict[str, Any], request: Request
+    ) -> bool:
+        return bool(
+            ledger.get("caller_uid") == request.caller_uid
+            and ledger.get("release_id") == request.release_id
+            and ledger.get("owner_epoch") == f"compat-{request.caller_uid}"
+            and ledger.get("generation") == 0
+            and ledger.get("listen_port") == 1080
+            and ledger.get("contract_digest") == "0" * 64
+        )
 
     def _load_ledger(self) -> dict[str, Any] | None:
         if not self.layout.ledger.exists():
@@ -2058,7 +2128,11 @@ class Broker:
                 and fields[0] != "Z"
                 and int(fields[19]) == request.caller_start_ticks
                 and Path(f"/proc/{request.caller_pid}").stat().st_uid
-                == request.caller_uid
+                == (
+                    request.caller_uid
+                    if request.caller_process_uid is None
+                    else request.caller_process_uid
+                )
                 and self._boot_id() == request.caller_boot_id
             )
         except (OSError, ValueError):
@@ -2828,6 +2902,9 @@ class Broker:
             deadline_monotonic_ns=(
                 authority.deadline_monotonic_ns if authority is not None else 0
             ),
+            caller_process_uid=(
+                authority.caller_process_uid if authority is not None else None
+            ),
         )
 
     def _cleanup_owned(
@@ -2904,8 +2981,26 @@ class Broker:
         if issues:
             raise BrokerError("; ".join(dict.fromkeys(issues)))
 
-    def execute(self, request: Request) -> dict[str, Any]:
+    def execute(
+        self,
+        request: Request,
+        *,
+        recovery_broker_guard: Path | None = None,
+    ) -> dict[str, Any]:
         request.validate()
+        if recovery_broker_guard is not None and (
+            request.operation != "recover"
+            or request.mode != "compatibility-handoff"
+            or recovery_broker_guard.resolve(strict=True)
+            != Path(__file__).resolve(strict=True)
+        ):
+            raise BrokerError("bootstrap recovery broker guard is invalid")
+        if recovery_broker_guard is not None:
+            request = replace(
+                request,
+                caller_process_uid=self.expected_root_uid,
+            )
+            request.validate()
         self._assert_request_live(request)
         with self.release_locked(), self.locked(create=request.operation != "status"):
             selected = self._selection(
@@ -2913,9 +3008,9 @@ class Broker:
                 request.operation,
                 request=request,
             )
-            self._fence(request)
+            fence = self._fence(request)
             helpers = self._helpers(request.release_id, selected)
-            broker_guard = helpers["broker"]
+            broker_guard = recovery_broker_guard or helpers["broker"]
             vpn_helper = helpers["vpngate"]
             relay_helper = helpers["relay"]
             ledger = self._load_ledger()
@@ -2975,6 +3070,9 @@ class Broker:
                     "ledger": ledger,
                 }
             if request.operation == "recover":
+                handoff_recovery = request.mode == "compatibility-handoff"
+                if handoff_recovery:
+                    self._assert_dead_recovering_fence(request, fence)
                 if ledger is None:
                     if (
                         self._namespace_exists()
@@ -2984,8 +3082,23 @@ class Broker:
                         or self._listener_owner(request.listen_port) is not None
                     ):
                         raise BrokerError("unowned VPN/relay residue requires manual investigation")
+                    # A prior cleanup may have unlinked the ledger but failed
+                    # its directory fsync.  Every absence-success path must
+                    # therefore durably sync the parent before reporting the
+                    # idempotent no-op.
+                    self._unlink_ledger_durable()
                     return {"ok": True, "active": False, "recovered": False}
-                if not self._same_owner(ledger, request):
+                if handoff_recovery and not self._compatibility_ledger_matches_handoff(
+                    ledger, request
+                ):
+                    raise BrokerError(
+                        "compatibility recovery ledger is not the exact legacy owner"
+                    )
+                if handoff_recovery and recovery_broker_guard is None:
+                    raise BrokerError(
+                        "compatibility ledger recovery requires signed bootstrap authority"
+                    )
+                if not handoff_recovery and not self._same_owner(ledger, request):
                     raise BrokerError("VPN recovery request does not own the resources")
                 owned = self._request_from_ledger(ledger, "recover", request)
                 self._write_phase(
@@ -3330,6 +3443,245 @@ def _authorize_release_inventory(layout: Layout, expected_uid: int) -> str:
     return release_id
 
 
+_BOOTSTRAP_RECOVERY_ENV = {
+    "GROK_BOOTSTRAP_RECOVERY",
+    "GROK_BOOTSTRAP_RECOVERY_TARGET_RELEASE_ID",
+    "GROK_BOOTSTRAP_RECOVERY_OPERATION_FD",
+    "GROK_BOOTSTRAP_RECOVERY_BOOTSTRAP_LOCK_FD",
+    "GROK_BOOTSTRAP_RECOVERY_COMPATIBILITY_LOCK_FD",
+    "GROK_BOOTSTRAP_RECOVERY_LEGACY_LOCK_FD",
+}
+
+
+def _inherited_descriptor(environment: dict[str, str], name: str) -> int:
+    raw = environment.get(name, "")
+    if (
+        not raw.isascii()
+        or not raw.isdecimal()
+        or str(int(raw)) != raw
+        or int(raw) < 3
+    ):
+        raise BrokerError("bootstrap recovery descriptor authority is invalid")
+    return int(raw)
+
+
+def _validate_inherited_file(
+    descriptor: int,
+    path: Path,
+    *,
+    uid: int,
+    gid: int,
+    mode: int,
+    locked: bool,
+) -> None:
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    named_fd = -1
+    try:
+        inherited = os.fstat(descriptor)
+        named_fd = os.open(path, flags)
+        named = os.fstat(named_fd)
+        if (
+            not stat.S_ISREG(inherited.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or (inherited.st_dev, inherited.st_ino)
+            != (named.st_dev, named.st_ino)
+            or (inherited.st_uid, inherited.st_gid) != (uid, gid)
+            or (named.st_uid, named.st_gid) != (uid, gid)
+            or stat.S_IMODE(inherited.st_mode) != mode
+            or stat.S_IMODE(named.st_mode) != mode
+            or inherited.st_nlink != 1
+            or named.st_nlink != 1
+            or inherited.st_size != 0
+            or named.st_size != 0
+        ):
+            raise BrokerError("bootstrap recovery descriptor authority is not exact")
+        if locked:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise BrokerError(
+                    "bootstrap recovery descriptor is not the inherited lock owner"
+                ) from exc
+            try:
+                fcntl.flock(named_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                fcntl.flock(named_fd, fcntl.LOCK_UN)
+                raise BrokerError(
+                    "bootstrap recovery descriptor did not retain its lock"
+                )
+    except OSError as exc:
+        raise BrokerError(
+            "cannot authenticate bootstrap recovery descriptor authority"
+        ) from exc
+    finally:
+        if named_fd >= 0:
+            os.close(named_fd)
+
+
+def _authorize_bootstrap_recovery(
+    layout: Layout,
+    request: Request,
+    environment: dict[str, str],
+    *,
+    expected_root_uid: int = 0,
+    expected_root_gid: int = 0,
+) -> tuple[Path, tuple[int, ...]]:
+    """Authenticate the signed installer's unselected-candidate rescue."""
+
+    if set(name for name in _BOOTSTRAP_RECOVERY_ENV if name in environment) != (
+        _BOOTSTRAP_RECOVERY_ENV
+    ) or environment.get("GROK_BOOTSTRAP_RECOVERY") != "1":
+        raise BrokerError("bootstrap recovery authority is incomplete")
+    target_release_id = environment[
+        "GROK_BOOTSTRAP_RECOVERY_TARGET_RELEASE_ID"
+    ]
+    if (
+        request.operation != "recover"
+        or request.mode != "compatibility-handoff"
+        or request.listen_port != 1080
+        or request.contract_digest != "0" * 64
+        or request.release_id == target_release_id
+        or _RELEASE.fullmatch(target_release_id) is None
+    ):
+        raise BrokerError("bootstrap recovery request is not exact")
+    try:
+        account = pwd.getpwuid(request.caller_uid)
+    except KeyError as exc:
+        raise BrokerError("bootstrap recovery caller has no passwd identity") from exc
+    selected = _read_json(
+        layout.selection,
+        uid=expected_root_uid,
+        mode=0o444,
+    )
+    user_root_raw = selected.get("user_root")
+    target_gid = selected.get("target_gid")
+    if (
+        selected.get("schema_version") != 1
+        or selected.get("release_schema_version") != 2
+        or selected.get("release_id") != request.release_id
+        or selected.get("root_release_id") != request.release_id
+        or selected.get("user_release_id") != request.release_id
+        or selected.get("selection_phase") != "READY"
+        or selected.get("target_uid") != request.caller_uid
+        or type(target_gid) is not int
+        or not 0 <= target_gid <= 2**31 - 1
+        or type(user_root_raw) is not str
+        or selected.get("root_root") != str(layout.releases.parent)
+        or selected.get("root_control") != str(layout.selection.parent)
+    ):
+        raise BrokerError("bootstrap recovery selected identity is invalid")
+    user_root = Path(user_root_raw)
+    fixed_suffix = Path(".local/lib/grok-proxy")
+    if (
+        not user_root.is_absolute()
+        or user_root.resolve(strict=False) != user_root
+        or tuple(user_root.parts[-len(fixed_suffix.parts) :])
+        != fixed_suffix.parts
+        or len(user_root.parents) < 3
+    ):
+        raise BrokerError("bootstrap recovery selected user root is invalid")
+    home = user_root.parents[2]
+    if environment.get("GROK_TESTING") != "1" and (
+        home != Path(account.pw_dir)
+        or target_gid != account.pw_gid
+    ):
+        raise BrokerError("bootstrap recovery passwd identity changed")
+    control = home / ".local/state/grok-proxy/control"
+    legacy = home / "grok-proxy/.grok-remote.lock"
+    operation = layout.selection.parent / "operation.lock"
+    canary = layout.selection.parent / "canary-auth.lock"
+    descriptors = {
+        "canary": _inherited_descriptor(environment, "GROK_RELEASE_CANARY_FD"),
+        "operation": _inherited_descriptor(
+            environment, "GROK_BOOTSTRAP_RECOVERY_OPERATION_FD"
+        ),
+        "bootstrap": _inherited_descriptor(
+            environment, "GROK_BOOTSTRAP_RECOVERY_BOOTSTRAP_LOCK_FD"
+        ),
+        "compatibility": _inherited_descriptor(
+            environment, "GROK_BOOTSTRAP_RECOVERY_COMPATIBILITY_LOCK_FD"
+        ),
+        "legacy": _inherited_descriptor(
+            environment, "GROK_BOOTSTRAP_RECOVERY_LEGACY_LOCK_FD"
+        ),
+    }
+    if len(set(descriptors.values())) != len(descriptors):
+        raise BrokerError("bootstrap recovery descriptors are not distinct")
+    checks = (
+        (
+            descriptors["canary"], canary,
+            expected_root_uid, expected_root_gid, 0o600, False,
+        ),
+        (
+            descriptors["operation"], operation,
+            expected_root_uid, expected_root_gid, 0o600, True,
+        ),
+        (
+            descriptors["bootstrap"], control / "bootstrap.lock",
+            request.caller_uid, target_gid, 0o600, True,
+        ),
+        (
+            descriptors["compatibility"], control / "compatibility.lock",
+            request.caller_uid, target_gid, 0o600, True,
+        ),
+        (
+            descriptors["legacy"], legacy,
+            request.caller_uid, target_gid, 0o600, True,
+        ),
+    )
+    try:
+        for descriptor, path, uid, gid, mode, locked in checks:
+            _validate_inherited_file(
+                descriptor,
+                path,
+                uid=uid,
+                gid=gid,
+                mode=mode,
+                locked=locked,
+            )
+        manifest = _read_json(
+            layout.releases / target_release_id / "release.json",
+            uid=expected_root_uid,
+            mode=0o444,
+        )
+        entries = manifest.get("files")
+        if (
+            manifest.get("schema_version") != 2
+            or manifest.get("kind") != "root"
+            or manifest.get("release_id") != target_release_id
+            or type(entries) is not list
+        ):
+            raise BrokerError("bootstrap recovery target manifest is invalid")
+        roles: dict[str, str] = {}
+        for entry in entries:
+            if type(entry) is dict and entry.get("role") in _ROOT_ROLES:
+                role = entry["role"]
+                relative = entry.get("path")
+                if type(relative) is not str or role in roles:
+                    raise BrokerError(
+                        "bootstrap recovery target helper map is invalid"
+                    )
+                roles[role] = relative
+        helpers = Broker(
+            layout, expected_root_uid=expected_root_uid
+        )._helpers(target_release_id, roles)
+        target_broker = helpers["broker"].resolve(strict=True)
+        if target_broker != Path(__file__).resolve(strict=True):
+            raise BrokerError(
+                "bootstrap recovery did not execute the staged target broker"
+            )
+        return target_broker, tuple(descriptors.values())
+    except BaseException:
+        for descriptor in descriptors.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
 def _guard_start_ticks(pid: int) -> int:
     raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
     fields = raw[raw.rfind(")") + 2 :].split()
@@ -3544,7 +3896,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
-    if os.geteuid() != 0:
+    bootstrap_recovery = any(
+        name in os.environ for name in _BOOTSTRAP_RECOVERY_ENV
+    )
+    layout = Layout()
+    expected_uid = expected_gid = 0
+    if bootstrap_recovery and os.environ.get("GROK_TESTING") == "1":
+        layout = _inventory_layout_from_environment()
+        control = layout.selection.parent.lstat()
+        if layout.selection.parent.is_symlink() or not stat.S_ISDIR(
+            control.st_mode
+        ):
+            raise BrokerError("test bootstrap recovery control is unsafe")
+        expected_uid, expected_gid = control.st_uid, control.st_gid
+    if os.geteuid() != expected_uid:
         raise BrokerError("vpn-broker must run as root")
     sudo_uid = os.environ.get("SUDO_UID")
     if sudo_uid is None or not sudo_uid.isdecimal():
@@ -3572,7 +3937,27 @@ def main(argv: list[str] | None = None) -> int:
     request.validate()
     if not _caller_is_ancestor(request.caller_pid, os.getpid()):
         raise BrokerError("broker caller is not an ancestor of the public broker")
-    result = Broker().execute(request)
+    recovery_broker_guard = None
+    recovery_authority_fds: tuple[int, ...] = ()
+    if bootstrap_recovery:
+        recovery_broker_guard, recovery_authority_fds = _authorize_bootstrap_recovery(
+            layout,
+            request,
+            os.environ,
+            expected_root_uid=expected_uid,
+            expected_root_gid=expected_gid,
+        )
+    try:
+        result = Broker(layout, expected_root_uid=expected_uid).execute(
+            request,
+            recovery_broker_guard=recovery_broker_guard,
+        )
+    finally:
+        for descriptor in recovery_authority_fds:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 
