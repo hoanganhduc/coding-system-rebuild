@@ -25,6 +25,7 @@ import zipfile
 
 
 PROXY_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = PROXY_ROOT.parents[1]
 BOOTSTRAP_ROOT = PROXY_ROOT / "bootstrap"
 BUILDER = BOOTSTRAP_ROOT / "build_bundle.py"
 STAGER = BOOTSTRAP_ROOT / "stage_dispatcher.py"
@@ -1420,6 +1421,63 @@ class BootstrapTests(unittest.TestCase):
             "signed-by", debian_package["authentication_requirement"]
         )
         self.assertEqual(metadata["target_identity"]["native_invocation_uid"], 0)
+
+    def test_rehearsal_uses_makefile_owned_build_directory(self) -> None:
+        workflow = (
+            REPOSITORY_ROOT / ".github" / "workflows" / "rehearsal.yml"
+        ).read_text(encoding="utf-8")
+        marker = "\n  install-degraded:\n"
+        self.assertEqual(workflow.count(marker), 1)
+        job = workflow.split(marker, 1)[1]
+        header, _separator, _steps = job.partition("\n    steps:\n")
+        self.assertIn(
+            "if: github.event_name == 'workflow_dispatch' || "
+            "github.event_name == 'schedule'",
+            header,
+        )
+        step_marker = (
+            "      - name: Provision ephemeral signed Grok bootstrap trust fixture\n"
+        )
+        next_step = "      - name: Allow private component clones"
+        self.assertEqual(job.count(step_marker), 1)
+        build_step = job.split(step_marker, 1)[1].split(next_step, 1)[0]
+        self.assertIn(
+            'native_build="$GITHUB_WORKSPACE/system/grok-proxy/bootstrap/build"',
+            build_step,
+        )
+        self.assertIn(
+            "/usr/bin/env -i \\\n"
+            "            PATH=/usr/bin:/bin LANG=C LC_ALL=C \\\n"
+            "            /usr/bin/make -C system/grok-proxy/bootstrap",
+            build_step,
+        )
+        self.assertNotIn("BUILD_DIR", build_step)
+
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            source = Path(directory) / "bootstrap"
+            shutil.copytree(
+                BOOTSTRAP_ROOT,
+                source,
+                ignore=shutil.ignore_patterns("build", "__pycache__"),
+            )
+            built = subprocess.run(
+                [
+                    "/usr/bin/make",
+                    "-C",
+                    os.fspath(source),
+                    f"KEY_ID={KEY_ID}",
+                    f"PUBLIC_KEY_HEX={self.public_key_one}",
+                    "all",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertTrue((source / "build" / "grok-bootstrap").is_file())
 
 
 class DebianPackageBuilderTests(unittest.TestCase):

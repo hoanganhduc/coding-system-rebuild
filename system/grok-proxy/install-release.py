@@ -4462,9 +4462,31 @@ class ReleaseInstaller:
             {key: entry[key] for key in ("path", "sha256", "size", "mode")}
             for entry in root_files
         ]
+        root_runtime_matches = root_runtime_projection == runtime_entries
+        if not root_runtime_matches and user_projection == runtime_entries:
+            root_helper_paths = set(
+                self._root_files_from_identity(identity, release_id).values()
+            )
+            identity_helper_projection = sorted(
+                (
+                    entry
+                    for entry in runtime_entries
+                    if entry["path"] in root_helper_paths
+                ),
+                key=lambda entry: str(entry["path"]),
+            )
+            helper_only_root_projection = sorted(
+                root_runtime_projection,
+                key=lambda entry: str(entry["path"]),
+            )
+            root_runtime_matches = bool(
+                {str(entry["path"]) for entry in root_runtime_projection}
+                == root_helper_paths
+                and helper_only_root_projection == identity_helper_projection
+            )
         if (
             user_projection != runtime_entries
-            or root_runtime_projection != runtime_entries
+            or not root_runtime_matches
             or root_projection != root_entries
         ):
             raise ReleaseError(f"release manifests do not match hashed identity: {release_id}")
@@ -4481,6 +4503,21 @@ class ReleaseInstaller:
         root_entries = root.get("files")
         if not isinstance(entries, list) or not isinstance(root_entries, list):
             raise ReleaseError(f"release closure is invalid: {release_id}")
+        identity = user.get("identity")
+        runtime_entries = (
+            identity.get("runtime_files")
+            if isinstance(identity, dict)
+            else None
+        )
+        root_runtime_projection = [
+            {key: entry[key] for key in ("path", "sha256", "size", "mode")}
+            for entry in root_entries
+        ]
+        if root_runtime_projection != runtime_entries:
+            raise ReleaseError(
+                "release predates the mandatory full root runtime closure and "
+                f"cannot be selected: {release_id}"
+            )
 
         def contains(
             values: list[object], relative: str, expected_mode: str
@@ -6491,8 +6528,22 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
         root_paths = {
             str(entry.get("path")) for entry in root_entries if isinstance(entry, dict)
         }
+        identity = user.get("identity")
+        if not isinstance(identity, dict):
+            raise ReleaseError("legacy release identity is invalid")
+        root_helper_paths = set(
+            self._root_files_from_identity(identity, release_id).values()
+        )
+        direct_admission = [
+            entry
+            for entry in user_entries
+            if isinstance(entry, dict)
+            and entry.get("path") == DIRECT_ADMISSION_RUNTIME
+        ]
         if (
-            DIRECT_ADMISSION_RUNTIME in user_paths
+            root_paths != root_helper_paths
+            or len(direct_admission) != 1
+            or direct_admission[0].get("mode") != "0444"
             or INSTALLER_RUNTIME in user_paths
             or INSTALLER_RUNTIME in root_paths
         ):
@@ -8745,12 +8796,6 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             )
             if self.active_release_id() != release_id or self.root_active_release_id() != release_id:
                 return False
-            entrypoint_bytes = self._gate_source(
-                release_id, "user", target_root_files=target_root_files
-            )
-            broker_bytes = self._gate_source(
-                release_id, "broker", target_root_files=target_root_files
-            )
             actual_entrypoint, _ = _read_regular(
                 self.layout.entrypoint,
                 uid=self.layout.root_uid,
@@ -8763,8 +8808,25 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 gid=self.layout.root_gid,
                 mode=0o555,
             )
-            if actual_entrypoint != entrypoint_bytes or actual_broker != broker_bytes:
-                return False
+            legacy_gate_contract = bool(
+                release_id in self._legacy_validation_releases
+                and self._helper_only_legacy_digest(release_id) is not None
+            )
+            if legacy_gate_contract:
+                entrypoint_bytes = actual_entrypoint
+                broker_bytes = actual_broker
+            else:
+                entrypoint_bytes = self._gate_source(
+                    release_id, "user", target_root_files=target_root_files
+                )
+                broker_bytes = self._gate_source(
+                    release_id, "broker", target_root_files=target_root_files
+                )
+                if (
+                    actual_entrypoint != entrypoint_bytes
+                    or actual_broker != broker_bytes
+                ):
+                    return False
             root_record = self._read_json(
                 self.layout.root_selected,
                 uid=self.layout.root_uid,

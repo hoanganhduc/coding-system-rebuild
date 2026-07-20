@@ -298,6 +298,150 @@ def make_installer(
     return installer, layout, source
 
 
+def retain_historical_root_release_files(
+    installer: release_installer.ReleaseInstaller,
+    release_id: str,
+    retained_paths: set[str],
+    *,
+    rebind_selection: bool = True,
+    drift_gates: bool = False,
+) -> None:
+    """Project a current fixture into the immutable historical root layout."""
+
+    layout = installer.layout
+    selected = json.loads(layout.selected.read_text(encoding="ascii"))
+    release = layout.root_releases / release_id
+    manifest_path = release / "release.json"
+    manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+    manifest["files"] = [
+        entry
+        for entry in manifest["files"]
+        if entry["path"] in retained_paths
+    ]
+    release.chmod(0o755)
+    for path in release.rglob("*"):
+        if path.is_dir():
+            path.chmod(0o755)
+    for path in sorted(
+        release.rglob("*"),
+        key=lambda value: len(value.parts),
+        reverse=True,
+    ):
+        relative = path.relative_to(release).as_posix()
+        if relative == "release.json" or relative in retained_paths:
+            continue
+        path.rmdir() if path.is_dir() else path.unlink()
+    manifest_path.chmod(0o644)
+    manifest_path.write_bytes(release_installer._canonical_json(manifest) + b"\n")
+    manifest_path.chmod(0o444)
+    release.chmod(0o555)
+    if not rebind_selection:
+        return
+    evidence_path = layout.evidence_path(release_id)
+    evidence = json.loads(evidence_path.read_text(encoding="ascii"))
+    evidence["root_manifest_sha256"] = hashlib.sha256(
+        manifest_path.read_bytes()
+    ).hexdigest()
+    evidence_raw = release_installer._canonical_json(evidence) + b"\n"
+    evidence_path.chmod(0o644)
+    evidence_path.write_bytes(evidence_raw)
+    evidence_path.chmod(0o444)
+    with installer._permit_legacy_release_validation(release_id):
+        installer._publish_selection(
+            release_id,
+            selected["operation"],
+            evidence_sha256=hashlib.sha256(evidence_raw).hexdigest(),
+            selection_phase="READY",
+            fault_at=None,
+            selector_faults=False,
+            qualified_rungs=selected["qualified_rungs"],
+        )
+    if not drift_gates:
+        return
+    drift_and_rebind_selection_gates(installer)
+
+
+def drift_and_rebind_selection_gates(
+    installer: release_installer.ReleaseInstaller,
+    *,
+    drift_entrypoint: bool = True,
+    drift_broker: bool = True,
+    update_user: bool = True,
+    update_root: bool = True,
+) -> None:
+    """Drift selected gates and optionally rebind either selection record."""
+
+    layout = installer.layout
+    gate_paths = tuple(
+        path
+        for enabled, path in (
+            (drift_entrypoint, layout.entrypoint),
+            (drift_broker, layout.broker_entrypoint),
+        )
+        if enabled
+    )
+    for path in gate_paths:
+        drifted = path.read_bytes() + b"\n# historical gate fixture\n"
+        path.chmod(0o755)
+        path.write_bytes(drifted)
+        path.chmod(0o555)
+    rebound = json.loads(layout.selected.read_text(encoding="ascii"))
+    rebound["entrypoint_sha256"] = hashlib.sha256(
+        layout.entrypoint.read_bytes()
+    ).hexdigest()
+    rebound["broker_gate_sha256"] = hashlib.sha256(
+        layout.broker_entrypoint.read_bytes()
+    ).hexdigest()
+    user_raw = release_installer._canonical_json(rebound) + b"\n"
+    root_record = dict(rebound)
+    root_record["user_selection_sha256"] = hashlib.sha256(user_raw).hexdigest()
+    if update_user:
+        layout.selected.chmod(0o644)
+        layout.selected.write_bytes(user_raw)
+        layout.selected.chmod(0o444)
+    if update_root:
+        layout.root_selected.chmod(0o644)
+        layout.root_selected.write_bytes(
+            release_installer._canonical_json(root_record) + b"\n"
+        )
+        layout.root_selected.chmod(0o444)
+
+
+def install_historical_helper_only_release(
+    installer: release_installer.ReleaseInstaller,
+    *,
+    include_direct_admission: bool = True,
+) -> str:
+    """Install a pre-installer identity and project its root to four helpers."""
+
+    excluded = {release_installer.INSTALLER_RUNTIME}
+    if not include_direct_admission:
+        excluded.add(release_installer.DIRECT_ADMISSION_RUNTIME)
+    legacy_files = tuple(
+        path for path in installer.runtime_files if path not in excluded
+    )
+    legacy_installer = release_installer.ReleaseInstaller(
+        installer.layout,
+        runtime_files=legacy_files,
+        root_files=installer.root_files,
+        switch_timeout=installer.switch_timeout,
+        proc_authority=installer.proc_authority,
+    )
+    with mock.patch.object(
+        legacy_installer,
+        "validate_target_release_pair",
+        side_effect=legacy_installer.validate_release_pair,
+    ):
+        release_id = legacy_installer.install().release_id
+    retain_historical_root_release_files(
+        installer,
+        release_id,
+        set(installer.root_files.values()),
+        drift_gates=True,
+    )
+    return release_id
+
+
 def write_proc_fixture(prefix: Path) -> tuple[Path, str, int]:
     """Project the bounded proc records used by prefix-trust tests."""
 
@@ -1313,11 +1457,7 @@ class ReleaseInstallerTests(unittest.TestCase):
             legacy_files = tuple(
                 path
                 for path in RUNTIME_FILES
-                if path
-                not in {
-                    release_installer.DIRECT_ADMISSION_RUNTIME,
-                    release_installer.INSTALLER_RUNTIME,
-                }
+                if path != release_installer.INSTALLER_RUNTIME
             )
             legacy_installer = release_installer.ReleaseInstaller(
                 layout,
@@ -1331,6 +1471,18 @@ class ReleaseInstallerTests(unittest.TestCase):
                 side_effect=legacy_installer.validate_release_pair,
             ):
                 legacy_release = legacy_installer.install().release_id
+            retain_historical_root_release_files(
+                installer,
+                legacy_release,
+                set(ROOT_FILES.values()),
+                drift_gates=True,
+            )
+            installer.validate_release_pair(legacy_release)
+            with self.assertRaisesRegex(
+                release_installer.ReleaseError,
+                "predates the mandatory full root runtime closure",
+            ):
+                installer.validate_target_release_pair(legacy_release)
             write_source(source, "v2")
             target_release = installer.plan_release().release_id
 
@@ -1355,6 +1507,112 @@ class ReleaseInstallerTests(unittest.TestCase):
             with self.assertRaisesRegex(release_installer.ReleaseError, "one-shot"):
                 installer.install()
 
+    def test_exact_helper_only_root_is_coherent_but_never_a_target(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, _layout, _source = make_installer(Path(td))
+            release_id = installer.install().release_id
+            retain_historical_root_release_files(
+                installer,
+                release_id,
+                set(ROOT_FILES.values()),
+            )
+            installer.validate_release_pair(release_id)
+            with self.assertRaisesRegex(
+                release_installer.ReleaseError,
+                "predates the mandatory full root runtime closure",
+            ):
+                installer.validate_target_release_pair(release_id)
+
+    def test_legacy_root_projection_rejects_helper_plus_extra_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, layout, _source = make_installer(Path(td))
+            release_id = installer.install().release_id
+            retain_historical_root_release_files(
+                installer,
+                release_id,
+                {*ROOT_FILES.values(), "egress.sh"},
+                rebind_selection=False,
+            )
+            with self.assertRaisesRegex(
+                release_installer.ReleaseError,
+                "release manifests do not match hashed identity",
+            ):
+                installer.validate_release_pair(release_id)
+
+    def test_legacy_selection_rejects_unbound_gate_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, _layout, _source = make_installer(Path(td))
+            release_id = install_historical_helper_only_release(installer)
+            with installer._permit_legacy_release_validation(release_id):
+                self.assertTrue(installer._selection_is_exact(release_id))
+            path = installer.layout.entrypoint
+            path.chmod(0o755)
+            path.write_bytes(path.read_bytes() + b"# unbound change\n")
+            path.chmod(0o555)
+            with installer._permit_legacy_release_validation(release_id):
+                self.assertFalse(installer._selection_is_exact(release_id))
+
+    def test_legacy_selection_rejects_unbound_broker_gate_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, _layout, _source = make_installer(Path(td))
+            release_id = install_historical_helper_only_release(installer)
+            with installer._permit_legacy_release_validation(release_id):
+                self.assertTrue(installer._selection_is_exact(release_id))
+            path = installer.layout.broker_entrypoint
+            path.chmod(0o755)
+            path.write_bytes(path.read_bytes() + b"# unbound broker change\n")
+            path.chmod(0o555)
+            with installer._permit_legacy_release_validation(release_id):
+                self.assertFalse(installer._selection_is_exact(release_id))
+
+    def test_legacy_selection_rejects_user_only_gate_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, _layout, _source = make_installer(Path(td))
+            release_id = install_historical_helper_only_release(installer)
+            with installer._permit_legacy_release_validation(release_id):
+                self.assertTrue(installer._selection_is_exact(release_id))
+            drift_and_rebind_selection_gates(
+                installer,
+                drift_broker=False,
+                update_root=False,
+            )
+            with installer._permit_legacy_release_validation(release_id):
+                self.assertFalse(installer._selection_is_exact(release_id))
+
+    def test_legacy_capability_does_not_admit_drifted_full_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, _layout, _source = make_installer(Path(td))
+            release_id = installer.install().release_id
+            drift_and_rebind_selection_gates(installer)
+            with installer._permit_legacy_release_validation(release_id):
+                self.assertFalse(installer._selection_is_exact(release_id))
+
+    def test_legacy_source_without_direct_admission_gets_no_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, layout, source = make_installer(Path(td))
+            release_id = install_historical_helper_only_release(
+                installer,
+                include_direct_admission=False,
+            )
+            self.assertIsNone(installer._helper_only_legacy_digest(release_id))
+            with installer._permit_legacy_release_validation(release_id):
+                self.assertFalse(installer._selection_is_exact(release_id))
+
+            write_source(source, "v2")
+            target = installer.plan_release()
+            deny = {
+                "schema_version": release_installer.CONTROL_SCHEMA_VERSION,
+                "operation": "install",
+                "from_release": release_id,
+                "to_release": target.release_id,
+            }
+            installer._prepare_legacy_migration_authority(
+                release_id,
+                target,
+                deny,
+            )
+            self.assertFalse(layout.legacy_migration_authority.exists())
+
     def test_ready_legacy_migration_consumption_recovers_without_replay(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -1370,11 +1628,7 @@ class ReleaseInstallerTests(unittest.TestCase):
             legacy_files = tuple(
                 path
                 for path in RUNTIME_FILES
-                if path
-                not in {
-                    release_installer.DIRECT_ADMISSION_RUNTIME,
-                    release_installer.INSTALLER_RUNTIME,
-                }
+                if path != release_installer.INSTALLER_RUNTIME
             )
             legacy_installer = release_installer.ReleaseInstaller(
                 layout,
@@ -1388,6 +1642,12 @@ class ReleaseInstallerTests(unittest.TestCase):
                 side_effect=legacy_installer.validate_release_pair,
             ):
                 legacy_release = legacy_installer.install().release_id
+            retain_historical_root_release_files(
+                installer,
+                legacy_release,
+                set(ROOT_FILES.values()),
+                drift_gates=True,
+            )
             write_source(source, "v2")
             target_release = installer.plan_release().release_id
 

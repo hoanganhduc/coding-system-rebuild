@@ -202,7 +202,17 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   handoff has no destructive compatibility-ledger operation and therefore
   cannot exploit a replacement lock domain. It accepts no caller paths,
   release IDs, PIDs, resource identities, or force
-  controls and is unavailable from the installed lane. Post-install qualification, promotion, profile
+  controls and is unavailable from the installed lane. One historical
+  migration source shape is recognized narrowly: the user manifest must equal
+  its full runtime identity, include direct admission, and lack the installed
+  installer, while the root manifest must be exactly the four identity-bound
+  helper files. Its existing root-owned mode-0555 gates are usable only inside
+  the one-shot migration capability when both selection records, their
+  cross-hash, manifest/evidence digests, helper map, selectors, and access
+  policy bind those exact gate hashes. This shape is never target-eligible;
+  every selectable target still requires the full root runtime closure,
+  installed installer, direct admission, and current generated gates.
+  Post-install qualification, promotion, profile
   activation, and read-only status run only from the concrete root-selected
   immutable release. Installed commands reject caller `--source`, `--home`, and
   `--prefix`; prefix tests use only their inherited descriptor-bound proc

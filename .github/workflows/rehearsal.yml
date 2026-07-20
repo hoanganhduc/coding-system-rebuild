@@ -228,7 +228,8 @@ jobs:
           public_der="$bootstrap_tmp/ed25519-public.der"
           staged="$bootstrap_tmp/closed-dispatcher"
           signed_root="$bootstrap_tmp/signed-releases"
-          native_build="$bootstrap_tmp/native-build"
+          native_build="$GITHUB_WORKSPACE/system/grok-proxy/bootstrap/build"
+          [[ ! -e "$native_build" && ! -L "$native_build" ]]
           mkdir -m 0700 "$signed_root"
           /usr/bin/openssl genpkey -algorithm ED25519 -out "$signing_key" \
             >/dev/null 2>&1
@@ -268,8 +269,9 @@ jobs:
               && -d "$release_source" \
               && ! -L "$release_source" ]]
 
-          make -C system/grok-proxy/bootstrap \
-            BUILD_DIR="$native_build" \
+          /usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            /usr/bin/make -C system/grok-proxy/bootstrap \
             KEY_ID="$key_id" \
             PUBLIC_KEY_HEX="$public_key_hex" \
             all

@@ -85,6 +85,7 @@ deny in place for an explicit resume or rollback.
 | Nonmutating public warm handoff | The compatibility verb proves legacy root inactivity and absence; only installer bootstrap may delete root artifacts | Accepted |
 | Owner-bound orphaned compatibility recovery | Only the signed-bootstrap FD-authorized candidate broker may retire an exact canonical generation-zero compatibility ledger; public `recover` proves root absence and clears only user state/fence after that root commit | Accepted |
 | Signed bootstrap compatibility rescue | Break the old-release deployment circularity by staging but not selecting the signed candidate root release, invoking only its FD-authorized broker to remove exact root compatibility resources, then requiring the installed public recovery path to clear user state/fence before normal install | Accepted |
+| Exact helper-only source migration | Accept the historical four-helper root projection and its record-bound gate bytes only under a one-shot migration capability; never admit it as a selectable target | Accepted |
 | Gate-bound fixed qualification | Schema-2 qualification state binds the exact generated user/broker gate digests, so stale load/fault results cannot authorize a changed gate set | Accepted |
 | Deterministic 32 clients, two live Grok clients | Covers load without unnecessary provider cost | Accepted |
 | Six-task/client cgroup PID contract and closed stage diagnostics | Matches Linux thread accounting observed live while exposing no dynamic failure detail | Accepted |

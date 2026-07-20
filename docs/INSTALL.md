@@ -203,6 +203,15 @@ every OpenVPN process, broker ledger, namespace, tun, listener, multi-session
 fence, workspace, reserved cgroup, and root inventory and fails closed on
 ambiguity.
 
+During that install, an exact historical helper-only root manifest can be used
+only as the one-shot migration source. The paired user manifest must match its
+full identity, contain direct admission, and omit the installed installer; the
+root manifest must contain exactly the four identity-bound helpers. Historical
+gate bytes must remain root-owned mode `0555` and match the cross-bound
+selection records and promotion evidence. This compatibility does not make the
+historical release selectable: every target still needs the full root closure,
+installed installer, direct admission, and current generated gates.
+
 After `resume`, run `status` again and require `rollback_denied: false`, matching
 target root/user release IDs, `active_release_valid: true`,
 `release_access_policy_valid: true`, and exactly one ID in

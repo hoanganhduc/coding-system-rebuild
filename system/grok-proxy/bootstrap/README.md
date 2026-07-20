@@ -257,6 +257,17 @@ Any mismatch or incomplete cleanup retains the ledger/fence and fails closed.
 The rescue is unavailable from an installed runtime and is not a general reset
 or teardown interface.
 
+The subsequent install also supports one bounded historical source layout: its
+user manifest must match the complete identity, include direct admission, and
+omit the installed installer, while its root manifest contains exactly the four
+identity-bound helpers. Because older generated gates can differ from the
+current generator, their root-owned mode-0555 bytes are admitted only when both
+selection records, their cross-hash, promotion evidence, manifest hashes,
+helper map, selectors, and release access bind the exact bytes. This is a
+one-shot migration capability only. Such a release is never an eligible target;
+new and rollback targets still require the full root closure, installed
+installer, direct admission, and current generated gates.
+
 ## Production build and package contract
 
 The production public key is mandatory non-root build input:

@@ -155,6 +155,10 @@
   generation-zero compatibility ledger, followed by a root-nonmutating public
   recovery that clears user state/fence, breaking old-broker deployment
   circularity without a force path.
+- [x] Admit the exact historical helper-only root projection as a one-shot
+  migration source, bind its already-selected gates through both selection
+  records and promotion evidence, and keep it ineligible as an install or
+  rollback target.
 - [x] Add the package-owned signed-application publisher with native compiled-key
   introspection, inode-stable update/release-operation locking, crash-reconciled
   selector audits, compare-and-swap reselection/rollback, and no signed-release
