@@ -4870,6 +4870,12 @@ class QualificationContext:
         )
 
 
+def _provider_canary_nonce(context: QualificationContext) -> str | None:
+    # Direct admission closes its canary capability before supervisor bootstrap;
+    # only provider-backed rungs bind the nonce into supervisor.ready.
+    return None if context.rung == "direct" else context.nonce
+
+
 def _release_contract(context: QualificationContext) -> str:
     selected = environment(32)
     identity = grok_release_id(FAKE_GROK)
@@ -6699,7 +6705,7 @@ def run_real_pair(
             account_control(),
             snapshot,
             provenance,
-            provider_canary_nonce=context.nonce,
+            provider_canary_nonce=_provider_canary_nonce(context),
         )
 
         stage.set("real-pair-pause")

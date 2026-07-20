@@ -690,6 +690,30 @@ class LiveVerifierHelperTests(unittest.TestCase):
             self.assertIn(checkpoint, VERIFY.QUALIFICATION_FAILURE_CODES["real-pair"])
             self.assertIn(f'stage.set("{checkpoint}")', source)
 
+    def test_real_pair_binds_provider_nonce_only_for_provider_backed_rungs(self) -> None:
+        direct = VERIFY.QualificationContext(
+            release_id="a" * 64,
+            nonce="b" * 64,
+            canary_kind="rung",
+            rung="direct",
+            route_profile="direct",
+            contract_sha256="c" * 64,
+            grok_release_id="grok-release",
+            model_id="grok-model",
+            auth_fd=-1,
+        )
+        self.assertIsNone(VERIFY._provider_canary_nonce(direct))
+        self.assertEqual(
+            VERIFY._provider_canary_nonce(
+                replace(direct, rung="vpn", route_profile="vpn")
+            ),
+            direct.nonce,
+        )
+        self.assertIn(
+            "provider_canary_nonce=_provider_canary_nonce(context)",
+            inspect.getsource(VERIFY.run_real_pair),
+        )
+
     def test_captured_process_record_does_not_reopen_a_retired_identity(self) -> None:
         identity = VERIFY.ProcessIdentity(
             100, 1000, "11111111-2222-3333-4444-555555555555"

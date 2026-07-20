@@ -2471,3 +2471,39 @@ never suppress findings from tracked files or weaken the repository scanner.
 - Related Files: `bin/leak-scan.sh`
 
 ---
+
+## [ERR-20260720-055] direct-real-pair-expected-provider-readiness
+
+**Logged**: 2026-07-20T08:55:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+The first production `direct` rung real-pair canary reached two live leases but
+failed closed at `real-pair-authority`.  The verifier required a
+`provider_canary_nonce` field in `supervisor.ready` for every rung, while the
+client intentionally closes a direct-rung canary capability before supervisor
+bootstrap and publishes that field only for provider-backed rungs.
+
+### Response
+
+Made the verifier derive readiness nonce expectations from the same rung
+boundary as the client: `direct` expects the base exact schema, and every
+provider-backed rung expects the authenticated nonce.  Added regression
+coverage for both sides and kept the exact-schema rejection intact.
+
+### Prevention
+
+Whenever an authenticated capability is consumed at different lifecycle
+boundaries by different route classes, test every durable schema consumer for
+both capability-present and intentionally capability-absent cases.
+
+### Metadata
+
+- Reproducible: yes; production gate failed closed before promotion
+- Related Files: `system/grok-proxy/grok_ms/client.py`,
+  `system/grok-proxy/grok_ms/qualification_verifier.py`,
+  `system/grok-proxy/tests/test_live_multi_verify.py`
+
+---
