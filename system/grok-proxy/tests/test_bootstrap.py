@@ -1426,7 +1426,7 @@ class DebianPackageBuilderTests(unittest.TestCase):
     """Build and inspect the production package without acquiring root."""
 
     VERSION = "1.0.0+test1"
-    SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+    SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"  # commit fixture
     SOURCE_DATE_EPOCH = 1_784_505_600
     SOURCE_FILES = (
         "Makefile",

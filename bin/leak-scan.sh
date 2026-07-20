@@ -82,7 +82,7 @@ scan_pattern "hardcoded home path"        '/home/ubuntu' 'REBUILD-MANIFEST\.json
 # (git SHAs, S2 paper IDs, npm integrity) rather than a credential
 scan_pattern "40-hex secret"              '\b[0-9a-f]{40}\b' \
   '(components\.lock|DECISIONS\.md|package-lock\.json|\.lock)$' \
-  '(paperId|S2 hash|"sha"|commit|integrity|revision|github\.com|gitlab\.com|git\b)'
+  '(paperId|S2 hash|"sha"|SOURCE_COMMIT|commit|integrity|revision|github\.com|gitlab\.com|git\b)'
 
 # 2 ---- key names followed by literal (non-placeholder) values
 KEYNAMES=$(
