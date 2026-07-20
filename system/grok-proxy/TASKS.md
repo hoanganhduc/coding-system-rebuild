@@ -128,6 +128,10 @@
 - [x] Defer wrapper TERM/KILL signal and wait diagnostics until `Popen` proves
   whether that exact child exited, and retain the original granular real-pair
   checkpoint in a closed `cleanup-after-*` failure code.
+- [x] Keep only contained transient status-helper failures non-authoritative
+  during repaired convergence, prove every post-spawn failure kills and reaps
+  its exact child, and enter the repaired-binding checkpoint before scanning
+  the replacement generation's recovery authorities.
 
 ## Verification and delivery
 

@@ -259,6 +259,10 @@ class VerificationBlocked(VerificationError):
     """A required read-only evidence channel was unavailable."""
 
 
+class BoundedHelperUnavailable(RuntimeError):
+    """A helper failed only after its exact child was proved contained."""
+
+
 class QualificationStageError(VerificationError):
     """A failure whose public diagnostic is a closed, verifier-owned code."""
 
@@ -3253,28 +3257,18 @@ def _bounded_text_command(
 
     if timeout <= 0 or maximum < 1:
         raise VerificationError("bounded helper limits are invalid")
-    process = subprocess.Popen(
-        list(command),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        close_fds=True,
-        pass_fds=tuple(pass_fds),
-        env=dict(env),
-    )
-    assert process.stdout is not None and process.stderr is not None
-    stdout_fd = process.stdout.fileno()
-    stderr_fd = process.stderr.fileno()
-    streams = {
-        stdout_fd: bytearray(),
-        stderr_fd: bytearray(),
-    }
-    selector = selectors.DefaultSelector()
-    for descriptor in streams:
-        os.set_blocking(descriptor, False)
-        selector.register(descriptor, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout
-
+    try:
+        process = subprocess.Popen(
+            list(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            pass_fds=tuple(pass_fds),
+            env=dict(env),
+        )
+    except OSError as exc:
+        raise BoundedHelperUnavailable("bounded helper could not start") from exc
     def abort() -> None:
         if process.poll() is None:
             try:
@@ -3286,15 +3280,28 @@ def _bounded_text_command(
         # returning a live or zombie helper would violate containment.
         process.wait()
 
+    selector: selectors.BaseSelector | None = None
+    streams: dict[int, bytearray] = {}
     try:
+        selector = selectors.DefaultSelector()
+        assert process.stdout is not None and process.stderr is not None
+        stdout_fd = process.stdout.fileno()
+        stderr_fd = process.stderr.fileno()
+        streams = {
+            stdout_fd: bytearray(),
+            stderr_fd: bytearray(),
+        }
+        for descriptor in streams:
+            os.set_blocking(descriptor, False)
+            selector.register(descriptor, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                abort()
                 raise subprocess.TimeoutExpired(list(command), timeout)
             for key, _events in selector.select(min(0.1, remaining)):
                 try:
-                    chunk = os.read(key.fd, 65_536)
+                    chunk = _read_helper_output(key.fd)
                 except BlockingIOError:
                     continue
                 if not chunk:
@@ -3302,28 +3309,41 @@ def _bounded_text_command(
                     continue
                 streams[key.fd].extend(chunk)
                 if sum(len(value) for value in streams.values()) > maximum:
-                    abort()
                     raise VerificationError(
                         "bounded helper output exceeded its fixed limit"
                     )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            abort()
             raise subprocess.TimeoutExpired(list(command), timeout)
+        returncode = process.wait(timeout=remaining)
+    except OSError as exc:
         try:
-            returncode = process.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
             abort()
-            raise
+        except BaseException as containment_error:
+            raise VerificationError(
+                "bounded helper containment failed"
+            ) from containment_error
+        raise BoundedHelperUnavailable(
+            "bounded helper became unavailable after spawn"
+        ) from exc
+    except BaseException:
+        abort()
+        raise
     finally:
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
+        if selector is not None:
+            selector.close()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
     stdout = bytes(streams[stdout_fd]).decode("utf-8")
     stderr = bytes(streams[stderr_fd]).decode("utf-8")
     return subprocess.CompletedProcess(
         list(command), returncode, stdout, stderr
     )
+
+
+def _read_helper_output(descriptor: int) -> bytes:
+    return os.read(descriptor, 65_536)
 
 
 def invoke(
@@ -3348,7 +3368,7 @@ def status(
 ) -> dict[str, Any] | None:
     try:
         result = invoke(entrypoint, env, "status", timeout=timeout)
-    except (subprocess.TimeoutExpired, UnicodeError):
+    except (BoundedHelperUnavailable, subprocess.SubprocessError, UnicodeError):
         return None
     if result.returncode == 0 and result.stdout.strip().startswith("{"):
         try:
@@ -7048,12 +7068,12 @@ def run_real_pair(
                 "same-rung provider repair",
             ),
         )
+        stage.set("real-pair-repair-bindings")
         repaired_authorities = recovery_authorities(
             account_control(),
             expected_rung=context.rung,
             deadline_monotonic_ns=overall_deadline_monotonic_ns,
         )
-        stage.set("real-pair-repair-bindings")
         if _bound_pause_children(pause, repaired_authorities) != children:
             raise VerificationError("qualification child bindings changed after repair")
         stage.set("real-pair-repair-scopes")

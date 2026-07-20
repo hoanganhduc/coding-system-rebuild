@@ -725,6 +725,11 @@ class LiveVerifierHelperTests(unittest.TestCase):
             )
         ]
         self.assertEqual(repair_positions, sorted(repair_positions))
+        repaired_tail = source[source.index('stage.set("real-pair-repair")') :]
+        self.assertLess(
+            repaired_tail.index('stage.set("real-pair-repair-bindings")'),
+            repaired_tail.index("recovery_authorities("),
+        )
         self.assertEqual(reconnect_positions, sorted(reconnect_positions))
         self.assertLess(
             fault_source.index("response = exchange()"),
@@ -2041,6 +2046,30 @@ class LiveVerifierHelperTests(unittest.TestCase):
         self.assertEqual(result, {"active": True})
         self.assertEqual(invoke.call_count, 2)
 
+    def test_wait_status_retries_after_one_contained_helper_failure(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["grok-remote", "status"],
+            0,
+            '{"active":true}\n',
+            "",
+        )
+        with mock.patch.object(
+            VERIFY,
+            "invoke",
+            side_effect=(
+                VERIFY.BoundedHelperUnavailable("fixture contained failure"),
+                completed,
+            ),
+        ) as invoke, mock.patch.object(VERIFY.time, "sleep"):
+            result = VERIFY.wait_status(
+                Path("/installed/grok-remote"),
+                {},
+                lambda value: value.get("active") is True,
+                10,
+            )
+        self.assertEqual(result, {"active": True})
+        self.assertEqual(invoke.call_count, 2)
+
     def test_bounded_text_timeout_kills_and_reaps_direct_child(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pid_path = Path(directory) / "pid"
@@ -2067,6 +2096,93 @@ class LiveVerifierHelperTests(unittest.TestCase):
                     os.kill(pid, signal.SIGKILL)
                     os.waitpid(pid, 0)
                 self.fail("bounded helper returned without reaping its child")
+
+    def test_bounded_text_setup_os_error_kills_and_reaps_direct_child(self) -> None:
+        captured: list[subprocess.Popen[bytes]] = []
+        real_popen = subprocess.Popen
+
+        def capture(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            process = real_popen(*args, **kwargs)
+            captured.append(process)
+            return process
+
+        class FailingSelector:
+            def register(self, _descriptor: int, _events: int) -> None:
+                raise OSError("fixture selector registration failure")
+
+            def close(self) -> None:
+                pass
+
+        with mock.patch.object(
+            VERIFY.subprocess, "Popen", side_effect=capture
+        ), mock.patch.object(
+            VERIFY.selectors, "DefaultSelector", return_value=FailingSelector()
+        ), self.assertRaises(VERIFY.BoundedHelperUnavailable):
+            VERIFY._bounded_text_command(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                env={"PATH": os.environ.get("PATH", "")},
+                timeout=5,
+            )
+        self.assertEqual(len(captured), 1)
+        self.assertIsNotNone(captured[0].returncode)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(captured[0].pid, os.WNOHANG)
+
+    def test_bounded_text_selector_os_error_kills_and_reaps_direct_child(self) -> None:
+        captured: list[subprocess.Popen[bytes]] = []
+        real_popen = subprocess.Popen
+
+        def capture(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            process = real_popen(*args, **kwargs)
+            captured.append(process)
+            return process
+
+        with mock.patch.object(
+            VERIFY.subprocess, "Popen", side_effect=capture
+        ), mock.patch.object(
+            VERIFY.selectors,
+            "DefaultSelector",
+            side_effect=OSError("fixture selector construction failure"),
+        ), self.assertRaises(VERIFY.BoundedHelperUnavailable):
+            VERIFY._bounded_text_command(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                env={"PATH": os.environ.get("PATH", "")},
+                timeout=5,
+            )
+        self.assertEqual(len(captured), 1)
+        self.assertIsNotNone(captured[0].returncode)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(captured[0].pid, os.WNOHANG)
+
+    def test_bounded_text_read_os_error_kills_and_reaps_direct_child(self) -> None:
+        captured: list[subprocess.Popen[bytes]] = []
+        real_popen = subprocess.Popen
+
+        def capture(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            process = real_popen(*args, **kwargs)
+            captured.append(process)
+            return process
+
+        script = (
+            "import sys,time; sys.stdout.write('x'); sys.stdout.flush(); "
+            "time.sleep(30)"
+        )
+        with mock.patch.object(
+            VERIFY.subprocess, "Popen", side_effect=capture
+        ), mock.patch.object(
+            VERIFY,
+            "_read_helper_output",
+            side_effect=OSError("fixture stream read failure"),
+        ), self.assertRaises(VERIFY.BoundedHelperUnavailable):
+            VERIFY._bounded_text_command(
+                [sys.executable, "-c", script],
+                env={"PATH": os.environ.get("PATH", "")},
+                timeout=5,
+            )
+        self.assertEqual(len(captured), 1)
+        self.assertIsNotNone(captured[0].returncode)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(captured[0].pid, os.WNOHANG)
 
         now = time.monotonic_ns()
         work_deadline = now + 5_000_000_000
@@ -3133,6 +3249,21 @@ class LiveVerifierHelperTests(unittest.TestCase):
             VERIFY,
             "invoke",
             side_effect=subprocess.TimeoutExpired(["status"], 2.5),
+        ) as invoke:
+            self.assertIsNone(
+                VERIFY.status(Path("/entrypoint"), {}, timeout=2.5)
+            )
+        invoke.assert_called_once_with(
+            Path("/entrypoint"), {}, "status", timeout=2.5
+        )
+
+    def test_status_normalizes_contained_helper_error_as_unavailable_sample(self) -> None:
+        with mock.patch.object(
+            VERIFY,
+            "invoke",
+            side_effect=VERIFY.BoundedHelperUnavailable(
+                "fixture contained status failure"
+            ),
         ) as invoke:
             self.assertIsNone(
                 VERIFY.status(Path("/entrypoint"), {}, timeout=2.5)

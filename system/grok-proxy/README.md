@@ -436,6 +436,9 @@ fence, the complete user/root/listener/cgroup clean proof, and a separate bounde
 absence proof for the captured supervisor identity. A replacement or malformed
 fence still fails closed. Cleanup after an earlier primary failure retains both
 facts in a closed stage-specific diagnostic code without exposing dynamic text.
+Post-repair status polling treats only already-contained transient helper failures
+as unavailable samples, and the following recovery-authority scan has its own
+closed checkpoint.
 
 ## How failure is handled
 

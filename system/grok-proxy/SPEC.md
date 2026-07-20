@@ -309,8 +309,13 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   exception text, provider stderr, paths, and process identities are never
   returned. Cleanup uncertainty is encoded either as cleanup-only or as a
   finite `cleanup-after-<closed-primary-stage>` code, so the primary checkpoint
-  is not discarded. Failed or blocked results remain nonpersistent while the
-  canary fence stays active.
+  is not discarded. The repaired-state checkpoint ends before the repaired
+  recovery-authority scan begins, so status convergence and binding evidence
+  have distinct closed codes. Transient status-helper timeout, contained helper,
+  subprocess, and decoding failures remain unavailable samples and never satisfy
+  a status predicate. Every post-spawn helper failure kills and reaps that exact
+  child before it can be normalized. Failed or blocked results remain
+  nonpersistent while the canary fence stays active.
 - Real-pair cleanup may treat the already-captured supervisor's natural exit
   between an exact-live sample and status/pidfd revalidation as convergence,
   but only while the recovery fence still names that exact epoch (or has already

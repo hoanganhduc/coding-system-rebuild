@@ -2941,6 +2941,19 @@ pause-close-before-passive-cleanup; and the generated selected-gate exact-fence
 recovery composition. Do not promote or push until the patched signed release
 passes a real-pair canary and two simultaneous real sessions locally.
 
+### Live follow-up
+
+The first patched signed canary exposed the previously masked primary code as
+`real-pair-repair`. Its authenticated one-use marker proved that provider
+repair completed from generation 1 to 2 and cleanup again proved empty. Failed
+qualification detail is intentionally nonpersistent, but the checkpoint still
+covered both repaired-status convergence and the subsequent recovery-authority
+scan. Move the binding checkpoint before that scan, and treat only contained
+status-helper failures as unavailable samples rather than immediate
+qualification failures. Every post-spawn OS error must first kill and reap the
+exact helper; otherwise retries could accumulate unowned children. Neither
+change accepts an invalid status or relaxes an authority check.
+
 ### Metadata
 
 - Reproducible: yes; live qualification plus deterministic regressions
