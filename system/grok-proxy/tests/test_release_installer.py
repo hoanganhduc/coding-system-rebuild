@@ -474,6 +474,45 @@ def write_proc_fixture(prefix: Path) -> tuple[Path, str, int]:
     return root, boot_id, pid
 
 
+def write_proc_process(
+    root: Path,
+    pid: int,
+    *,
+    parent_pid: int,
+    start_ticks: int,
+    uid_values: tuple[int, int, int, int],
+    gid_values: tuple[int, int, int, int],
+    argv: tuple[str, ...],
+    cwd: Path,
+    executable: Path,
+) -> None:
+    process = root / str(pid)
+    process.mkdir(mode=0o755, exist_ok=True)
+    for name in ("status", "stat", "cmdline", "cwd", "exe"):
+        path = process / name
+        if path.exists() or path.is_symlink():
+            path.unlink()
+    (process / "status").write_text(
+        "Name:\tfixture\n"
+        + "Uid:\t"
+        + "\t".join(str(value) for value in uid_values)
+        + "\nGid:\t"
+        + "\t".join(str(value) for value in gid_values)
+        + "\n",
+        encoding="ascii",
+    )
+    stat_fields = ["S", str(parent_pid), *("0" for _ in range(17)), str(start_ticks)]
+    (process / "stat").write_text(
+        f"{pid} (fixture) {' '.join(stat_fields)}\n",
+        encoding="ascii",
+    )
+    (process / "cmdline").write_bytes(
+        b"\0".join(value.encode("utf-8") for value in argv) + b"\0"
+    )
+    (process / "cwd").symlink_to(cwd)
+    (process / "exe").symlink_to(executable)
+
+
 def cgroup_proc_authority(root: Path, membership: str) -> object:
     fixture = root / "proc-fixture"
     (fixture / "self").mkdir(parents=True, mode=0o755)
@@ -910,6 +949,14 @@ def prepare_promotable_rung(
 
 
 class ReleaseInstallerTests(unittest.TestCase):
+    def test_proc_argv_preserves_empty_arguments_and_requires_termination(self) -> None:
+        self.assertEqual(
+            release_installer._decode_proc_argv(b"python3\0\0status\0"),
+            ("python3", "", "status"),
+        )
+        with self.assertRaisesRegex(release_installer.ReleaseError, "NUL-terminated"):
+            release_installer._decode_proc_argv(b"python3")
+
     def test_process_is_running_treats_procfs_esrch_as_stopped(self) -> None:
         error = ProcessLookupError(errno.ESRCH, "No such process")
         with mock.patch.object(Path, "read_text", side_effect=error):
@@ -1329,6 +1376,523 @@ class ReleaseInstallerTests(unittest.TestCase):
                 "not the concrete root-selected release",
             ):
                 installed.revalidate_boot()
+
+    def test_installed_administrator_is_the_only_process_inventory_exemption(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            fixture, _boot_id, current_pid = write_proc_fixture(base / "proc")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            installer, layout, _source = make_installer(
+                base / "install", proc_authority=authority
+            )
+            release_id = installer.install().release_id
+            installer_path = str(
+                layout.root_releases
+                / release_id
+                / release_installer.INSTALLER_RUNTIME
+            )
+            current_argv = (
+                sys.executable,
+                "-I",
+                "-B",
+                installer_path,
+                "revalidate",
+                "--apply",
+            )
+            parent_pid = os.getppid()
+            parent_argv = ("/usr/bin/sudo", "-n", "--", *current_argv)
+            uid = os.getuid()
+            gid = os.getgid()
+            credentials = (uid, uid, uid, uid)
+            groups = (gid, gid, gid, gid)
+
+            def write_current(
+                *,
+                start_ticks: int = 101,
+                argv: tuple[str, ...] = current_argv,
+                cwd: Path = base,
+            ) -> None:
+                write_proc_process(
+                    fixture,
+                    current_pid,
+                    parent_pid=parent_pid,
+                    start_ticks=start_ticks,
+                    uid_values=credentials,
+                    gid_values=groups,
+                    argv=argv,
+                    cwd=cwd,
+                    executable=Path(sys.executable).resolve(),
+                )
+
+            def write_parent(
+                *,
+                argv: tuple[str, ...] = parent_argv,
+                cwd: Path = base,
+                executable: Path = Path("/usr/bin/sudo"),
+            ) -> None:
+                write_proc_process(
+                    fixture,
+                    parent_pid,
+                    parent_pid=1,
+                    start_ticks=202,
+                    uid_values=credentials,
+                    gid_values=groups,
+                    argv=argv,
+                    cwd=cwd,
+                    executable=executable,
+                )
+
+            write_current()
+            write_parent()
+            installed = release_installer.ReleaseInstaller(
+                layout,
+                runtime_files=RUNTIME_FILES,
+                root_files=ROOT_FILES,
+                proc_authority=authority,
+                installed_release_id=release_id,
+            )
+            sudo_environment = {
+                "SUDO_UID": str(layout.target_uid),
+                "SUDO_GID": str(layout.target_gid),
+            }
+            with mock.patch.dict(os.environ, sudo_environment):
+                self.assertEqual(installed._release_bound_process_inventory(), [])
+                self.assertEqual(installed.revalidate_boot().release_id, release_id)
+
+                original_layout = (
+                    layout.target_uid,
+                    layout.target_gid,
+                    layout.root_uid,
+                    layout.root_gid,
+                    layout.test_install,
+                )
+                layout.target_uid = 4242
+                layout.target_gid = 4343
+                layout.root_uid = 0
+                layout.root_gid = 0
+                layout.test_install = False
+                production_argv = (
+                    "/usr/bin/python3",
+                    "-I",
+                    "-B",
+                    installer_path,
+                    "revalidate",
+                    "--apply",
+                )
+                production_parent_argv = ("sudo", "--", *production_argv)
+                write_proc_process(
+                    fixture,
+                    current_pid,
+                    parent_pid=parent_pid,
+                    start_ticks=101,
+                    uid_values=(0, 0, 0, 0),
+                    gid_values=(0, 0, 0, 0),
+                    argv=production_argv,
+                    cwd=base,
+                    executable=Path("/usr/bin/python3").resolve(),
+                )
+                write_proc_process(
+                    fixture,
+                    parent_pid,
+                    parent_pid=1,
+                    start_ticks=202,
+                    uid_values=(4242, 0, 0, 0),
+                    gid_values=(0, 0, 0, 0),
+                    argv=production_parent_argv,
+                    cwd=base,
+                    executable=Path("/usr/bin/sudo"),
+                )
+                production_installed = release_installer.ReleaseInstaller(
+                    layout,
+                    runtime_files=RUNTIME_FILES,
+                    root_files=ROOT_FILES,
+                    proc_authority=authority,
+                    installed_release_id=release_id,
+                )
+                with mock.patch.dict(
+                    os.environ,
+                    {"SUDO_UID": "4242", "SUDO_GID": "4343"},
+                ):
+                    self.assertEqual(
+                        production_installed._release_bound_process_inventory(), []
+                    )
+                    outer_invoker_pid = 2_000_000_003
+                    write_proc_process(
+                        fixture,
+                        outer_invoker_pid,
+                        parent_pid=1,
+                        start_ticks=303,
+                        uid_values=(4242, 4242, 4242, 4242),
+                        gid_values=(4343, 4343, 4343, 4343),
+                        argv=(
+                            "/bin/sh",
+                            "-c",
+                            f"sudo -- {' '.join(production_argv)}; /bin/true",
+                        ),
+                        cwd=base,
+                        executable=Path("/bin/sh"),
+                    )
+                    self.assertEqual(
+                        production_installed._release_bound_process_inventory(), []
+                    )
+                    write_proc_process(
+                        fixture,
+                        parent_pid,
+                        parent_pid=1,
+                        start_ticks=202,
+                        uid_values=(4242, 0, 0, 0),
+                        gid_values=(4343, 4343, 4343, 4343),
+                        argv=production_parent_argv,
+                        cwd=base,
+                        executable=Path("/usr/bin/sudo"),
+                    )
+                    self.assertEqual(
+                        production_installed._release_bound_process_inventory(), []
+                    )
+                    write_proc_process(
+                        fixture,
+                        parent_pid,
+                        parent_pid=1,
+                        start_ticks=999,
+                        uid_values=(4242, 0, 0, 0),
+                        gid_values=(0, 0, 0, 0),
+                        argv=production_parent_argv,
+                        cwd=base,
+                        executable=Path("/usr/bin/sudo"),
+                    )
+                    self.assertIn(
+                        parent_pid,
+                        {
+                            record["pid"]
+                            for record in production_installed._release_bound_process_inventory()
+                        },
+                    )
+                    write_proc_process(
+                        fixture,
+                        parent_pid,
+                        parent_pid=1,
+                        start_ticks=202,
+                        uid_values=(4242, 0, 0, 0),
+                        gid_values=(4343, 0, 0, 0),
+                        argv=production_parent_argv,
+                        cwd=base,
+                        executable=Path("/usr/bin/sudo"),
+                    )
+                    self.assertIn(
+                        parent_pid,
+                        {
+                            record["pid"]
+                            for record in production_installed._release_bound_process_inventory()
+                        },
+                    )
+                    write_proc_process(
+                        fixture,
+                        parent_pid,
+                        parent_pid=1,
+                        start_ticks=202,
+                        uid_values=(4242, 0, 4242, 0),
+                        gid_values=(0, 0, 0, 0),
+                        argv=production_parent_argv,
+                        cwd=base,
+                        executable=Path("/usr/bin/sudo"),
+                    )
+                    self.assertIn(
+                        parent_pid,
+                        {
+                            record["pid"]
+                            for record in production_installed._release_bound_process_inventory()
+                        },
+                    )
+                write_proc_process(
+                    fixture,
+                    parent_pid,
+                    parent_pid=1,
+                    start_ticks=202,
+                    uid_values=(4242, 0, 0, 0),
+                    gid_values=(0, 0, 0, 0),
+                    argv=production_parent_argv,
+                    cwd=base,
+                    executable=Path("/usr/bin/sudo"),
+                )
+                with mock.patch.dict(
+                    os.environ,
+                    {"SUDO_UID": "", "SUDO_GID": ""},
+                ):
+                    missing_sudo_records = (
+                        production_installed._release_bound_process_inventory()
+                    )
+                self.assertEqual(
+                    {record["pid"] for record in missing_sudo_records},
+                    {current_pid, parent_pid},
+                )
+                (
+                    layout.target_uid,
+                    layout.target_gid,
+                    layout.root_uid,
+                    layout.root_gid,
+                    layout.test_install,
+                ) = original_layout
+                write_current()
+                write_parent()
+
+                unrelated_pid = 2_000_000_001
+                write_proc_process(
+                    fixture,
+                    unrelated_pid,
+                    parent_pid=current_pid,
+                    start_ticks=303,
+                    uid_values=credentials,
+                    gid_values=groups,
+                    argv=("/bin/sleep", "30"),
+                    cwd=layout.user_releases / release_id,
+                    executable=Path("/bin/sleep"),
+                )
+                sudo_clone_pid = 2_000_000_002
+                write_proc_process(
+                    fixture,
+                    sudo_clone_pid,
+                    parent_pid=1,
+                    start_ticks=404,
+                    uid_values=credentials,
+                    gid_values=groups,
+                    argv=parent_argv,
+                    cwd=base,
+                    executable=Path("/usr/bin/sudo"),
+                )
+                records = installed._release_bound_process_inventory()
+                self.assertEqual(
+                    {record["pid"] for record in records},
+                    {unrelated_pid, sudo_clone_pid},
+                )
+
+    def test_installed_administrator_exemption_fails_closed_on_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            fixture, _boot_id, current_pid = write_proc_fixture(base / "proc")
+            descriptor = os.open(fixture, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            authority = release_installer.ProcAuthority.from_fd(
+                descriptor, display=fixture, fixture=True
+            )
+            os.close(descriptor)
+            installer, layout, _source = make_installer(
+                base / "install", proc_authority=authority
+            )
+            release_id = installer.install().release_id
+            installer_path = str(
+                layout.root_releases
+                / release_id
+                / release_installer.INSTALLER_RUNTIME
+            )
+            current_argv = (
+                sys.executable,
+                "-I",
+                "-B",
+                installer_path,
+                "revalidate",
+                "--apply",
+            )
+            parent_pid = os.getppid()
+            parent_argv = ("/usr/bin/sudo", "--", *current_argv)
+            uid = os.getuid()
+            gid = os.getgid()
+            credentials = (uid, uid, uid, uid)
+            groups = (gid, gid, gid, gid)
+
+            def reset() -> None:
+                write_proc_process(
+                    fixture,
+                    current_pid,
+                    parent_pid=parent_pid,
+                    start_ticks=501,
+                    uid_values=credentials,
+                    gid_values=groups,
+                    argv=current_argv,
+                    cwd=base,
+                    executable=Path(sys.executable).resolve(),
+                )
+                write_proc_process(
+                    fixture,
+                    parent_pid,
+                    parent_pid=1,
+                    start_ticks=502,
+                    uid_values=credentials,
+                    gid_values=groups,
+                    argv=parent_argv,
+                    cwd=base,
+                    executable=Path("/usr/bin/sudo"),
+                )
+
+            reset()
+            installed = release_installer.ReleaseInstaller(
+                layout,
+                runtime_files=RUNTIME_FILES,
+                root_files=ROOT_FILES,
+                proc_authority=authority,
+                installed_release_id=release_id,
+            )
+            environment = {
+                "SUDO_UID": str(layout.target_uid),
+                "SUDO_GID": str(layout.target_gid),
+            }
+            cases = (
+                (
+                    "self-epoch",
+                    lambda: write_proc_process(
+                        fixture,
+                        current_pid,
+                        parent_pid=parent_pid,
+                        start_ticks=999,
+                        uid_values=credentials,
+                        gid_values=groups,
+                        argv=current_argv,
+                        cwd=base,
+                        executable=Path(sys.executable).resolve(),
+                    ),
+                    current_pid,
+                    environment,
+                ),
+                (
+                    "self-extra-path",
+                    lambda: write_proc_process(
+                        fixture,
+                        current_pid,
+                        parent_pid=parent_pid,
+                        start_ticks=501,
+                        uid_values=credentials,
+                        gid_values=groups,
+                        argv=(*current_argv, str(layout.user_releases / release_id)),
+                        cwd=base,
+                        executable=Path(sys.executable).resolve(),
+                    ),
+                    current_pid,
+                    environment,
+                ),
+                (
+                    "self-executable",
+                    lambda: write_proc_process(
+                        fixture,
+                        current_pid,
+                        parent_pid=parent_pid,
+                        start_ticks=501,
+                        uid_values=credentials,
+                        gid_values=groups,
+                        argv=current_argv,
+                        cwd=base,
+                        executable=Path("/bin/sh"),
+                    ),
+                    current_pid,
+                    environment,
+                ),
+                (
+                    "self-credentials",
+                    lambda: write_proc_process(
+                        fixture,
+                        current_pid,
+                        parent_pid=parent_pid,
+                        start_ticks=501,
+                        uid_values=(uid, uid, uid, uid + 1),
+                        gid_values=(gid, gid, gid, gid + 1),
+                        argv=current_argv,
+                        cwd=base,
+                        executable=Path(sys.executable).resolve(),
+                    ),
+                    current_pid,
+                    environment,
+                ),
+                (
+                    "parent-absent",
+                    lambda: shutil.rmtree(fixture / str(parent_pid)),
+                    current_pid,
+                    environment,
+                ),
+                (
+                    "parent-shell-wrapper",
+                    lambda: write_proc_process(
+                        fixture,
+                        parent_pid,
+                        parent_pid=1,
+                        start_ticks=502,
+                        uid_values=credentials,
+                        gid_values=groups,
+                        argv=(
+                            "/bin/sh",
+                            "-c",
+                            f"exec {' '.join(current_argv)}",
+                        ),
+                        cwd=base,
+                        executable=Path("/bin/sh"),
+                    ),
+                    current_pid,
+                    environment,
+                ),
+                (
+                    "parent-executable",
+                    lambda: write_proc_process(
+                        fixture,
+                        parent_pid,
+                        parent_pid=1,
+                        start_ticks=502,
+                        uid_values=credentials,
+                        gid_values=groups,
+                        argv=parent_argv,
+                        cwd=base,
+                        executable=Path("/bin/sh"),
+                    ),
+                    parent_pid,
+                    environment,
+                ),
+                (
+                    "parent-argv",
+                    lambda: write_proc_process(
+                        fixture,
+                        parent_pid,
+                        parent_pid=1,
+                        start_ticks=502,
+                        uid_values=credentials,
+                        gid_values=groups,
+                        argv=(*parent_argv, installer_path),
+                        cwd=base,
+                        executable=Path("/usr/bin/sudo"),
+                    ),
+                    parent_pid,
+                    environment,
+                ),
+                (
+                    "parent-cwd",
+                    lambda: write_proc_process(
+                        fixture,
+                        parent_pid,
+                        parent_pid=1,
+                        start_ticks=502,
+                        uid_values=credentials,
+                        gid_values=groups,
+                        argv=parent_argv,
+                        cwd=layout.root_releases / release_id,
+                        executable=Path("/usr/bin/sudo"),
+                    ),
+                    parent_pid,
+                    environment,
+                ),
+                (
+                    "sudo-environment",
+                    lambda: None,
+                    parent_pid,
+                    {"SUDO_UID": "999", "SUDO_GID": "999"},
+                ),
+            )
+            for name, mutate, expected_pid, case_environment in cases:
+                with self.subTest(case=name):
+                    reset()
+                    mutate()
+                    with mock.patch.dict(os.environ, case_environment):
+                        records = installed._release_bound_process_inventory()
+                    self.assertIn(expected_pid, {record["pid"] for record in records})
 
     def test_proc_authority_inventory_has_no_ambient_proc_leaf(self) -> None:
         with tempfile.TemporaryDirectory() as td:

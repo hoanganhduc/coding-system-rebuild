@@ -159,6 +159,10 @@
   migration source, bind its already-selected gates through both selection
   records and promotion evidence, and keep it ineligible as an install or
   rollback target.
+- [x] Keep installed maintenance from counting its own documented Python/sudo
+  process pair as release residue, while epoch-, argv-, credential-, and
+  provenance-binding the exemption so every other release consumer remains a
+  blocker.
 - [x] Add the package-owned signed-application publisher with native compiled-key
   introspection, inode-stable update/release-operation locking, crash-reconciled
   selector audits, compare-and-swap reselection/rollback, and no signed-release

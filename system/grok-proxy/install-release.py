@@ -2553,6 +2553,43 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _proc_stat_identity(raw: bytes) -> tuple[int, int]:
+    try:
+        decoded = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ReleaseError("supervisor proc stat is non-ASCII") from exc
+    close = decoded.rfind(")")
+    if close < 0:
+        raise ReleaseError("supervisor /proc stat is malformed")
+    fields = decoded[close + 2 :].split()
+    if len(fields) < 20:
+        raise ReleaseError("supervisor /proc stat is truncated")
+    parent_pid = int(fields[1])
+    start_ticks = int(fields[19])
+    if parent_pid < 0:
+        raise ReleaseError("supervisor parent PID is invalid")
+    if start_ticks <= 0:
+        raise ReleaseError("supervisor start time is invalid")
+    return parent_pid, start_ticks
+
+
+def _proc_stat_start_ticks(raw: bytes) -> int:
+    return _proc_stat_identity(raw)[1]
+
+
+def _decode_proc_argv(raw: bytes) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    if not raw.endswith(b"\0"):
+        raise ReleaseError("release process argv is not NUL-terminated")
+    try:
+        return tuple(
+            item.decode("utf-8", "strict") for item in raw[:-1].split(b"\0")
+        )
+    except UnicodeDecodeError as exc:
+        raise ReleaseError("release process argv is not UTF-8") from exc
+
+
 def _production_direct_admission_is_exact(
     contents: Mapping[str, bytes],
 ) -> bool:
@@ -3438,6 +3475,33 @@ class ReleaseInstaller:
             raise ReleaseError("installed installer release identity is invalid")
         self.proc_authority = proc_authority or ProcAuthority.production()
         self.installed_release_id = installed_release_id
+        self._administrative_pid: int | None = None
+        self._administrative_start_ticks: int | None = None
+        self._administrative_parent_pid: int | None = None
+        self._administrative_parent_start_ticks: int | None = None
+        self._administrative_argv: tuple[str, ...] = ()
+        self._administrative_executable = ""
+        if self.installed_release_id is not None:
+            self._administrative_pid = os.getpid()
+            self_stat = self.proc_authority.read_bytes(
+                f"{self._administrative_pid}/stat",
+                maximum=MAX_SWITCH_PROC_RECORD_BYTES,
+                operation="installed administrator identity",
+            )
+            parent_pid, self._administrative_start_ticks = _proc_stat_identity(
+                self_stat
+            )
+            self._administrative_argv = self._proc_argv(self._administrative_pid)
+            self._administrative_executable = self.proc_authority.readlink(
+                f"{self._administrative_pid}/exe"
+            )
+            try:
+                parent_start_ticks = self._proc_start_ticks(parent_pid)
+            except (OSError, ReleaseError, ValueError):
+                pass
+            else:
+                self._administrative_parent_pid = parent_pid
+                self._administrative_parent_start_ticks = parent_start_ticks
         self._legacy_validation_releases: set[str] = set()
         self.profile_transition: dict[str, object] = {
             "status": "not-checked",
@@ -8909,22 +8973,24 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                 maximum=MAX_SWITCH_PROC_RECORD_BYTES,
                 budget=inventory_budget,
                 operation="process identity inventory",
-            ).decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise ReleaseError("supervisor proc stat is non-ASCII") from exc
+            )
         finally:
             if temporary_authority:
                 authority.close()
-        close = raw.rfind(")")
-        if close < 0:
-            raise ReleaseError("supervisor /proc stat is malformed")
-        fields = raw[close + 2 :].split()
-        if len(fields) < 20:
-            raise ReleaseError("supervisor /proc stat is truncated")
-        value = int(fields[19])
-        if value <= 0:
-            raise ReleaseError("supervisor start time is invalid")
-        return value
+        return _proc_stat_start_ticks(raw)
+
+    def _proc_argv(
+        self,
+        pid: int,
+        inventory_budget: _SwitchInventoryBudget | None = None,
+    ) -> tuple[str, ...]:
+        raw = self.proc_authority.read_bytes(
+            f"{pid}/cmdline",
+            maximum=MAX_SWITCH_PROC_RECORD_BYTES,
+            budget=inventory_budget,
+            operation="release process inventory",
+        )
+        return _decode_proc_argv(raw)
 
     def _live_supervisor_pidfd(
         self,
@@ -9277,6 +9343,100 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             candidate = Path(value)
             return any(candidate == root or root in candidate.parents for root in roots)
 
+        administrative_candidates: dict[str, int] = {}
+
+        def installed_administrator_kind(
+            pid: int,
+            start_ticks: int,
+            uid_values: tuple[int, ...],
+            gid_values: tuple[int, ...],
+            executable: str,
+            argv: tuple[str, ...],
+            matched: list[str],
+        ) -> str | None:
+            """Classify one half of the exact installed command pair."""
+
+            if self.installed_release_id is None:
+                return None
+            installer_path = str(
+                self.layout.root_releases
+                / self.installed_release_id
+                / INSTALLER_RUNTIME
+            )
+            administrative_shape = (
+                len(self._administrative_argv) >= 4
+                and self._administrative_argv[1:3] == ("-I", "-B")
+                and self._administrative_argv[3] == installer_path
+                and self._administrative_argv.count(installer_path) == 1
+                and (
+                    self.layout.test_install
+                    or (
+                        self._administrative_argv[0] == "/usr/bin/python3"
+                        and self._administrative_executable
+                        == os.path.realpath("/usr/bin/python3")
+                    )
+                )
+            )
+            if (
+                not administrative_shape
+                or matched != [installer_path]
+                or argv.count(installer_path) != 1
+            ):
+                return None
+            root_uids = (self.layout.root_uid,) * 4
+            root_gids = (self.layout.root_gid,) * 4
+            if (
+                pid == self._administrative_pid
+                and start_ticks == self._administrative_start_ticks
+                and uid_values == root_uids
+                and gid_values == root_gids
+                and argv == self._administrative_argv
+                and executable == self._administrative_executable
+            ):
+                return "self"
+            raw_sudo_uid = os.environ.get("SUDO_UID", "")
+            raw_sudo_gid = os.environ.get("SUDO_GID", "")
+            try:
+                sudo_uid = int(raw_sudo_uid)
+                sudo_gid = int(raw_sudo_gid)
+            except ValueError:
+                return None
+            if raw_sudo_uid != str(sudo_uid) or raw_sudo_gid != str(sudo_gid):
+                return None
+            sudo_prefixes = (
+                ("sudo", "--"),
+                ("sudo", "-n", "--"),
+                ("/usr/bin/sudo", "--"),
+                ("/usr/bin/sudo", "-n", "--"),
+            )
+            sudo_argv = any(
+                argv == prefix + self._administrative_argv
+                for prefix in sudo_prefixes
+            )
+            if (
+                pid == self._administrative_parent_pid
+                and pid == os.getppid()
+                and start_ticks == self._administrative_parent_start_ticks
+                and sudo_uid == self.layout.target_uid
+                and sudo_gid == self.layout.target_gid
+                and uid_values
+                == (
+                    self.layout.target_uid,
+                    self.layout.root_uid,
+                    self.layout.root_uid,
+                    self.layout.root_uid,
+                )
+                and gid_values
+                in {
+                    (self.layout.target_gid,) * 4,
+                    root_gids,
+                }
+                and executable == "/usr/bin/sudo"
+                and sudo_argv
+            ):
+                return "parent"
+            return None
+
         directory_flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
@@ -9310,37 +9470,73 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                         uid_row = next(
                             row for row in status.splitlines() if row.startswith("Uid:")
                         )
-                        uid = int(uid_row.split()[1])
+                        gid_row = next(
+                            row for row in status.splitlines() if row.startswith("Gid:")
+                        )
+                        uid_values = tuple(int(value) for value in uid_row.split()[1:])
+                        gid_values = tuple(int(value) for value in gid_row.split()[1:])
+                        if len(uid_values) != 4 or len(gid_values) != 4:
+                            raise ValueError("process credential vector is incomplete")
+                        uid = uid_values[0]
                         if uid not in {self.layout.target_uid, self.layout.root_uid}:
                             continue
                         values: list[str] = []
-                        for name in ("cwd", "exe"):
-                            try:
-                                value = os.readlink(name, dir_fd=process_fd)
-                                inventory_budget.consume_bytes(
-                                    len(value.encode("utf-8", "surrogateescape")),
+                        try:
+                            cwd = os.readlink("cwd", dir_fd=process_fd)
+                            inventory_budget.consume_bytes(
+                                len(cwd.encode("utf-8", "surrogateescape")),
+                                "release process inventory",
+                            )
+                            values.append(cwd)
+                        except OSError:
+                            pass
+                        try:
+                            executable = os.readlink("exe", dir_fd=process_fd)
+                            inventory_budget.consume_bytes(
+                                len(executable.encode("utf-8", "surrogateescape")),
+                                "release process inventory",
+                            )
+                            values.append(executable)
+                        except OSError:
+                            executable = ""
+                        argv = _decode_proc_argv(
+                            inventory_budget.read_at(
+                                process_fd,
+                                "cmdline",
+                                MAX_SWITCH_PROC_RECORD_BYTES,
+                                "release process inventory",
+                            )
+                        )
+                        values.extend(argv)
+                        matched = sorted({value for value in values if bound(value)})
+                        start_ticks = (
+                            _proc_stat_start_ticks(
+                                inventory_budget.read_at(
+                                    process_fd,
+                                    "stat",
+                                    MAX_SWITCH_PROC_RECORD_BYTES,
                                     "release process inventory",
                                 )
-                                values.append(value)
-                            except OSError:
-                                pass
-                        cmdline = inventory_budget.read_at(
-                            process_fd,
-                            "cmdline",
-                            MAX_SWITCH_PROC_RECORD_BYTES,
-                            "release process inventory",
-                        ).split(b"\0")
-                        values.extend(
-                            item.decode("utf-8", "strict") for item in cmdline if item
+                            )
+                            if matched
+                            else None
                         )
-                        matched = sorted({value for value in values if bound(value)})
+                        administrative_kind = installed_administrator_kind(
+                            pid,
+                            start_ticks if start_ticks is not None else -1,
+                            uid_values,
+                            gid_values,
+                            executable,
+                            argv,
+                            matched,
+                        )
+                        if administrative_kind is not None:
+                            administrative_candidates[administrative_kind] = pid
                         if matched:
                             records.append(
                                 {
                                     "pid": pid,
-                                    "start_ticks": self._proc_start_ticks(
-                                        pid, inventory_budget
-                                    ),
+                                    "start_ticks": start_ticks,
                                     "uid": uid,
                                     "release_paths": matched,
                                 }
@@ -9355,6 +9551,19 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                         os.close(process_fd)
         finally:
             os.close(proc_fd)
+        # An outer invoking shell is not a release consumer merely because one
+        # opaque command-string argument mentions this path.  New consumers are
+        # linearized by install.lock and the durable deny; only concrete procfs
+        # path observations participate in this inventory.
+        if (
+            set(administrative_candidates) == {"self", "parent"}
+            and administrative_candidates["self"] != administrative_candidates["parent"]
+            and administrative_candidates["parent"] == os.getppid()
+        ):
+            administrative_pids = set(administrative_candidates.values())
+            records = [
+                record for record in records if record["pid"] not in administrative_pids
+            ]
         return sorted(records, key=lambda value: int(value["pid"]))
 
     def _fixed_listener_inventory(

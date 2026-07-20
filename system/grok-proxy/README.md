@@ -289,6 +289,16 @@ grok-remote profile-create --json
 Record the printed `<release_id>`, `<profile_sha256>`, and `missing_rungs`.
 Qualify a newly installed release once with the two fixed release gates:
 
+Invoke the installer exactly as shown. The quiescence inventory recognizes only
+this concrete Python command and its immediate `sudo [ -n ] --` monitor as the
+administrative pair. Both processes must match in the same inventory pass;
+shell or `env` wrappers inserted between `sudo` and Python, and any additional
+release-bound cwd, executable, or path-valued argument, remain blockers. An
+outer invoking shell is not a release consumer merely because opaque `-c` text
+mentions the installer: new consumers are serialized behind the selection lock,
+the deny is durable before this command returns, and every process actually
+holding a release path is still inventoried.
+
 ```bash
 RELEASE_ID='<release_id>'
 [[ $RELEASE_ID =~ ^[0-9a-f]{64}$ ]] || exit 2

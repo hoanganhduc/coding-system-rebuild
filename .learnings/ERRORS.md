@@ -2155,3 +2155,65 @@ do not rely on the interactive shell's ambient umask or repair one file ad hoc.
   `system/grok-proxy/grok_ms/qualification_verifier.py`
 
 ---
+
+## [ERR-20260720-046] installed-admin-counted-as-release-residue
+
+**Logged**: 2026-07-20T04:20:00Z
+**Priority**: high
+**Status**: pending
+
+### Summary
+
+The first live `begin-release-qualification` on a newly installed release
+failed because the release-bound process inventory counted the documented
+Python installer process and its immediate `sudo` monitor as stale consumers.
+
+### Response
+
+Add an installed-lane-only exemption for the exact epoch-bound administrative
+pair. Bind the Python argv slot, complete child/parent argv relationship,
+executable identity, and full UID/GID vectors; retain any additional bound
+cwd, executable, argument, wrapper, or unrelated process as a blocker.
+
+### Prevention
+
+Any quiescence scanner that examines command arguments must test the real
+administrative invocation that calls it. Hermetic inventories must include the
+scanner process and privilege wrapper, not only unrelated residue fixtures.
+
+### Metadata
+
+- Reproducible: yes; two live attempts returned only transient self/parent PIDs
+- Related Files: `system/grok-proxy/install-release.py`,
+  `system/grok-proxy/tests/test_release_installer.py`
+
+---
+
+## [ERR-20260720-047] isolated-candidate-inherited-group-write-mode
+
+**Logged**: 2026-07-20T04:52:54Z
+**Priority**: medium
+**Status**: resolved
+
+### Summary
+
+An isolated regression candidate extracted under the caller's `0002` umask
+materialized Git executable entries as `0775`. The E2E prerequisite check
+correctly rejected the group-writable OpenVPN fixture.
+
+### Response
+
+Extract normalized Git archives under an explicit `0022` umask before applying
+the reviewed working-tree patch.
+
+### Prevention
+
+Candidate construction must pin its extraction umask and verify a representative
+executable is `0755` before launching the full isolated gate.
+
+### Metadata
+
+- Reproducible: yes; two partial ledgers failed at the same E2E prerequisite
+- Related Files: `system/grok-proxy/tests/run-isolated.sh`
+
+---

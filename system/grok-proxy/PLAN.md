@@ -98,6 +98,7 @@ deny in place for an explicit resume or rollback.
 | Exact VPN rung-canary deny exception | Generated gate and immutable broker independently admit only supervisor `up`/`next` bound to the root canary's host/release/rung/profile/contract | Accepted |
 | Optional Grok leader evidence | Require exact distinct leader sockets only when leader mode is active; otherwise prove two distinct owned Grok children and no shared leader | Accepted |
 | Selection-linearized canary start | Wait for all shared admission locks, re-check quiescence, then publish the deny while exclusive | Accepted |
+| Epoch-bound installed-admin inventory exemption | Exclude only the documented concrete Python invocation and exact immediate sudo monitor while retaining every other release-bound observation | Accepted |
 | Exact nonduplicated broker CLI | Disable argparse abbreviation and reject unknown/duplicate canary-gate options at the outer boundary | Accepted |
 | Ordered fixed-qualification parent cleanup | Keep load/fault resource accounting while killing the outer scope before strict runtime recovery and removing it only after durable `RECOVERED`/`CONTAINED` proofs | Accepted |
 | No accounting parent for real-pair/manual diagnostics | Preserve recoverable supervisor/provider cgroup topology while bounding the invoking verifier with parent-death and session ownership | Accepted |

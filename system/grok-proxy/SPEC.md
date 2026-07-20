@@ -391,6 +391,16 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   listeners, and production cgroup-v2 names are empty. Inventory is read-only;
   expected OS/subprocess promotion failures either restore and re-prove the
   prior release or leave the durable deny in place.
+- The release-bound inventory excludes only the epoch-bound installed Python
+  command and its exact immediate `/usr/bin/sudo [ -n ] --` monitor. The
+  concrete installer must occupy the fixed argv slot, both processes must be
+  observed in the same inventory pass, full credential vectors and complete
+  argv must match, and any additional bound cwd, executable, argv, wrapper,
+  descendant, or unrelated consumer still fails closed. A wrapper between
+  `sudo` and Python breaks the pair. An outer invoker is not classified from an
+  opaque command-string substring alone: selection-lock exclusion plus durable
+  deny publication linearizes any process it starts, while concrete descendant
+  path observations remain blockers.
 - A same-release install never treats legacy root residue as idempotent success.
   Cross-release migration binds selection operation, prior release, current
   host, evidence digest, directory/file mount identity, and inactive process
