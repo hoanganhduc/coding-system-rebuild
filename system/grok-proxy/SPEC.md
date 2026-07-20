@@ -273,6 +273,14 @@ The normative design is the reviewed 2026-07-13 consolidated plan at:
   rung, route profile, and exact request contract digest. Cleanup operations
   remain deny-safe; compatibility, install/rollback, reset, and mismatched
   requests remain fenced.
+- An FD-authenticated direct rung canary may use strict direct recovery for its
+  own exact dead epoch. This recovery forbids compatibility handoff and any
+  non-direct provider record, so a fresh profile can qualify its first direct
+  rung without depending on already-promoted rung evidence.
+- A rung canary's authenticated provider-fault marker is one-use evidence.
+  Any exact marker, including a `PREPARED` or malformed record, blocks another
+  `real-pair` launch before intent publication; the operator must abort and
+  begin a fresh canary instead of replaying a destructive fault nonce.
 - The broker CLI disables long-option abbreviation and rejects every duplicate
   option. The generated gate accepts the VPN exception only after parsing a
   closed set of exact full option names, so both privileged boundaries agree

@@ -2507,3 +2507,146 @@ both capability-present and intentionally capability-absent cases.
   `system/grok-proxy/tests/test_live_multi_verify.py`
 
 ---
+
+## [ERR-20260720-056] first-direct-rung-cleanup-required-a-promoted-rung
+
+**Logged**: 2026-07-20T09:35:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+The first profile-bound direct real-pair reached its authenticated repair and
+two-session completion path, but cleanup recovery was allowed to suppress
+compatibility routing only for the older fixed-release canary shape. With the
+new policy intentionally invalidating all prior rung evidence, compatibility
+had no promoted rung and the otherwise valid canary failed closed at cleanup.
+
+### Response
+
+Extended strict direct recovery to exact FD-authenticated direct rung canaries
+(`direct` and direct-capable `auto`) while retaining the fixed-release path.
+The recovery implementation still forbids compatibility handoff and rejects
+every non-direct provider record. Added seen-to-fail client and verifier
+regressions plus negative non-direct and malformed cases.
+
+### Prevention
+
+When a workflow invalidates all prior authorization evidence, test the first
+new authorization from a genuinely empty catalog. Bootstrap cleanup must not
+depend on the permission that the same workflow is trying to create.
+
+### Metadata
+
+- Reproducible: yes; the new focused regressions failed before the correction
+- Related Files: `system/grok-proxy/grok_ms/client.py`,
+  `system/grok-proxy/grok_ms/qualification_verifier.py`,
+  `system/grok-proxy/tests/test_grok_ms_client.py`,
+  `system/grok-proxy/tests/test_live_multi_verify.py`
+
+---
+
+## [ERR-20260720-057] guessed-supervisor-test-class-name
+
+**Logged**: 2026-07-20T09:45:00Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+A focused unittest command guessed `SupervisorTests` instead of inspecting the
+module's actual `SupervisorRecoveryTests` declaration. The loader failed before
+running any test.
+
+### Response
+
+Read the class declarations with `rg`, reran the same three exact test methods
+under `SupervisorRecoveryTests`, and obtained three passes.
+
+### Prevention
+
+Resolve unittest class and method selectors from source before composing a
+fully qualified focused command.
+
+### Metadata
+
+- Reproducible: yes; loader-only failure, no runtime or deployment mutation
+- Related Files: `system/grok-proxy/tests/test_grok_ms_supervisor.py`
+
+---
+
+## [ERR-20260720-058] scheduled-install-lacked-delegated-cgroup-context
+
+**Logged**: 2026-07-20T10:20:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+The weekly `install-degraded` job reached the signed Grok bootstrap but failed
+the fresh release install. The normal push lane stayed green because the heavy
+install job runs only for schedules and manual dispatches. The live-layout
+installer requires a target-owned delegated cgroup-v2 ancestor for its bounded
+smoke runners, while the workflow launched `bin/install.sh` directly from the
+hosted runner service.
+
+### Response
+
+Prepared the target user's systemd manager and moved the full installer into a
+transient user service. The service explicitly delegates its cgroup and enables
+CPU, memory, and task accounting, while forwarding only the four deliberate
+install-step variables. A local exact preflight caught that accounting
+properties without `Delegate=yes` still omit controller files; the corrected
+service shape passes the installer's own `_runner_cgroup_parent` check and
+preserves a nonzero child exit through the existing pipeline ledger.
+
+### Prevention
+
+Exercise schedule/manual-only jobs after changing production-only installer
+preconditions. Keep a static workflow regression for the delegated service
+properties, and probe the installer's actual cgroup predicate before relying on
+a syntactically valid `systemd-run` command.
+
+### Metadata
+
+- Reproducible: scheduled-only on the fresh GitHub runner; exact corrected
+  service preflight reproduced locally
+- Related Files: `.github/workflows/rehearsal.yml`,
+  `system/grok-proxy/install-release.py`,
+  `system/grok-proxy/tests/test_bootstrap.py`
+
+---
+
+## [ERR-20260720-059] e2e-openvpn-fixture-depended-on-checkout-mode
+
+**Logged**: 2026-07-20T15:05:00Z
+**Priority**: medium
+**Status**: resolved
+
+### Summary
+
+The full clean-candidate gate failed two installed-feature E2E tests because
+they reused the repository's fake `curl` executable as the test OpenVPN
+prerequisite. A group-writable candidate checkout correctly failed the
+installer's owner-only prerequisite policy, even though the same tests passed
+from a checkout whose executable modes happened to be stricter.
+
+### Response
+
+Kept production prerequisite validation unchanged. Each E2E test now creates a
+dedicated owner-only fake OpenVPN executable and passes it explicitly to every
+install command and in-process test layout.
+
+### Prevention
+
+Security-sensitive executable fixtures must declare their own mode and owner
+inside the test's private directory. Do not reuse an unrelated tracked helper
+whose effective checkout permissions vary across runners or shared clones.
+
+### Metadata
+
+- Reproducible: yes; the normalized group-writable candidate failed both E2E
+  tests before this correction
+- Related Files: `system/grok-proxy/tests/test_multi_feature_e2e.py`
+
+---

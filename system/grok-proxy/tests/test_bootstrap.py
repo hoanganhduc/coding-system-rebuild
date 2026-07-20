@@ -1453,6 +1453,58 @@ class BootstrapTests(unittest.TestCase):
         )
         self.assertNotIn("BUILD_DIR", build_step)
 
+        self.assertIn(
+            "      - name: Prepare delegated user manager for the Grok installer\n",
+            job,
+        )
+        manager_step = job.split(
+            "      - name: Prepare delegated user manager for the Grok installer\n",
+            1,
+        )[1].split(
+            "      - name: Provision ephemeral signed Grok bootstrap trust fixture\n",
+            1,
+        )[0]
+        for required in (
+            'sudo loginctl enable-linger "$USER"',
+            'sudo systemctl start "user@${uid}.service"',
+            'test -S "/run/user/${uid}/bus"',
+            'echo "XDG_RUNTIME_DIR=/run/user/${uid}"',
+            'echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus"',
+            '} >> "$GITHUB_ENV"',
+        ):
+            self.assertIn(required, manager_step)
+        bootstrap_deps = job.split("      - name: Bootstrap deps\n", 1)[1].split(
+            "      - name: Prepare delegated user manager", 1
+        )[0]
+        self.assertIn("dbus-user-session", bootstrap_deps)
+        install_step_marker = (
+            "      - name: make install (DEGRADED, no secrets/zip; "
+            "texlive+images skipped to fit runner)\n"
+        )
+        next_install_step = "      - name: Assert key phases succeeded"
+        self.assertEqual(job.count(install_step_marker), 1)
+        install_step = job.split(install_step_marker, 1)[1].split(
+            next_install_step, 1
+        )[0]
+        self.assertIn(
+            "/usr/bin/systemd-run --user --wait --pipe --collect --quiet",
+            install_step,
+        )
+        for required in (
+            "--expand-environment=no",
+            "--service-type=exec",
+            "--same-dir",
+            "--property=Delegate=yes",
+            "--property=CPUAccounting=yes",
+            "--property=MemoryAccounting=yes",
+            "--property=TasksAccounting=yes",
+            '--setenv=SKIP_LATEX="$SKIP_LATEX"',
+            '--setenv=SKIP_DOCKER_IMAGES="$SKIP_DOCKER_IMAGES"',
+            '--setenv=AAS_PYTHON="$AAS_PYTHON"',
+            '--setenv=PYTHONPATH="$PYTHONPATH"',
+        ):
+            self.assertIn(required, install_step)
+
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
             source = Path(directory) / "bootstrap"
             shutil.copytree(

@@ -737,15 +737,34 @@ def recovery_environment(
         "GROK_QUALIFICATION_DIRECT_RECOVERY",
     ):
         selected.pop(name, None)
-    # Only fixed release qualification is authorized to bypass compatibility
-    # handoff during recovery.  Keeping this marker off the base environment is
-    # essential: status/control calls share that environment and must not be
-    # misclassified as strict recovery requests.
-    if (
-        selected.get("GROK_RELEASE_CANARY_KIND") == "release"
-        and selected.get("GROK_RELEASE_CANARY_RUNG") == "direct"
-        and selected.get("GROK_RELEASE_CANARY_ROUTE_PROFILE") == "direct"
-    ):
+    # An exact authenticated direct release or rung canary may recover its own
+    # direct-only epoch without entering compatibility routing.  Keeping this
+    # marker off the base environment is essential: status/control calls share
+    # that environment and must not be misclassified as strict recovery.
+    canary_kind = selected.get("GROK_RELEASE_CANARY_KIND")
+    canary_rung = selected.get("GROK_RELEASE_CANARY_RUNG")
+    route_profile = selected.get("GROK_RELEASE_CANARY_ROUTE_PROFILE")
+    contract = selected.get("GROK_RELEASE_CANARY_CONTRACT")
+    profile = selected.get("GROK_RELEASE_CANARY_PROFILE_SHA256")
+    direct_release = (
+        canary_kind == "release"
+        and canary_rung == "direct"
+        and route_profile == "direct"
+        and contract is None
+        and profile is None
+    )
+    direct_rung = (
+        canary_kind == "rung"
+        and canary_rung == "direct"
+        and route_profile in {"direct", "auto"}
+        and type(contract) is str
+        and _DIGEST.fullmatch(contract) is not None
+        and (
+            profile is None
+            or (type(profile) is str and _DIGEST.fullmatch(profile) is not None)
+        )
+    )
+    if direct_release or direct_rung:
         selected["GROK_QUALIFICATION_DIRECT_RECOVERY"] = "1"
     if authority is None:
         selected["GROK_RECOVERY_EXPECT_ABSENT"] = "1"

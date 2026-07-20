@@ -79,10 +79,15 @@ def _installer_command(
     installer_base: list[str],
     command: str,
     *arguments: str,
+    test_openvpn_binary: Path | None = None,
 ) -> list[str]:
     result = [*installer_base[:2], command, *installer_base[2:]]
     if command in {"install", "rollback"}:
-        result.extend(("--test-openvpn-binary", str(FAKE_CURL)))
+        if test_openvpn_binary is None:
+            raise ValueError("install commands require an explicit OpenVPN fixture")
+        result.extend(("--test-openvpn-binary", str(test_openvpn_binary)))
+    elif test_openvpn_binary is not None:
+        raise ValueError("the OpenVPN fixture is valid only for install commands")
     result.extend(arguments)
     return result
 
@@ -104,16 +109,24 @@ def _open_proc_fixture(prefix: Path) -> int:
     )
 
 
+def _write_openvpn_fixture(base: Path) -> Path:
+    fixture = base / "fake-openvpn"
+    fixture.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    fixture.chmod(0o700)
+    return fixture
+
+
 def _installed_release_installer(
     prefix: Path,
     logical_home: Path,
     proc_fd: int,
+    test_openvpn_binary: Path,
 ) -> object:
     layout = release_installer.Layout.defaults(
         ROOT,
         prefix=prefix,
         home=logical_home,
-        test_openvpn_binary=FAKE_CURL,
+        test_openvpn_binary=test_openvpn_binary,
     )
     runtime_files = release_installer._default_runtime_files(ROOT)
     proc_authority = release_installer.ProcAuthority.from_fd(
@@ -212,6 +225,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
             prefix = base / "prefix"
             logical_home = Path("/home/grok-e2e")
             installer_base = _installer_base(prefix, logical_home)
+            openvpn = _write_openvpn_fixture(base)
             proc_fd = _open_proc_fixture(prefix)
             self.addCleanup(os.close, proc_fd)
             legacy = prefix / "var/lib/grok-vpngate"
@@ -236,6 +250,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                     "--apply",
                     "--fault-at",
                     "after-canary-selection",
+                    test_openvpn_binary=openvpn,
                 ),
                 text=True,
                 capture_output=True,
@@ -268,7 +283,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 / release_id
             )
             installed_release = _installed_release_installer(
-                prefix, logical_home, proc_fd
+                prefix, logical_home, proc_fd, openvpn
             )
             self.addCleanup(installed_release.proc_authority.close)
             pinned_grok = base / "grok-e2e-v1"
@@ -1048,10 +1063,16 @@ class InstalledFeatureOnTests(unittest.TestCase):
             prefix = base / "prefix"
             logical_home = Path("/home/grok-upgrade-e2e")
             installer_base = _installer_base(prefix, logical_home, source)
+            openvpn = _write_openvpn_fixture(base)
             proc_fd = _open_proc_fixture(prefix)
             self.addCleanup(os.close, proc_fd)
             first = subprocess.run(
-                _installer_command(installer_base, "install", "--apply"),
+                _installer_command(
+                    installer_base,
+                    "install",
+                    "--apply",
+                    test_openvpn_binary=openvpn,
+                ),
                 text=True,
                 capture_output=True,
                 timeout=30,
@@ -1075,7 +1096,12 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 path.write_bytes(content)
                 path.chmod(mode)
             same_release = subprocess.run(
-                _installer_command(installer_base, "install", "--apply"),
+                _installer_command(
+                    installer_base,
+                    "install",
+                    "--apply",
+                    test_openvpn_binary=openvpn,
+                ),
                 text=True,
                 capture_output=True,
                 timeout=30,
@@ -1098,6 +1124,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                     "--apply",
                     "--fault-at",
                     "after-canary-selection",
+                    test_openvpn_binary=openvpn,
                 ),
                 text=True,
                 capture_output=True,

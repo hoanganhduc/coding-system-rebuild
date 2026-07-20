@@ -206,7 +206,17 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           df -h / | tail -1
       - name: Bootstrap deps
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml build-essential libssl-dev openssl pkg-config
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml build-essential dbus-user-session libssl-dev openssl pkg-config
+      - name: Prepare delegated user manager for the Grok installer
+        run: |
+          uid="$(id -u)"
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@${uid}.service"
+          test -S "/run/user/${uid}/bus"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/${uid}"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus"
+          } >> "$GITHUB_ENV"
       - name: Provision ephemeral signed Grok bootstrap trust fixture
         run: |
           set -euo pipefail
@@ -469,7 +479,18 @@ jobs:
           set -o pipefail
           set +e
           /usr/bin/cat bootstrap-preflight.log > install.log
-          bash bin/install.sh 2>&1 | tee -a install.log
+          /usr/bin/systemd-run --user --wait --pipe --collect --quiet \
+            --expand-environment=no --service-type=exec \
+            --same-dir \
+            --property=Delegate=yes \
+            --property=CPUAccounting=yes \
+            --property=MemoryAccounting=yes \
+            --property=TasksAccounting=yes \
+            --setenv=SKIP_LATEX="$SKIP_LATEX" \
+            --setenv=SKIP_DOCKER_IMAGES="$SKIP_DOCKER_IMAGES" \
+            --setenv=AAS_PYTHON="$AAS_PYTHON" \
+            --setenv=PYTHONPATH="$PYTHONPATH" \
+            /usr/bin/bash bin/install.sh 2>&1 | tee -a install.log
           pipeline_status=("${PIPESTATUS[@]}")
           set -e
           installer_rc="${pipeline_status[0]:-125}"

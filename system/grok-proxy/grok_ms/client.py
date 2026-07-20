@@ -624,13 +624,27 @@ def _prepare_canary_dispatch(
         _close_canary_authorization(authorization, env)
         raise ClientError("release/rung canary command class is forbidden")
     if classification.kind in {CommandKind.CONTROL, CommandKind.RECOVERY}:
+        direct_canary = (
+            authorization[1] == "direct"
+            and (
+                (
+                    authorization[5] == "release"
+                    and authorization[2] is None
+                    and authorization[7] == "direct"
+                    and authorization[8] is None
+                )
+                or (
+                    authorization[5] == "rung"
+                    and type(authorization[2]) is str
+                    and _DIGEST_RE.fullmatch(authorization[2]) is not None
+                    and authorization[7] in {"direct", "auto"}
+                )
+            )
+        )
         strict_direct = (
             classification.kind is CommandKind.RECOVERY
             and direct_recovery == "1"
-            and authorization[5] == "release"
-            and authorization[1] == "direct"
-            and authorization[2] is None
-            and authorization[7] == "direct"
+            and direct_canary
         )
         if direct_recovery is not None and not strict_direct:
             _close_canary_authorization(authorization, env)

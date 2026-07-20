@@ -23,9 +23,11 @@ render, Python env rebuild, systemd unit render, and `verify`. It proves the ins
 *machinery* works end-to-end on a clean Ubuntu box.
 
 It does **not** verify the live OpenClaw gateway starting, channel round-trips, or full
-secret restore — those need the complete encrypted archive **and** a real systemd/DBUS
-session, neither of which exists on a hosted runner (and the zip is never uploaded). That
-remains the manual VM rehearsal (docs/BACKUP-RESTORE.md). To also clone the private
+secret restore — those need the complete encrypted archive and production-like host and
+service state (and the zip is never uploaded). The workflow starts a transient systemd
+user manager and D-Bus session only to test the installer's delegated cgroup boundary;
+that is not a live-service rehearsal. Full verification remains the manual VM rehearsal
+(docs/BACKUP-RESTORE.md). To also clone the private
 `openclaw-bot` / `ai-agents-skills` components in CI, add a `COMPONENTS_TOKEN` repo secret
 (a fine-grained PAT with read access to those repos); without it those phases are skipped.
 

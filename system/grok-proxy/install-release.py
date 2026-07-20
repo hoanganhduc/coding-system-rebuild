@@ -11839,6 +11839,20 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
                     if self._pending_record_is_active(pending_path, recovery=True):
                         raise ReleaseError("qualification step is already active")
                     raise ReleaseError("qualification step has a crash-pending execution")
+                if step == "real-pair":
+                    fault_marker = self._qualification_fault_marker(canary)
+                    if _present(fault_marker):
+                        _read_regular(
+                            fault_marker,
+                            uid=self.layout.target_uid,
+                            gid=self.layout.target_gid,
+                            mode=0o600,
+                            maximum=65_536,
+                        )
+                        raise ReleaseError(
+                            "rung canary fault was already consumed; abort and begin "
+                            "a new rung canary before retry"
+                        )
                 auth_fd = os.open(
                     self.layout.canary_auth,
                     os.O_RDONLY

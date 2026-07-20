@@ -1239,7 +1239,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
             self.assertNotIn(name, selected)
         self.assertNotIn("GROK_BLOCKED_CC", real_selected)
 
-    def test_direct_recovery_marker_is_injected_only_for_release_direct_recovery(
+    def test_direct_recovery_marker_is_injected_only_for_authenticated_direct_recovery(
         self,
     ) -> None:
         marker = "GROK_QUALIFICATION_DIRECT_RECOVERY"
@@ -1273,13 +1273,25 @@ class LiveVerifierHelperTests(unittest.TestCase):
                 True,
             ),
             (
-                "rung-direct",
+                "rung-direct-auto",
+                {
+                    "GROK_RELEASE_CANARY_KIND": "rung",
+                    "GROK_RELEASE_CANARY_RUNG": "direct",
+                    "GROK_RELEASE_CANARY_ROUTE_PROFILE": "auto",
+                    "GROK_RELEASE_CANARY_CONTRACT": "c" * 64,
+                    "GROK_RELEASE_CANARY_PROFILE_SHA256": "d" * 64,
+                },
+                True,
+            ),
+            (
+                "rung-forced-direct",
                 {
                     "GROK_RELEASE_CANARY_KIND": "rung",
                     "GROK_RELEASE_CANARY_RUNG": "direct",
                     "GROK_RELEASE_CANARY_ROUTE_PROFILE": "direct",
+                    "GROK_RELEASE_CANARY_CONTRACT": "c" * 64,
                 },
-                False,
+                True,
             ),
             (
                 "release-vpn",
@@ -1287,6 +1299,25 @@ class LiveVerifierHelperTests(unittest.TestCase):
                     "GROK_RELEASE_CANARY_KIND": "release",
                     "GROK_RELEASE_CANARY_RUNG": "vpn",
                     "GROK_RELEASE_CANARY_ROUTE_PROFILE": "vpn",
+                },
+                False,
+            ),
+            (
+                "rung-direct-missing-contract",
+                {
+                    "GROK_RELEASE_CANARY_KIND": "rung",
+                    "GROK_RELEASE_CANARY_RUNG": "direct",
+                    "GROK_RELEASE_CANARY_ROUTE_PROFILE": "auto",
+                },
+                False,
+            ),
+            (
+                "rung-direct-forbidden-profile",
+                {
+                    "GROK_RELEASE_CANARY_KIND": "rung",
+                    "GROK_RELEASE_CANARY_RUNG": "direct",
+                    "GROK_RELEASE_CANARY_ROUTE_PROFILE": "auto-no-direct",
+                    "GROK_RELEASE_CANARY_CONTRACT": "c" * 64,
                 },
                 False,
             ),

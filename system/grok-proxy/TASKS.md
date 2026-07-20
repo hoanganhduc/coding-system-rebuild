@@ -116,9 +116,10 @@
   order outer-cgroup kill, strict direct runtime recovery, delegation revocation,
   second kill, nested removal, and terminal parent removal through durable v2
   `DELEGATING`/`RECOVERED`/`CONTAINED` runner phases.
-- [x] Suppress warm compatibility handoff only after exact FD-backed fixed
-  release/direct canary authentication, and keep the authorization marker out
-  of ordinary status/control and Grok child environments.
+- [x] Suppress warm compatibility handoff during offline cleanup only after
+  exact FD-backed direct release/rung canary authentication; keep initial
+  supervisor reconciliation unchanged and the authorization marker out of
+  ordinary status/control and Grok child environments.
 
 ## Verification and delivery
 
@@ -503,6 +504,12 @@
   and obtain independent security and test-review verdicts.
 - [x] Add seen-to-fail parity, nonblocked-DE, explicit-policy, watchdog, and
   retained-block regressions.
+- [x] Remove the first-direct-rung bootstrap circularity: exact authenticated
+  direct and direct-capable AUTO canaries use direct-only cleanup recovery
+  without requiring any previously promoted rung.
+- [x] Fail before verifier launch when a real-pair canary nonce already has a
+  secure provider-fault marker; retain the marker and require authenticated
+  abort plus a fresh canary instead of replaying the destructive fault.
 - [x] Synchronize the managed config, qualification verifier, compatibility
   dispatcher, and VPN helper defaults to `CN IR KP TM VE`; remove obsolete
   EU-wide availability claims without changing override semantics.

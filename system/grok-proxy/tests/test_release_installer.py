@@ -6244,6 +6244,88 @@ os._exit(0)
                 ).exists()
             )
 
+    def test_real_pair_consumed_fault_marker_requires_fresh_canary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            installer, layout, _source = make_installer(Path(td))
+            release_id = installer.install().release_id
+            complete_release_qualification(installer, release_id)
+            installer.begin_rung_canary(
+                release_id=release_id,
+                rung="direct",
+                route_profile="direct",
+                contract_sha256="a" * 64,
+                grok_release_id="grok-build-v1",
+                model_id="vendor/model-1",
+            )
+            canary = installer._read_rung_canary()
+            marker = installer._qualification_fault_marker(canary)
+            marker.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            marker.parent.chmod(0o700)
+            pending = (
+                layout.rung_transcript_dir(
+                    release_id, str(canary["canary_nonce"])
+                )
+                / "pending-qualification-real-pair.json"
+            )
+
+            for label, contents in (
+                ("PREPARED", json.dumps({"phase": "PREPARED"}) + "\n"),
+                ("COMPLETED", json.dumps({"phase": "COMPLETED"}) + "\n"),
+                ("malformed", "not-json\n"),
+            ):
+                marker.write_text(contents, encoding="ascii")
+                marker.chmod(0o600)
+                with (
+                    mock.patch.object(
+                        installer, "_run_qualification_verifier"
+                    ) as verifier,
+                    self.assertRaisesRegex(
+                        release_installer.ReleaseError,
+                        "abort and begin a new rung canary",
+                    ),
+                ):
+                    installer.qualification_exec("real-pair")
+                verifier.assert_not_called()
+                self.assertTrue(marker.exists(), label)
+                self.assertFalse(pending.exists())
+                marker.unlink()
+
+            marker.write_text("unsafe-mode\n", encoding="ascii")
+            marker.chmod(0o644)
+            with (
+                mock.patch.object(
+                    installer, "_run_qualification_verifier"
+                ) as verifier,
+                self.assertRaisesRegex(
+                    release_installer.ReleaseError, "unexpected mode"
+                ),
+            ):
+                installer.qualification_exec("real-pair")
+            verifier.assert_not_called()
+            self.assertTrue(marker.exists())
+            self.assertFalse(pending.exists())
+            marker.unlink()
+
+            with mock.patch.object(
+                installer,
+                "_run_qualification_verifier",
+                side_effect=lambda **kw: fixed_qualification_smoke(
+                    installer, str(kw["step"]), status="failed"
+                ),
+            ):
+                failed = installer.qualification_exec("real-pair")
+            self.assertEqual(failed.status, "failed")
+            self.assertFalse(pending.exists())
+            with mock.patch.object(
+                installer,
+                "_run_qualification_verifier",
+                side_effect=lambda **kw: fixed_qualification_smoke(
+                    installer, str(kw["step"])
+                ),
+            ):
+                passed = installer.qualification_exec("real-pair")
+            self.assertEqual(passed.status, "passed")
+
     def test_qualification_terminal_post_unlink_fault_converges(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             installer, layout, _source = make_installer(Path(td))

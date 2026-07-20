@@ -650,7 +650,7 @@ while True:
             recover.assert_called_once()
             self.assertTrue(recover.call_args.kwargs["strict_direct"])
 
-    def test_direct_recovery_rejects_authenticated_nonrelease_canary(self) -> None:
+    def test_authenticated_rung_direct_recovery_routes_strictly(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             auth = Path(directory) / "auth"
             auth.write_bytes(b"")
@@ -658,6 +658,136 @@ while True:
             environment = self._canary_environment(descriptor, "rung")
             environment["GROK_QUALIFICATION_DIRECT_RECOVERY"] = "1"
             authorization = self._canary_authorization_fixture(descriptor, "rung")
+
+            def recovered(
+                release_dir: Path,
+                visible: dict[str, str],
+                *,
+                strict_direct: bool = False,
+            ) -> int:
+                self.assertEqual(release_dir, ROOT)
+                self.assertTrue(strict_direct)
+                self.assertDescriptorClosed(descriptor)
+                self.assertNotIn("GROK_QUALIFICATION_DIRECT_RECOVERY", visible)
+                self.assertFalse(set(visible).intersection(client._CANARY_BINDINGS))
+                return 0
+
+            with (
+                mock.patch.object(client, "_release_id", return_value="f" * 64),
+                mock.patch.object(
+                    client, "_canary_authorization", return_value=authorization
+                ),
+                mock.patch.object(client, "_release_gate") as release_gate,
+                mock.patch.object(
+                    client, "_recover", side_effect=recovered
+                ) as recover,
+            ):
+                self.assertEqual(client.run(("recover",), ROOT, environment), 0)
+            release_gate.assert_called_once()
+            recover.assert_called_once()
+            self.assertTrue(recover.call_args.kwargs["strict_direct"])
+
+    def test_direct_recovery_rejects_authenticated_non_direct_rung(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth = Path(directory) / "auth"
+            auth.write_bytes(b"")
+            descriptor = os.open(auth, os.O_RDONLY | os.O_CLOEXEC)
+            environment = self._canary_environment(descriptor, "rung")
+            environment.update(
+                {
+                    "GROK_RELEASE_CANARY_RUNG": "vpn",
+                    "GROK_RELEASE_CANARY_ROUTE_PROFILE": "vpn",
+                    "GROK_QUALIFICATION_DIRECT_RECOVERY": "1",
+                }
+            )
+            authorization = (
+                {},
+                "vpn",
+                "a" * 64,
+                "grok-build-v1",
+                "grok-model",
+                "rung",
+                descriptor,
+                "vpn",
+                None,
+            )
+            with (
+                mock.patch.object(client, "_release_id", return_value="f" * 64),
+                mock.patch.object(
+                    client, "_canary_authorization", return_value=authorization
+                ),
+                mock.patch.object(client, "_recover") as recover,
+                self.assertRaisesRegex(
+                    client.ClientError, "recovery authorization is mismatched"
+                ),
+            ):
+                client.run(("recover",), ROOT, environment)
+            recover.assert_not_called()
+            self.assertDescriptorClosed(descriptor)
+
+    def test_authenticated_auto_direct_rung_recovery_routes_strictly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth = Path(directory) / "auth"
+            auth.write_bytes(b"")
+            descriptor = os.open(auth, os.O_RDONLY | os.O_CLOEXEC)
+            environment = self._canary_environment(descriptor, "rung")
+            environment.update(
+                {
+                    "GROK_RELEASE_CANARY_ROUTE_PROFILE": "auto",
+                    "GROK_RELEASE_CANARY_PROFILE_SHA256": "b" * 64,
+                    "GROK_QUALIFICATION_DIRECT_RECOVERY": "1",
+                }
+            )
+            authorization = (
+                {},
+                "direct",
+                "a" * 64,
+                "grok-build-v1",
+                "grok-model",
+                "rung",
+                descriptor,
+                "auto",
+                "b" * 64,
+            )
+            with (
+                mock.patch.object(client, "_release_id", return_value="f" * 64),
+                mock.patch.object(
+                    client, "_canary_authorization", return_value=authorization
+                ),
+                mock.patch.object(client, "_release_gate") as release_gate,
+            ):
+                strict = client._prepare_canary_dispatch(
+                    client.classify(("recover",)), ROOT, environment
+                )
+            self.assertTrue(strict)
+            release_gate.assert_called_once()
+            self.assertDescriptorClosed(descriptor)
+            self.assertNotIn("GROK_QUALIFICATION_DIRECT_RECOVERY", environment)
+            self.assertFalse(set(environment).intersection(client._CANARY_BINDINGS))
+
+    def test_direct_recovery_rejects_auto_no_direct_rung(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth = Path(directory) / "auth"
+            auth.write_bytes(b"")
+            descriptor = os.open(auth, os.O_RDONLY | os.O_CLOEXEC)
+            environment = self._canary_environment(descriptor, "rung")
+            environment.update(
+                {
+                    "GROK_RELEASE_CANARY_ROUTE_PROFILE": "auto-no-direct",
+                    "GROK_QUALIFICATION_DIRECT_RECOVERY": "1",
+                }
+            )
+            authorization = (
+                {},
+                "direct",
+                "a" * 64,
+                "grok-build-v1",
+                "grok-model",
+                "rung",
+                descriptor,
+                "auto-no-direct",
+                None,
+            )
             with (
                 mock.patch.object(client, "_release_id", return_value="f" * 64),
                 mock.patch.object(
@@ -1856,6 +1986,19 @@ while True:
             {"GROK_TEST_SKIP_WARM_HANDOFF": "1"},
         )
         self.assertIn("--warm-legacy-handoff", live_override)
+
+        direct_rung = client._supervisor_argv(
+            Path("/installed/release"),
+            Path("/canonical/home/.local/state/grok-proxy/control"),
+            contract,
+            {
+                "GROK_RELEASE_CANARY_KIND": "rung",
+                "GROK_RELEASE_CANARY_RUNG": "direct",
+                "GROK_RELEASE_CANARY_ROUTE_PROFILE": "auto",
+                "GROK_QUALIFICATION_DIRECT_RECOVERY": "1",
+            },
+        )
+        self.assertIn("--warm-legacy-handoff", direct_rung)
 
         test_skip = client._supervisor_argv(
             Path("/installed/release"),
