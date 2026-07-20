@@ -428,10 +428,14 @@ bytes frozen for a reproducible live install, qualification, rollback, and
 reinstall exercise; a future reset/migration workflow is required before
 supporting changed-generator same-ID requalification.
 During real-pair teardown, the captured supervisor can finish naturally between
-two liveness samples. That is accepted only as convergence of the same fenced
-epoch and only after the complete user/root/listener/cgroup clean proof passes;
-a replacement or malformed fence still fails closed. Cleanup-only failure and
-cleanup after an earlier primary failure have separate fixed diagnostic codes.
+two liveness samples, or the guarded pair can begin draining before destructive
+authority is renewed. The latter path closes the qualification pause first and
+is passive-only: it may stop the verifier's exact wrappers but cannot signal the
+supervisor or invoke recovery. Convergence requires a same or already removed
+fence, the complete user/root/listener/cgroup clean proof, and a separate bounded
+absence proof for the captured supervisor identity. A replacement or malformed
+fence still fails closed. Cleanup after an earlier primary failure retains both
+facts in a closed stage-specific diagnostic code without exposing dynamic text.
 
 ## How failure is handled
 

@@ -189,13 +189,42 @@ QUALIFICATION_FAILURE_CODES = {
             "real-pair-model-refresh",
             "real-pair-old-generation",
             "real-pair-provider-fault",
+            "real-pair-provider-fault-replay",
             "real-pair-repair",
+            "real-pair-repair-bindings",
+            "real-pair-repair-scopes",
+            "real-pair-repair-authority",
+            "real-pair-repair-units",
             "real-pair-reconnect",
+            "real-pair-reconnect-liveness",
+            "real-pair-reconnect-receipt",
+            "real-pair-reconnect-refreeze",
+            "real-pair-reconnect-quiescence",
             "real-pair-resume",
             "real-pair-completion",
             "real-pair-runtime",
             "real-pair-cleanup",
             "real-pair-cleanup-after-primary",
+            "real-pair-cleanup-after-model-refresh",
+            "real-pair-cleanup-after-spawn",
+            "real-pair-cleanup-after-ready",
+            "real-pair-cleanup-after-authority",
+            "real-pair-cleanup-after-pause",
+            "real-pair-cleanup-after-old-generation",
+            "real-pair-cleanup-after-provider-fault",
+            "real-pair-cleanup-after-provider-fault-replay",
+            "real-pair-cleanup-after-repair",
+            "real-pair-cleanup-after-repair-bindings",
+            "real-pair-cleanup-after-repair-scopes",
+            "real-pair-cleanup-after-repair-authority",
+            "real-pair-cleanup-after-repair-units",
+            "real-pair-cleanup-after-reconnect",
+            "real-pair-cleanup-after-reconnect-liveness",
+            "real-pair-cleanup-after-reconnect-receipt",
+            "real-pair-cleanup-after-reconnect-refreeze",
+            "real-pair-cleanup-after-reconnect-quiescence",
+            "real-pair-cleanup-after-resume",
+            "real-pair-cleanup-after-completion",
             "real-pair-internal",
         }
     ),
@@ -3798,13 +3827,17 @@ def _stop_wrappers_bounded(
         deadline_monotonic_ns
     )
     errors: list[str] = []
-    term_signal_errors: dict[ProcessIdentity, str] = {}
+    deferred_errors: dict[ProcessIdentity, list[str]] = {}
+
+    def defer(wrapper: ManagedWrapper, detail: str) -> None:
+        deferred_errors.setdefault(wrapper.identity, []).append(detail)
+
     candidates = [wrapper for wrapper in wrappers if wrapper.process.returncode is None]
     for wrapper in candidates:
         try:
             exact_signal(wrapper.identity, signal.SIGTERM, wrapper.pidfd)
         except (OSError, VerificationError) as exc:
-            term_signal_errors[wrapper.identity] = f"wrapper TERM failed: {exc}"
+            defer(wrapper, f"wrapper TERM failed: {exc}")
 
     term_deadline = min(
         time.monotonic() + CLEANUP_WRAPPER_TERM_SECONDS,
@@ -3818,21 +3851,16 @@ def _stop_wrappers_bounded(
         except subprocess.TimeoutExpired:
             pass
         except OSError as exc:
-            errors.append(f"wrapper TERM wait failed: {exc}")
-        if wrapper.process.returncode is None:
-            signal_error = term_signal_errors.get(wrapper.identity)
-            if signal_error is not None:
-                errors.append(signal_error)
+            defer(wrapper, f"wrapper TERM wait failed: {exc}")
 
     survivors = [
         wrapper for wrapper in candidates if wrapper.process.returncode is None
     ]
-    kill_signal_errors: dict[ProcessIdentity, str] = {}
     for wrapper in survivors:
         try:
             exact_signal(wrapper.identity, signal.SIGKILL, wrapper.pidfd)
         except (OSError, VerificationError) as exc:
-            kill_signal_errors[wrapper.identity] = f"wrapper KILL failed: {exc}"
+            defer(wrapper, f"wrapper KILL failed: {exc}")
 
     kill_deadline = min(
         time.monotonic() + CLEANUP_WRAPPER_KILL_SECONDS,
@@ -3844,11 +3872,10 @@ def _stop_wrappers_bounded(
         try:
             wrapper.process.wait(timeout=max(0.0, kill_deadline - time.monotonic()))
         except (OSError, subprocess.TimeoutExpired) as exc:
-            errors.append(f"wrapper KILL wait failed: {exc}")
+            defer(wrapper, f"wrapper KILL wait failed: {exc}")
+    for wrapper in candidates:
         if wrapper.process.returncode is None:
-            signal_error = kill_signal_errors.get(wrapper.identity)
-            if signal_error is not None:
-                errors.append(signal_error)
+            errors.extend(deferred_errors.get(wrapper.identity, ()))
     for wrapper in wrappers:
         wrapper.close_pidfd()
     return errors
@@ -3865,20 +3892,52 @@ def cleanup(
     expected_contract_digest: str | None = None,
     require_capacity: bool = True,
     require_qualification_guard: bool = False,
+    passive_only: bool = False,
+    passive_epoch: CleanupAuthority | None = None,
     deadline_monotonic_ns: int | None = None,
 ) -> dict[str, Any]:
     hard_deadline_monotonic_ns = _cleanup_deadline_ns(
         deadline_monotonic_ns
     )
     errors: list[str] = []
-    epoch = authority.epoch if authority is not None else None
+    epoch = (
+        passive_epoch
+        if passive_only
+        else (authority.epoch if authority is not None else None)
+    )
+    configuration_error: str | None = None
+    if passive_only and passive_epoch is None:
+        configuration_error = "passive cleanup requires its captured exact epoch"
+    elif not passive_only and passive_epoch is not None:
+        configuration_error = "active cleanup rejects a passive epoch"
+    elif (
+        passive_only
+        and authority is not None
+        and authority.epoch != passive_epoch
+    ):
+        configuration_error = "passive cleanup epoch differs from its authority"
     global_mutation_allowed = False
+    passive_convergence_allowed = False
+    passive_authority_error: str | None = None
     exit_convergence_allowed = False
+    passive_recheck_allowed = False
     control = account_control()
     try:
+        if configuration_error is not None:
+            raise VerificationError(configuration_error)
         if epoch is not None:
-            _assert_cleanup_fence_owner(cleanup_fence(control), epoch)
-            if process_matches(epoch.supervisor):
+            initial_fence = cleanup_fence(control)
+            if initial_fence is None:
+                passive_recheck_allowed = True
+                raise VerificationError(
+                    "cleanup destructive authority lacks its exact recovery fence"
+                )
+            _assert_cleanup_fence_owner(initial_fence, epoch)
+            passive_recheck_allowed = True
+            if passive_only:
+                passive_convergence_allowed = True
+            elif process_matches(epoch.supervisor):
+                assert authority is not None
                 status_timeout = _cleanup_remaining_seconds(
                     hard_deadline_monotonic_ns, 5.0
                 )
@@ -3932,41 +3991,58 @@ def cleanup(
                     )
                 finally:
                     os.close(supervisor_pidfd)
-            global_mutation_allowed = True
+            if not passive_only:
+                global_mutation_allowed = True
     except (OSError, subprocess.SubprocessError, UnicodeError, VerificationError) as exc:
         authority_error = f"cleanup destructive authority refused: {exc}"
-        try:
-            if not exit_convergence_allowed:
-                raise VerificationError(
-                    "cleanup failed before an exit-convergence boundary"
-                )
-            assert epoch is not None
-            current_fence = cleanup_fence(control)
-            _assert_cleanup_fence_owner(current_fence, epoch)
-            supervisor_absent = not process_matches(epoch.supervisor)
-        except (OSError, VerificationError) as recheck_error:
-            errors.append(
-                f"{authority_error}; cleanup exit recheck failed: {recheck_error}"
-            )
+        if not passive_recheck_allowed:
+            errors.append(authority_error)
         else:
-            if supervisor_absent:
-                # The captured supervisor can naturally drain between the
-                # exact-live sample and status/pidfd revalidation.  This grants
-                # no new target authority: later recovery is still bound to the
-                # same fence, and success still requires the complete clean
-                # checkpoint below.
-                global_mutation_allowed = True
+            try:
+                assert epoch is not None
+                current_fence = cleanup_fence(control)
+                _assert_cleanup_fence_owner(current_fence, epoch)
+                supervisor_absent = (
+                    False
+                    if passive_only
+                    else not process_matches(epoch.supervisor)
+                )
+            except (OSError, VerificationError) as recheck_error:
+                errors.append(
+                    f"{authority_error}; cleanup exit recheck failed: {recheck_error}"
+                )
             else:
-                errors.append(authority_error)
+                if (
+                    not passive_only
+                    and exit_convergence_allowed
+                    and supervisor_absent
+                ):
+                    # The captured supervisor can naturally drain between the
+                    # exact-live sample and status/pidfd revalidation.  This grants
+                    # no new target authority: later recovery is still bound to the
+                    # same fence, and success still requires the complete clean
+                    # checkpoint below.
+                    global_mutation_allowed = True
+                else:
+                    # A guarded session can begin draining between the captured
+                    # capacity proof and cleanup renewal.  A same or already absent
+                    # fence grants no destructive authority, but it is safe to stop
+                    # only the verifier-owned wrappers and wait for an exhaustive
+                    # clean checkpoint.  Replacement and malformed fences were
+                    # rejected by the recheck above.
+                    passive_convergence_allowed = True
+                    passive_authority_error = authority_error
     finally:
         errors.extend(
             _stop_wrappers_bounded(
                 wrappers, hard_deadline_monotonic_ns
             )
         )
-    if authority is not None and not global_mutation_allowed:
+    if epoch is not None and not (
+        global_mutation_allowed or passive_convergence_allowed
+    ):
         raise VerificationError("cleanup errors: " + "; ".join(errors))
-    if authority is None:
+    if epoch is None:
         try:
             checkpoint = wait_clean(
                 provenance,
@@ -3984,17 +4060,26 @@ def cleanup(
         assert checkpoint is not None
         return checkpoint
 
-    try:
-        owns_fence = _assert_cleanup_fence_owner(cleanup_fence(control), epoch)
-    except (OSError, VerificationError) as exc:
-        raise VerificationError(f"cleanup ownership check failed: {exc}") from exc
-    if owns_fence and process_matches(epoch.supervisor):
-        errors.append("cleanup refused a live supervisor after exclusivity revalidation")
-    try:
-        owns_fence = _assert_cleanup_fence_owner(cleanup_fence(control), epoch)
-    except (OSError, VerificationError) as exc:
-        errors.append(f"cleanup recovery ownership check failed: {exc}")
-        owns_fence = False
+    owns_fence = False
+    if global_mutation_allowed:
+        try:
+            owns_fence = _assert_cleanup_fence_owner(cleanup_fence(control), epoch)
+        except (OSError, VerificationError) as exc:
+            raise VerificationError(f"cleanup ownership check failed: {exc}") from exc
+        if owns_fence and process_matches(epoch.supervisor):
+            errors.append("cleanup refused a live supervisor after exclusivity revalidation")
+        try:
+            owns_fence = _assert_cleanup_fence_owner(cleanup_fence(control), epoch)
+        except (OSError, VerificationError) as exc:
+            errors.append(f"cleanup recovery ownership check failed: {exc}")
+            owns_fence = False
+    else:
+        try:
+            _assert_cleanup_fence_owner(cleanup_fence(control), epoch)
+        except (OSError, VerificationError) as exc:
+            raise VerificationError(
+                f"cleanup passive-convergence ownership check failed: {exc}"
+            ) from exc
     if owns_fence and global_mutation_allowed and not errors:
         try:
             recover_timeout = _cleanup_remaining_seconds(
@@ -4054,7 +4139,22 @@ def cleanup(
             deadline_monotonic_ns=hard_deadline_monotonic_ns,
         )
     except (OSError, subprocess.SubprocessError, VerificationError) as exc:
+        if passive_authority_error is not None:
+            errors.append(passive_authority_error)
         errors.append(str(exc))
+    if checkpoint is not None and epoch is not None:
+        try:
+            assert_process_identities_absent(
+                (epoch.supervisor,),
+                timeout=_cleanup_remaining_seconds(
+                    hard_deadline_monotonic_ns,
+                    CLEANUP_SUPERVISOR_EXIT_SECONDS,
+                ),
+                matcher=process_matches,
+                sleeper=time.sleep,
+            )
+        except VerificationError as exc:
+            errors.append(str(exc))
     if errors:
         raise VerificationError("cleanup errors: " + "; ".join(errors))
     assert checkpoint is not None
@@ -6399,6 +6499,7 @@ def _request_provider_fault(
     snapshot: Mapping[str, Any],
     pause: QualificationPause,
     expected_old_streams_sha256: str,
+    stage: QualificationStage | None = None,
 ) -> dict[str, Any]:
     if _DIGEST.fullmatch(expected_old_streams_sha256) is None:
         raise VerificationError("old stream transcript digest is invalid")
@@ -6465,6 +6566,8 @@ def _request_provider_fault(
         or response.get("replayed") is not False
     ):
         raise VerificationError("authenticated provider-fault result is not exact")
+    if stage is not None:
+        stage.set("real-pair-provider-fault-replay")
     replay = exchange()
     if (
         set(replay) != fields
@@ -6625,6 +6728,16 @@ def _wait_stable_frozen_receipts(
     )
 
 
+def _real_pair_cleanup_after_primary_code(stage: QualificationStage) -> str:
+    prefix = "real-pair-"
+    if not stage.error_code.startswith(prefix):
+        return "real-pair-cleanup-after-primary"
+    candidate = "real-pair-cleanup-after-" + stage.error_code[len(prefix) :]
+    if candidate not in QUALIFICATION_FAILURE_CODES["real-pair"]:
+        return "real-pair-cleanup-after-primary"
+    return candidate
+
+
 def run_real_pair(
     entrypoint: Path,
     context: QualificationContext,
@@ -6653,6 +6766,7 @@ def run_real_pair(
     wrappers: list[ManagedWrapper] = []
     pair_wrappers: list[ManagedWrapper] = []
     cleanup_authority: ExclusiveCleanupAuthority | None = None
+    cleanup_epoch: CleanupAuthority | None = None
     pause: QualificationPause | None = None
     temporary = tempfile.TemporaryDirectory(prefix="grok-real-pair-")
     cwd = Path(temporary.name)
@@ -6678,6 +6792,7 @@ def run_real_pair(
     reconnect_duration_ms = 0
     started = time.monotonic_ns()
     primary: BaseException | None = None
+    cleanup_passive_only = False
     result: dict[str, Any] | None = None
     initial_scope_inventory: dict[str, Any] = {}
     repaired_scope_inventory: dict[str, Any] = {}
@@ -6764,6 +6879,7 @@ def run_real_pair(
             provenance,
             provider_canary_nonce=_provider_canary_nonce(context),
         )
+        cleanup_epoch = candidate
 
         stage.set("real-pair-pause")
         pause = QualificationPause.open(
@@ -6908,6 +7024,7 @@ def run_real_pair(
             old_frozen,
             pause,
             expected_old_streams_sha256,
+            stage,
         )
         stage.set("real-pair-repair")
         repaired = wait_status(
@@ -6936,14 +7053,17 @@ def run_real_pair(
             expected_rung=context.rung,
             deadline_monotonic_ns=overall_deadline_monotonic_ns,
         )
+        stage.set("real-pair-repair-bindings")
         if _bound_pause_children(pause, repaired_authorities) != children:
             raise VerificationError("qualification child bindings changed after repair")
+        stage.set("real-pair-repair-scopes")
         repaired_scope_inventory = cgroup_scope_inventory(
             deadline_monotonic_ns=overall_deadline_monotonic_ns
         )
         assert_cgroup_scopes_match(
             repaired_scope_inventory, repaired_authorities
         )
+        stage.set("real-pair-repair-authority")
         cleanup_authority = prove_exclusive_epoch_authority(
             account_control(),
             repaired,
@@ -6957,6 +7077,7 @@ def run_real_pair(
             leader_policy="disabled-empty",
             deadline_monotonic_ns=overall_deadline_monotonic_ns,
         )
+        stage.set("real-pair-repair-units")
         repaired_execution_units = _child_execution_unit_evidence(
             repaired_authorities, children
         )
@@ -6983,6 +7104,7 @@ def run_real_pair(
         quiesce_epoch = initial_quiesced["quiesce_epoch"]
         initial_quiesce_epoch = quiesce_epoch
         for index, wrapper in enumerate(pair_wrappers):
+            stage.set("real-pair-reconnect-liveness")
             binding = pause.bindings[index]
             child = binding["child_identity"]
             if not process_matches(wrapper.identity) or not process_matches(child):
@@ -7001,6 +7123,7 @@ def run_real_pair(
                 raise VerificationError(
                     "qualification guard expired before reconnect proof"
                 )
+            stage.set("real-pair-reconnect-receipt")
             observed = wait_status(
                 entrypoint,
                 env,
@@ -7024,6 +7147,7 @@ def run_real_pair(
             )
             observed_state = _status_qualification(observed)
             receipt = dict(observed_state["streams"][0])
+            stage.set("real-pair-reconnect-refreeze")
             frozen = pause.set_frozen(
                 wrapper.identity, True, fault["generation_after"]
             )
@@ -7042,6 +7166,7 @@ def run_real_pair(
                 raise VerificationError(
                     "qualification repaired stream changed while refreezing"
                 )
+            stage.set("real-pair-reconnect-quiescence")
             quiesced = pause.quiesce(
                 fault["generation_after"],
                 wrapper.identity,
@@ -7301,6 +7426,18 @@ def run_real_pair(
                 pair_cache.stop(cleanup_deadline_monotonic_ns)
             except BaseException as exc:
                 cleanup_errors.append(f"{type(exc).__name__}: {exc}")
+        if primary is not None and pause is not None:
+            try:
+                # Releasing the guard first thaws its exact child scopes.  If
+                # the two-lease destructive proof has already begun draining,
+                # cleanup below must not reuse that stale mutation authority.
+                pause.close()
+            except BaseException as exc:
+                cleanup_errors.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                pause = None
+        if primary is not None and cleanup_epoch is not None:
+            cleanup_passive_only = True
         try:
             cleanup(
                 entrypoint,
@@ -7312,6 +7449,8 @@ def run_real_pair(
                 expected_contract_digest=runtime_contract_digest,
                 require_capacity=False,
                 require_qualification_guard=True,
+                passive_only=cleanup_passive_only,
+                passive_epoch=(cleanup_epoch if cleanup_passive_only else None),
                 deadline_monotonic_ns=cleanup_deadline_monotonic_ns,
             )
         except BaseException as cleanup_error:
@@ -7335,7 +7474,7 @@ def run_real_pair(
                     f"primary failure: {type(primary).__name__}: {primary}; "
                     + detail
                 )
-                cleanup_error_code = "real-pair-cleanup-after-primary"
+                cleanup_error_code = _real_pair_cleanup_after_primary_code(stage)
             primary = QualificationStageError(cleanup_error_code, detail)
     if primary is not None:
         raise primary

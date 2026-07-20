@@ -120,10 +120,14 @@
   exact FD-backed direct release/rung canary authentication; keep initial
   supervisor reconciliation unchanged and the authorization marker out of
   ordinary status/control and Grok child environments.
-- [x] Accept a captured real-pair supervisor's natural cleanup exit only at
-  exact liveness revalidation boundaries and only after the unchanged exhaustive
-  clean proof; reject replacement epochs and retain a distinct closed code for
-  cleanup that follows an earlier primary failure.
+- [x] Accept a captured real-pair supervisor's natural cleanup exit at exact
+  liveness boundaries, and allow a same/absent-fence authority-renewal failure
+  to converge only through nonmutating passive cleanup after the failed pause is
+  closed; reject replacement/malformed fences and require both the exhaustive
+  clean proof and bounded absence of the captured supervisor identity.
+- [x] Defer wrapper TERM/KILL signal and wait diagnostics until `Popen` proves
+  whether that exact child exited, and retain the original granular real-pair
+  checkpoint in a closed `cleanup-after-*` failure code.
 
 ## Verification and delivery
 

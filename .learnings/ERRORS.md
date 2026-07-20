@@ -2911,30 +2911,33 @@ be omitted when disposable infrastructure makes deletion unnecessary.
 ### Summary
 
 The live direct real-pair qualification completed its authenticated provider
-fault and repair, then reported `real-pair-cleanup` even though the final host
-inventory was empty. The verifier had sampled its exact supervisor as live,
-but the supervisor could finish naturally before the following status or pidfd
-revalidation. That expected exit was treated as lost destructive authority.
-Wrapper signaling had the same reporting race when the exact child exited
-between signal validation and `Popen.wait()`.
+fault and repair, then reported `real-pair-cleanup-after-primary` even though
+the final host inventory was empty. Besides the already-covered status/pidfd
+exit races, a guarded session could begin draining before the verifier renewed
+its exact two-lease destructive authority, causing cleanup to return before its
+passive clean proof. Wrapper TERM/KILL wait errors could likewise remain stale
+after a later wait proved the exact child exited. The combined failure code also
+discarded the closed primary checkpoint needed to diagnose the live failure.
 
 ### Response
 
-Allow exit convergence only at the two exact-liveness revalidation boundaries.
-Re-read and bind the recovery fence to the captured epoch, require that exact
-process identity to be absent, retain exact-fence recovery when needed, and
-still require the existing exhaustive clean checkpoint before success. Reject
-replacement or malformed fences without signaling or recovery. Suppress a
-wrapper signal error only when waiting on that exact child proves exit, and use
-the closed `real-pair-cleanup-after-primary` code when cleanup follows another
-failure so the primary cause is not collapsed.
+Retain exact destructive recovery at its existing liveness boundaries. When
+authority renewal instead observes the same epoch draining, close the failed
+qualification pause, retain the captured epoch only for validation, and permit
+nonmutating passive convergence: exact wrapper stop, same/absent-fence checks,
+the exhaustive clean checkpoint, and a separate bounded absence proof for the
+captured supervisor. Reject replacement or malformed fences without supervisor
+signaling or recovery. Defer wrapper signal/wait diagnostics and suppress them
+only after `Popen` proves exit. Publish a finite stage-specific
+`real-pair-cleanup-after-*` code while continuing to hash all dynamic detail.
 
 ### Prevention
 
 Process-exit races are convergence only when identity, ownership, and terminal
-state are all independently proved. Add seen-to-fail regressions for natural
-supervisor exit, replacement epoch rejection, wrapper signal/exit ordering,
-primary-plus-cleanup diagnostics, and the generated selected-gate exact-fence
+state are all independently proved. Cover same, missing, replacement, and
+malformed fences; a still-live versus delayed-exit captured supervisor; wrapper
+TERM/KILL signal and wait ordering; every granular primary/cleanup code mapping;
+pause-close-before-passive-cleanup; and the generated selected-gate exact-fence
 recovery composition. Do not promote or push until the patched signed release
 passes a real-pair canary and two simultaneous real sessions locally.
 

@@ -649,6 +649,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
     def test_real_pair_pause_orders_refresh_fault_resume_and_completion(self) -> None:
         source = inspect.getsource(VERIFY.run_real_pair)
         pause_source = inspect.getsource(VERIFY.QualificationPause.open)
+        fault_source = inspect.getsource(VERIFY._request_provider_fault)
         positions = [
             source.index("_spawn_models_wrapper"),
             source.index("QualificationPause.open"),
@@ -682,13 +683,57 @@ class LiveVerifierHelperTests(unittest.TestCase):
             "real-pair-model-refresh",
             "real-pair-old-generation",
             "real-pair-provider-fault",
+            "real-pair-provider-fault-replay",
             "real-pair-repair",
+            "real-pair-repair-bindings",
+            "real-pair-repair-scopes",
+            "real-pair-repair-authority",
+            "real-pair-repair-units",
             "real-pair-reconnect",
+            "real-pair-reconnect-liveness",
+            "real-pair-reconnect-receipt",
+            "real-pair-reconnect-refreeze",
+            "real-pair-reconnect-quiescence",
             "real-pair-resume",
             "real-pair-completion",
         ):
             self.assertIn(checkpoint, VERIFY.QUALIFICATION_FAILURE_CODES["real-pair"])
-            self.assertIn(f'stage.set("{checkpoint}")', source)
+            checkpoint_source = (
+                fault_source
+                if checkpoint == "real-pair-provider-fault-replay"
+                else source
+            )
+            self.assertIn(f'stage.set("{checkpoint}")', checkpoint_source)
+        repair_positions = [
+            source.index(f'stage.set("{checkpoint}")')
+            for checkpoint in (
+                "real-pair-repair",
+                "real-pair-repair-bindings",
+                "real-pair-repair-scopes",
+                "real-pair-repair-authority",
+                "real-pair-repair-units",
+            )
+        ]
+        reconnect_positions = [
+            source.index(f'stage.set("{checkpoint}")')
+            for checkpoint in (
+                "real-pair-reconnect",
+                "real-pair-reconnect-liveness",
+                "real-pair-reconnect-receipt",
+                "real-pair-reconnect-refreeze",
+                "real-pair-reconnect-quiescence",
+            )
+        ]
+        self.assertEqual(repair_positions, sorted(repair_positions))
+        self.assertEqual(reconnect_positions, sorted(reconnect_positions))
+        self.assertLess(
+            fault_source.index("response = exchange()"),
+            fault_source.index('stage.set("real-pair-provider-fault-replay")'),
+        )
+        self.assertLess(
+            fault_source.index('stage.set("real-pair-provider-fault-replay")'),
+            fault_source.index("replay = exchange()"),
+        )
 
     def test_real_pair_binds_provider_nonce_only_for_provider_backed_rungs(self) -> None:
         direct = VERIFY.QualificationContext(
@@ -2506,7 +2551,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
         exact_signal.assert_not_called()
         invoke.assert_not_called()
 
-    def test_cleanup_status_timeout_still_stops_owned_wrappers(self) -> None:
+    def test_cleanup_status_timeout_uses_only_passive_convergence(self) -> None:
         identity = VERIFY.ProcessIdentity(
             100, 10, "11111111-2222-3333-4444-555555555555"
         )
@@ -2514,10 +2559,11 @@ class LiveVerifierHelperTests(unittest.TestCase):
         authority = VERIFY.ExclusiveCleanupAuthority(
             epoch, 1, "b" * 64, (identity,)
         )
+        checkpoint = {"clean": True}
         with mock.patch.object(
             VERIFY, "cleanup_fence", return_value=(epoch, "READY")
         ), mock.patch.object(
-            VERIFY, "process_matches", return_value=True
+            VERIFY, "process_matches", side_effect=(True, True, False)
         ), mock.patch.object(
             VERIFY,
             "invoke",
@@ -2525,13 +2571,13 @@ class LiveVerifierHelperTests(unittest.TestCase):
         ), mock.patch.object(
             VERIFY, "_stop_wrappers_bounded", return_value=[]
         ) as stop_wrappers, mock.patch.object(
+            VERIFY, "wait_clean", return_value=checkpoint
+        ) as wait_clean, mock.patch.object(
             VERIFY, "exact_signal"
         ) as exact_signal, mock.patch.object(
             VERIFY, "prove_exclusive_epoch_authority"
         ) as prove_authority:
-            with self.assertRaisesRegex(
-                VERIFY.VerificationError, "authority refused"
-            ):
+            self.assertEqual(
                 VERIFY.cleanup(
                     Path("/entrypoint"),
                     {},
@@ -2540,10 +2586,244 @@ class LiveVerifierHelperTests(unittest.TestCase):
                     authority,
                     deadline_monotonic_ns=time.monotonic_ns()
                     + 5_000_000_000,
-                )
+                ),
+                checkpoint,
+            )
         stop_wrappers.assert_called_once()
         exact_signal.assert_not_called()
         prove_authority.assert_not_called()
+        wait_clean.assert_called_once()
+
+    def test_cleanup_semantic_renewal_failure_passively_proves_clean(self) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        checkpoint = {"clean": True}
+        with mock.patch.object(
+            VERIFY, "cleanup_fence", return_value=(epoch, "DRAINING")
+        ), mock.patch.object(
+            VERIFY, "process_matches", side_effect=(True, True, False)
+        ), mock.patch.object(
+            VERIFY, "status", return_value={"phase": "DRAINING"}
+        ), mock.patch.object(
+            VERIFY, "recovery_authorities", return_value={"fixture": True}
+        ), mock.patch.object(
+            VERIFY,
+            "prove_exclusive_epoch_authority",
+            side_effect=VERIFY.VerificationError("natural lease drain"),
+        ), mock.patch.object(
+            VERIFY, "_stop_wrappers_bounded", return_value=[]
+        ) as stop_wrappers, mock.patch.object(
+            VERIFY, "wait_clean", return_value=checkpoint
+        ) as wait_clean, mock.patch.object(
+            VERIFY, "exact_signal"
+        ) as exact_signal, mock.patch.object(
+            VERIFY, "invoke"
+        ) as invoke:
+            self.assertEqual(
+                VERIFY.cleanup(
+                    Path("/entrypoint"),
+                    {},
+                    (),
+                    {},
+                    authority,
+                    deadline_monotonic_ns=time.monotonic_ns()
+                    + 5_000_000_000,
+                ),
+                checkpoint,
+            )
+        stop_wrappers.assert_called_once()
+        wait_clean.assert_called_once()
+        exact_signal.assert_not_called()
+        invoke.assert_not_called()
+
+    def test_cleanup_passive_fence_matrix_is_nonmutating_and_ordered(self) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        replacement = VERIFY.CleanupAuthority(
+            "a" * 64,
+            "epoch-b",
+            VERIFY.ProcessIdentity(
+                101, 11, "11111111-2222-3333-4444-555555555555"
+            ),
+        )
+        cases = (
+            ("same", (epoch, "DRAINING"), True),
+            ("missing", None, True),
+            ("replacement", (replacement, "READY"), False),
+            (
+                "malformed",
+                VERIFY.VerificationError(
+                    "recovery fence has a non-exact cleanup schema"
+                ),
+                False,
+            ),
+        )
+        for name, fence, accepted in cases:
+            with self.subTest(name=name):
+                events: list[str] = []
+
+                def cleanup_fence(_control):
+                    if isinstance(fence, BaseException):
+                        raise fence
+                    return fence
+
+                def stop_wrappers(*_args, **_kwargs):
+                    events.append("wrappers")
+                    return []
+
+                def wait_clean(*_args, **_kwargs):
+                    events.append("clean")
+                    return {"clean": True}
+
+                def process_matches(_identity):
+                    events.append("absent")
+                    return False
+
+                with mock.patch.object(
+                    VERIFY, "cleanup_fence", side_effect=cleanup_fence
+                ), mock.patch.object(
+                    VERIFY,
+                    "_stop_wrappers_bounded",
+                    side_effect=stop_wrappers,
+                ), mock.patch.object(
+                    VERIFY, "wait_clean", side_effect=wait_clean
+                ) as wait_clean_mock, mock.patch.object(
+                    VERIFY, "process_matches", side_effect=process_matches
+                ), mock.patch.object(
+                    VERIFY, "exact_signal"
+                ) as exact_signal, mock.patch.object(
+                    VERIFY, "invoke"
+                ) as invoke, mock.patch.object(
+                    VERIFY, "status"
+                ) as status, mock.patch.object(
+                    VERIFY, "prove_exclusive_epoch_authority"
+                ) as prove_authority:
+                    if accepted:
+                        self.assertEqual(
+                            VERIFY.cleanup(
+                                Path("/entrypoint"),
+                                {},
+                                (),
+                                {},
+                                authority,
+                                passive_only=True,
+                                passive_epoch=epoch,
+                                deadline_monotonic_ns=time.monotonic_ns()
+                                + 5_000_000_000,
+                            ),
+                            {"clean": True},
+                        )
+                        self.assertEqual(events, ["wrappers", "clean", "absent"])
+                        wait_clean_mock.assert_called_once()
+                    else:
+                        with self.assertRaises(VERIFY.VerificationError):
+                            VERIFY.cleanup(
+                                Path("/entrypoint"),
+                                {},
+                                (),
+                                {},
+                                authority,
+                                passive_only=True,
+                                passive_epoch=epoch,
+                                deadline_monotonic_ns=time.monotonic_ns()
+                                + 5_000_000_000,
+                            )
+                        self.assertEqual(events, ["wrappers"])
+                        wait_clean_mock.assert_not_called()
+                exact_signal.assert_not_called()
+                invoke.assert_not_called()
+                status.assert_not_called()
+                prove_authority.assert_not_called()
+
+    def test_cleanup_passive_clean_rejects_a_still_live_exact_supervisor(self) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        with mock.patch.object(
+            VERIFY, "cleanup_fence", return_value=None
+        ), mock.patch.object(
+            VERIFY, "_stop_wrappers_bounded", return_value=[]
+        ), mock.patch.object(
+            VERIFY, "wait_clean", return_value={"clean": True}
+        ) as wait_clean, mock.patch.object(
+            VERIFY, "process_matches", return_value=True
+        ), mock.patch.object(
+            VERIFY, "exact_signal"
+        ) as exact_signal, mock.patch.object(
+            VERIFY, "invoke"
+        ) as invoke:
+            with self.assertRaisesRegex(
+                VERIFY.VerificationError, "exact owned processes did not return"
+            ):
+                VERIFY.cleanup(
+                    Path("/entrypoint"),
+                    {},
+                    (),
+                    {},
+                    authority,
+                    passive_only=True,
+                    passive_epoch=epoch,
+                    deadline_monotonic_ns=time.monotonic_ns(),
+                )
+        wait_clean.assert_called_once()
+        exact_signal.assert_not_called()
+        invoke.assert_not_called()
+
+    def test_cleanup_passive_clean_accepts_a_delayed_exact_supervisor_exit(self) -> None:
+        identity = VERIFY.ProcessIdentity(
+            100, 10, "11111111-2222-3333-4444-555555555555"
+        )
+        epoch = VERIFY.CleanupAuthority("a" * 64, "epoch-a", identity)
+        authority = VERIFY.ExclusiveCleanupAuthority(
+            epoch, 1, "b" * 64, (identity,)
+        )
+        checkpoint = {"clean": True}
+        with mock.patch.object(
+            VERIFY, "cleanup_fence", return_value=None
+        ), mock.patch.object(
+            VERIFY, "_stop_wrappers_bounded", return_value=[]
+        ), mock.patch.object(
+            VERIFY, "wait_clean", return_value=checkpoint
+        ), mock.patch.object(
+            VERIFY, "process_matches", side_effect=(True, False, False)
+        ), mock.patch.object(
+            VERIFY.time, "sleep"
+        ) as sleep, mock.patch.object(
+            VERIFY, "exact_signal"
+        ) as exact_signal, mock.patch.object(
+            VERIFY, "invoke"
+        ) as invoke:
+            self.assertEqual(
+                VERIFY.cleanup(
+                    Path("/entrypoint"),
+                    {},
+                    (),
+                    {},
+                    authority,
+                    passive_only=True,
+                    passive_epoch=epoch,
+                    deadline_monotonic_ns=time.monotonic_ns()
+                    + 5_000_000_000,
+                ),
+                checkpoint,
+            )
+        sleep.assert_called_once_with(0.02)
+        exact_signal.assert_not_called()
+        invoke.assert_not_called()
 
     def test_cleanup_accepts_a_captured_supervisor_exit_race_only_after_clean_proof(
         self,
@@ -2561,7 +2841,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
             "cleanup_fence",
             side_effect=((epoch, "READY"), None, None, None),
         ), mock.patch.object(
-            VERIFY, "process_matches", side_effect=(True, False)
+            VERIFY, "process_matches", side_effect=(True, False, False)
         ), mock.patch.object(
             VERIFY, "status", return_value=None
         ), mock.patch.object(
@@ -2665,7 +2945,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
         with mock.patch.object(
             VERIFY, "cleanup_fence", return_value=(epoch, "READY")
         ), mock.patch.object(
-            VERIFY, "process_matches", side_effect=(True, False, False)
+            VERIFY, "process_matches", side_effect=(True, False, False, False)
         ), mock.patch.object(
             VERIFY, "status", return_value=None
         ), mock.patch.object(
@@ -2715,7 +2995,7 @@ class LiveVerifierHelperTests(unittest.TestCase):
             "cleanup_fence",
             side_effect=((epoch, "READY"), None, None, None),
         ), mock.patch.object(
-            VERIFY, "process_matches", side_effect=(True, False)
+            VERIFY, "process_matches", side_effect=(True, False, False)
         ), mock.patch.object(
             VERIFY, "status", return_value={"fixture": True}
         ), mock.patch.object(
@@ -3695,6 +3975,80 @@ class LiveVerifierHelperTests(unittest.TestCase):
         self.assertEqual(wrapper.process.returncode, 0)
         self.assertTrue(wrapper.closed)
 
+    def test_wrapper_cleanup_discards_a_term_wait_error_after_kill_exit_is_proved(
+        self,
+    ) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+                self.wait_count = 0
+
+            def wait(self, timeout: float) -> int:
+                self.wait_count += 1
+                if self.wait_count == 1:
+                    raise OSError("fixture TERM wait race")
+                self.returncode = 0
+                return self.returncode
+
+        class FakeWrapper:
+            def __init__(self) -> None:
+                self.process = FakeProcess()
+                self.identity = VERIFY.ProcessIdentity(
+                    10_000,
+                    20_000,
+                    "11111111-2222-3333-4444-555555555555",
+                )
+                self.pidfd = 30_000
+                self.closed = False
+
+            def close_pidfd(self) -> None:
+                self.closed = True
+
+        wrapper = FakeWrapper()
+        with mock.patch.object(VERIFY, "exact_signal"):
+            errors = VERIFY._stop_wrappers_bounded((wrapper,))
+        self.assertEqual(errors, [])
+        self.assertEqual(wrapper.process.wait_count, 2)
+        self.assertEqual(wrapper.process.returncode, 0)
+        self.assertTrue(wrapper.closed)
+
+    def test_wrapper_cleanup_discards_a_kill_wait_error_after_exit_is_proved(
+        self,
+    ) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+                self.wait_count = 0
+
+            def wait(self, timeout: float) -> int:
+                self.wait_count += 1
+                if self.wait_count == 1:
+                    raise subprocess.TimeoutExpired(["fixture"], timeout)
+                self.returncode = 0
+                raise OSError("fixture KILL wait race")
+
+        class FakeWrapper:
+            def __init__(self) -> None:
+                self.process = FakeProcess()
+                self.identity = VERIFY.ProcessIdentity(
+                    10_000,
+                    20_000,
+                    "11111111-2222-3333-4444-555555555555",
+                )
+                self.pidfd = 30_000
+                self.closed = False
+
+            def close_pidfd(self) -> None:
+                self.closed = True
+
+        wrapper = FakeWrapper()
+        with mock.patch.object(VERIFY, "exact_signal"):
+            errors = VERIFY._stop_wrappers_bounded((wrapper,))
+        self.assertEqual(errors, [])
+        self.assertEqual(wrapper.process.wait_count, 2)
+        self.assertEqual(wrapper.process.returncode, 0)
+        self.assertTrue(wrapper.closed)
+
     def test_wrapper_cleanup_surfaces_persistent_term_and_kill_failures(
         self,
     ) -> None:
@@ -3788,13 +4142,179 @@ class LiveVerifierHelperTests(unittest.TestCase):
             with self.assertRaises(VERIFY.QualificationStageError) as caught:
                 VERIFY.run_real_pair(Path("/entrypoint"), context, {})
         self.assertEqual(
-            caught.exception.error_code, "real-pair-cleanup-after-primary"
+            caught.exception.error_code,
+            "real-pair-cleanup-after-model-refresh",
         )
         self.assertNotIn("dynamic", caught.exception.error_code)
         self.assertIn(
             caught.exception.error_code,
             VERIFY.QUALIFICATION_FAILURE_CODES["real-pair"],
         )
+
+    def test_real_pair_granular_cleanup_stage_mapping_is_closed(self) -> None:
+        stages = (
+            "real-pair-model-refresh",
+            "real-pair-spawn",
+            "real-pair-ready",
+            "real-pair-authority",
+            "real-pair-pause",
+            "real-pair-old-generation",
+            "real-pair-provider-fault",
+            "real-pair-provider-fault-replay",
+            "real-pair-repair",
+            "real-pair-repair-bindings",
+            "real-pair-repair-scopes",
+            "real-pair-repair-authority",
+            "real-pair-repair-units",
+            "real-pair-reconnect",
+            "real-pair-reconnect-liveness",
+            "real-pair-reconnect-receipt",
+            "real-pair-reconnect-refreeze",
+            "real-pair-reconnect-quiescence",
+            "real-pair-resume",
+            "real-pair-completion",
+        )
+        stage = VERIFY.QualificationStage("real-pair")
+        for checkpoint in stages:
+            with self.subTest(checkpoint=checkpoint):
+                stage.set(checkpoint)
+                expected = (
+                    "real-pair-cleanup-after-"
+                    + checkpoint.removeprefix("real-pair-")
+                )
+                self.assertEqual(
+                    VERIFY._real_pair_cleanup_after_primary_code(stage),
+                    expected,
+                )
+                self.assertIn(
+                    expected,
+                    VERIFY.QUALIFICATION_FAILURE_CODES["real-pair"],
+                )
+
+    def test_real_pair_releases_failed_pause_before_cleanup(self) -> None:
+        context = VERIFY.QualificationContext(
+            release_id="a" * 64,
+            nonce="b" * 64,
+            canary_kind="rung",
+            rung="direct",
+            route_profile="direct",
+            contract_sha256="c" * 64,
+            grok_release_id="grok-release",
+            model_id="grok-model",
+            auth_fd=-1,
+        )
+        events: list[str] = []
+
+        class FakeContract:
+            @staticmethod
+            def digest() -> str:
+                return "d" * 64
+
+        class FakeSampler:
+            def __init__(self, _path: Path) -> None:
+                self._thread = SimpleNamespace(is_alive=lambda: False)
+
+            def start(self) -> None:
+                pass
+
+            def stop(self, _deadline=None):
+                regular = {"state": "regular"}
+                return regular, (regular,), regular
+
+        class FakeWrapper:
+            def __init__(self, pid: int) -> None:
+                self.identity = VERIFY.ProcessIdentity(
+                    pid,
+                    pid + 100,
+                    "11111111-2222-3333-4444-555555555555",
+                )
+                self.process = SimpleNamespace(returncode=0)
+                self.pidfd = -1
+
+            def close_pidfd(self) -> None:
+                pass
+
+        now = time.monotonic_ns()
+
+        class FakePause:
+            generation = 1
+            pause_id = "e" * 32
+            deadline_monotonic_ns = now + 5_000_000_000
+
+            def close(self) -> None:
+                events.append("pause-close")
+
+        wrappers = [FakeWrapper(100), FakeWrapper(101), FakeWrapper(102)]
+        cleanup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        passive_epoch = VERIFY.CleanupAuthority(
+            "a" * 64,
+            "epoch-a",
+            VERIFY.ProcessIdentity(
+                200,
+                300,
+                "11111111-2222-3333-4444-555555555555",
+            ),
+        )
+
+        def cleanup(*args, **kwargs):
+            events.append("cleanup")
+            cleanup_calls.append((args, kwargs))
+            return {"clean": True}
+
+        with mock.patch.object(
+            VERIFY, "_real_environment", return_value={}
+        ), mock.patch.object(
+            VERIFY,
+            "_qualification_deadlines_ns",
+            return_value=(now + 5_000_000_000, now + 10_000_000_000),
+        ), mock.patch.object(
+            VERIFY,
+            "_real_contracts",
+            return_value=(FakeContract(), FakeContract()),
+        ), mock.patch.object(
+            VERIFY, "_root_and_user_clean_checkpoint", return_value={}
+        ), mock.patch.object(
+            VERIFY, "CacheSampler", FakeSampler
+        ), mock.patch.object(
+            VERIFY, "_spawn_models_wrapper", return_value=wrappers[0]
+        ), mock.patch.object(
+            VERIFY, "process_matches", return_value=True
+        ), mock.patch.object(
+            VERIFY, "_bounded_collect", return_value=(b"models", b"")
+        ), mock.patch.object(
+            VERIFY, "_models_output_contains", return_value=True
+        ), mock.patch.object(
+            VERIFY, "_cache_window_valid", return_value=True
+        ), mock.patch.object(
+            VERIFY, "wait_clean", return_value={"clean": True}
+        ), mock.patch.object(
+            VERIFY,
+            "_spawn_real_wrapper",
+            side_effect=(wrappers[1], wrappers[2]),
+        ), mock.patch.object(
+            VERIFY,
+            "wait_status",
+            side_effect=(
+                {"owner_epoch": "epoch-a", "generation": 1},
+                VERIFY.VerificationError("guard acknowledgement failed"),
+            ),
+        ), mock.patch.object(
+            VERIFY, "capture_cleanup_authority", return_value=passive_epoch
+        ), mock.patch.object(
+            VERIFY.QualificationPause, "open", return_value=FakePause()
+        ), mock.patch.object(
+            VERIFY, "cleanup", side_effect=cleanup
+        ):
+            with self.assertRaisesRegex(
+                VERIFY.VerificationError, "guard acknowledgement failed"
+            ):
+                VERIFY.run_real_pair(Path("/entrypoint"), context, {})
+        self.assertEqual(events, ["pause-close", "cleanup"])
+        self.assertEqual(len(cleanup_calls), 1)
+        cleanup_args, cleanup_kwargs = cleanup_calls[0]
+        self.assertIsNone(cleanup_args[4])
+        self.assertIs(cleanup_kwargs["passive_only"], True)
+        self.assertEqual(cleanup_kwargs["passive_epoch"], passive_epoch)
 
     def test_failure_stage_codes_are_closed_and_cleanup_overrides_primary(self) -> None:
         stage = VERIFY.QualificationStage("load32")
