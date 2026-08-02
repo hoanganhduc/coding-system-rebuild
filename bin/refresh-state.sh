@@ -34,11 +34,27 @@ for name,meta in sorted(d.get("venvs",{}).items()):
 fi
 
 echo "-- pip freezes (4 environments)"
-PYV=$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')
-echo "python $PYV" > "$PKG/requirements/PYTHON_VERSION"
-record_output system/packages/requirements/PYTHON_VERSION
-python3 -m pip freeze --path "$HOME/.openclaw/workspace/.local" \
-  > "$PKG/requirements/workspace-local.txt" 2>/dev/null || echo "WARN: workspace-local freeze failed"
+# Prefer a host Python with pip (PATH may put a bare venv without pip first).
+FREEZE_PY="${CSR_FREEZE_PYTHON:-}"
+if [[ -z "$FREEZE_PY" ]]; then
+  for candidate in /usr/bin/python3.12 /usr/bin/python3.11 /usr/bin/python3 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+        && "$candidate" -c 'import pip' 2>/dev/null; then
+      FREEZE_PY=$(command -v "$candidate")
+      break
+    fi
+  done
+fi
+if [[ -n "$FREEZE_PY" ]]; then
+  PYV=$("$FREEZE_PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])')
+  echo "python $PYV" > "$PKG/requirements/PYTHON_VERSION"
+  record_output system/packages/requirements/PYTHON_VERSION
+  "$FREEZE_PY" -m pip freeze --path "$HOME/.openclaw/workspace/.local" \
+    > "$PKG/requirements/workspace-local.txt" 2>/dev/null \
+    || echo "WARN: workspace-local freeze failed"
+else
+  echo "WARN: no Python with pip found for freezes" >&2
+fi
 record_output system/packages/requirements/workspace-local.txt
 if [ -x "$HOME/.venvs/bin/pip" ]; then
   "$HOME/.venvs/bin/pip" freeze > "$PKG/requirements/venvs.txt" 2>/dev/null || true
@@ -65,7 +81,8 @@ echo "-- units.state"
 : > "$REPO/system/systemd/units.state"
 for u in openclaw-gateway.service send-queue-worker.service syncthing.service \
          rss_news_digest_bot.service rss_news_digest_bot.timer \
-         moltbook-relay.service moltbook-relay.timer xvfb-99.service; do
+         moltbook-relay.service moltbook-relay.timer xvfb-99.service \
+         grok-remote-boot-revalidate.service; do
   state=$(systemctl --user is-enabled "$u" 2>/dev/null) || true
   [[ -n "$state" ]] || state="absent"
   printf '%s\t%s\n' "$u" "$state" >> "$REPO/system/systemd/units.state"

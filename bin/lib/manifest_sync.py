@@ -1118,6 +1118,9 @@ def main():
                         os.makedirs(os.path.dirname(dest), exist_ok=True)
                         with open(dest, "w") as fh:
                             fh.write(keys_text)
+                        # Stage backup accepts only 0600/0644/0700/0755 — force
+                        # 0644 so umask 002 cannot leave 0664 producer records.
+                        os.chmod(dest, 0o644)
                         report["output_paths"].append(
                             os.path.relpath(dest, entry_out).replace(os.sep, "/")
                         )
@@ -1190,6 +1193,7 @@ def main():
             fh.write("%s\t%s\t%s\n" % (
                 link.replace(HOME, placeholder),
                 target.replace(HOME, placeholder), disp))
+    os.chmod(obs_path, 0o644)
     if args.apply and os.path.abspath(manifest_path) == default_manifest:
         report["output_paths"].append(".staging-symlinks-observed.tsv")
     tsv = os.path.join(repo, "system", "symlinks.tsv")

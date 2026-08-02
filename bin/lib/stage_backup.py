@@ -308,9 +308,12 @@ def _add_to_index(
     *,
     environment: dict[str, str] | None = None,
 ) -> None:
+    # Force-add: producer ledgers can include captured paths that a nested or
+    # root .gitignore would otherwise refuse (fixture zips, package.json mirrors).
     staged = _git(
         repo,
         "add",
+        "-f",
         "-A",
         "--pathspec-from-file=-",
         "--pathspec-file-nul",

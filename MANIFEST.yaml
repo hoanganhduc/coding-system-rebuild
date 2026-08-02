@@ -189,7 +189,8 @@ entries:
   - id: codex-exclude
     root: .codex
     match: ["AGENTS.md.bak-*", "config.toml.bak-*", ".backup", ".personality_migration",
-            ".tmp", "cache", "goals_1.sqlite*", "history.jsonl", "installation_id",
+            ".sandbox_migration", ".tmp", "cache", "cad_write_test", "goals_1.sqlite*",
+            "history.jsonl", "installation_id",
             "log", "logs_2.sqlite*", "mcp-oauth-locks", "memories", "memories_1.sqlite*",
             "models_cache.json", "runs", "runtime", "sessions", "shell_snapshots",
             "state", "state_5.sqlite*", "tmp"]
@@ -214,8 +215,9 @@ entries:
 
   - id: copilot-exclude
     root: .copilot
-    match: ["command-history-state.json", "logs", "restart", "session-state",
-            "session-store.db", "session-store.db-shm", "session-store.db-wal"]
+    match: ["command-history-state.json", "installed-plugins", "logs", "restart",
+            "session-state", "session-store.db", "session-store.db-shm",
+            "session-store.db-wal"]
     class: exclude-generated
 
   # ---------------------------------------------------------------- opencode
@@ -256,7 +258,9 @@ entries:
 
   - id: codewhale-exclude
     root: .codewhale
-    match: ["audit.log", "slop_ledger", "sessions"]
+    match: ["audit.log", "catalog", "config.toml.bak", "config.toml.lock",
+            "settings.toml.lock", "setup_state.json", "slop_ledger", "sessions",
+            "state"]
     class: exclude-generated
 
   # ---------------------------------------------------------------- deepseek
@@ -371,7 +375,7 @@ entries:
   # ---------------------------------------------------------------- ai-agents-skills state home
   - id: aas-state-exclude
     root: .ai-agents-skills
-    match: ["backups", "delegation-runs", "openclaw-target-runs",
+    match: ["agd-runs", "backups", "delegation-runs", "openclaw-target-runs",
             "openclaw-target-state.json", "runs", "state.json", ".state.json.*.tmp",
             "state.json.bak-*"]
     class: exclude-generated
@@ -383,7 +387,8 @@ entries:
     match: ["openclaw-gateway.service", "openclaw-gateway.service.d",
             "send-queue-worker.service", "rss_news_digest_bot.service",
             "rss_news_digest_bot.timer", "moltbook-relay.service",
-            "moltbook-relay.timer", "xvfb-99.service"]
+            "moltbook-relay.timer", "xvfb-99.service",
+            "grok-remote-boot-revalidate.service"]
     class: public-template
     dest_dir: system/systemd/user
     template: [home-substitute]
@@ -419,7 +424,8 @@ entries:
   # ---------------------------------------------------------------- grok-proxy toolkit
   - id: grokproxy-scripts
     root: grok-proxy
-    match: ["README.md", "SPEC.md", "PLAN.md", "TASKS.md", "grok-remote", "egress.sh",
+    match: ["README.md", "SPEC.md", "PLAN.md", "TASKS.md", "grok-remote",
+            "grok-remote-boot-revalidate.sh", "egress.sh",
             "socks-netns.py", "sanitize.awk", "vpngate-connect.sh", "vpn-broker",
             "install-release.py", "bootstrap", "grok_ms", "dist", "tests"]
     exclude: ["bootstrap/build", "bootstrap/build/**", "**/__pycache__", "**/__pycache__/**", "**/*.pyc", "**/.pytest_cache", "**/.pytest_cache/**"]
