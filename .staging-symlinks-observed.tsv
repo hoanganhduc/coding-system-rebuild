@@ -1,3 +1,6 @@
+.claude/plugins/cache/lean4-skills/lean4/4.5.7/scripts	lib/scripts	topology
+.claude/plugins/cache/lean4-skills/lean4/4.5.8/scripts	lib/scripts	topology
+.claude/plugins/marketplaces/lean4-skills/plugins/lean4/scripts	lib/scripts	topology
 .claude/skills/adversarial-boundary-gate/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/adversarial-boundary-gate/SKILL.md	delegated
 .claude/skills/agent-group-discuss/EXECUTION.md	{{ HOME }}/ai-agents-skills/canonical/skills/agent-group-discuss/EXECUTION.md	delegated
 .claude/skills/agent-group-discuss/MODEL_TIERS.example.md	{{ HOME }}/ai-agents-skills/canonical/skills/agent-group-discuss/MODEL_TIERS.example.md	delegated
@@ -51,15 +54,30 @@
 .claude/skills/get-available-resources/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/get-available-resources/SKILL.md	delegated
 .claude/skills/getscipapers-requester/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/getscipapers-requester/SKILL.md	delegated
 .claude/skills/graph-verifier/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/graph-verifier/SKILL.md	delegated
+.claude/skills/hetzner-research-compute/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/hetzner-research-compute/SKILL.md	delegated
+.claude/skills/hetzner-research-compute/references/hetzner-offload.md	{{ HOME }}/ai-agents-skills/canonical/skills/hetzner-research-compute/references/hetzner-offload.md	delegated
+.claude/skills/hetzner-research-compute/references/reaper-deployment.md	{{ HOME }}/ai-agents-skills/canonical/skills/hetzner-research-compute/references/reaper-deployment.md	delegated
 .claude/skills/intent-interview/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/intent-interview/SKILL.md	delegated
 .claude/skills/intent-interview/references/intent-interview-template.md	{{ HOME }}/ai-agents-skills/canonical/skills/intent-interview/references/intent-interview-template.md	delegated
+.claude/skills/kaggle-research-compute/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/kaggle-research-compute/SKILL.md	delegated
+.claude/skills/kaggle-research-compute/references/kaggle-offload.md	{{ HOME }}/ai-agents-skills/canonical/skills/kaggle-research-compute/references/kaggle-offload.md	delegated
 .claude/skills/lean-explore-mcp/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/lean-explore-mcp/SKILL.md	delegated
 .claude/skills/lean-formalization-intake/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/lean-formalization-intake/SKILL.md	delegated
+.claude/skills/lean-research-library/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/lean-research-library/SKILL.md	delegated
 .claude/skills/lean-strict-verification-gate/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/lean-strict-verification-gate/SKILL.md	delegated
 .claude/skills/manim-math-animation/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/manim-math-animation/SKILL.md	delegated
 .claude/skills/manim-math-animation/references/design.md	{{ HOME }}/ai-agents-skills/canonical/skills/manim-math-animation/references/design.md	delegated
 .claude/skills/manim-math-animation/references/integration.md	{{ HOME }}/ai-agents-skills/canonical/skills/manim-math-animation/references/integration.md	delegated
 .claude/skills/model-router/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/model-router/SKILL.md	delegated
+.claude/skills/opengauss/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/opengauss/SKILL.md	delegated
+.claude/skills/opengauss/references/evidence-policy.md	{{ HOME }}/ai-agents-skills/canonical/skills/opengauss/references/evidence-policy.md	delegated
+.claude/skills/opengauss/references/formalqualbench-note.md	{{ HOME }}/ai-agents-skills/canonical/skills/opengauss/references/formalqualbench-note.md	delegated
+.claude/skills/opengauss/references/handoff-schemas.md	{{ HOME }}/ai-agents-skills/canonical/skills/opengauss/references/handoff-schemas.md	delegated
+.claude/skills/opengauss/references/local-install.md	{{ HOME }}/ai-agents-skills/canonical/skills/opengauss/references/local-install.md	delegated
+.claude/skills/opengauss/references/manual-workflows.md	{{ HOME }}/ai-agents-skills/canonical/skills/opengauss/references/manual-workflows.md	delegated
+.claude/skills/opengauss/references/morph-cloud.md	{{ HOME }}/ai-agents-skills/canonical/skills/opengauss/references/morph-cloud.md	delegated
+.claude/skills/opengauss/references/phase-status.md	{{ HOME }}/ai-agents-skills/canonical/skills/opengauss/references/phase-status.md	delegated
+.claude/skills/opengauss/references/windows-wsl.md	{{ HOME }}/ai-agents-skills/canonical/skills/opengauss/references/windows-wsl.md	delegated
 .claude/skills/paper-lookup/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/paper-lookup/SKILL.md	delegated
 .claude/skills/paper-lookup/references/arxiv.md	{{ HOME }}/ai-agents-skills/canonical/skills/paper-lookup/references/arxiv.md	delegated
 .claude/skills/paper-lookup/references/biorxiv.md	{{ HOME }}/ai-agents-skills/canonical/skills/paper-lookup/references/biorxiv.md	delegated
@@ -73,6 +91,7 @@
 .claude/skills/paper-review/references/common_issues.md	{{ HOME }}/ai-agents-skills/canonical/skills/paper-review/references/common_issues.md	delegated
 .claude/skills/paper-review/references/reporting_standards.md	{{ HOME }}/ai-agents-skills/canonical/skills/paper-review/references/reporting_standards.md	delegated
 .claude/skills/prose/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/prose/SKILL.md	delegated
+.claude/skills/remote-bridge/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/remote-bridge/SKILL.md	delegated
 .claude/skills/research-briefing/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/research-briefing/SKILL.md	delegated
 .claude/skills/research-briefing/references/brief-template.md	{{ HOME }}/ai-agents-skills/canonical/skills/research-briefing/references/brief-template.md	delegated
 .claude/skills/research-digest-wrapper/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/research-digest-wrapper/SKILL.md	delegated
@@ -119,8 +138,17 @@
 .claude/skills/url-to-screenshot/references/browsers-and-platforms.md	{{ HOME }}/ai-agents-skills/canonical/skills/url-to-screenshot/references/browsers-and-platforms.md	delegated
 .claude/skills/url-to-screenshot/references/engine-and-cdp.md	{{ HOME }}/ai-agents-skills/canonical/skills/url-to-screenshot/references/engine-and-cdp.md	delegated
 .claude/skills/url-to-screenshot/references/verification-gates.md	{{ HOME }}/ai-agents-skills/canonical/skills/url-to-screenshot/references/verification-gates.md	delegated
+.claude/skills/venue-ranking-evidence/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/venue-ranking-evidence/SKILL.md	delegated
+.claude/skills/venue-ranking-evidence/agents/openai.yaml	{{ HOME }}/ai-agents-skills/canonical/skills/venue-ranking-evidence/agents/openai.yaml	delegated
+.claude/skills/venue-ranking-evidence/references/artifact-schema.md	{{ HOME }}/ai-agents-skills/canonical/skills/venue-ranking-evidence/references/artifact-schema.md	delegated
+.claude/skills/venue-ranking-evidence/references/deferred-roadmap.md	{{ HOME }}/ai-agents-skills/canonical/skills/venue-ranking-evidence/references/deferred-roadmap.md	delegated
+.claude/skills/venue-ranking-evidence/references/matching-policy.md	{{ HOME }}/ai-agents-skills/canonical/skills/venue-ranking-evidence/references/matching-policy.md	delegated
+.claude/skills/venue-ranking-evidence/references/privacy-licensing-policy.md	{{ HOME }}/ai-agents-skills/canonical/skills/venue-ranking-evidence/references/privacy-licensing-policy.md	delegated
+.claude/skills/venue-ranking-evidence/references/proof-contract.md	{{ HOME }}/ai-agents-skills/canonical/skills/venue-ranking-evidence/references/proof-contract.md	delegated
+.claude/skills/venue-ranking-evidence/references/source-policy.md	{{ HOME }}/ai-agents-skills/canonical/skills/venue-ranking-evidence/references/source-policy.md	delegated
 .claude/skills/vnthuquan/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/vnthuquan/SKILL.md	delegated
 .claude/skills/vnthuquan/agents/openai.yaml	{{ HOME }}/ai-agents-skills/canonical/skills/vnthuquan/agents/openai.yaml	delegated
 .claude/skills/vnthuquan/references/workflows.md	{{ HOME }}/ai-agents-skills/canonical/skills/vnthuquan/references/workflows.md	delegated
 .claude/skills/vnu-eoffice/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/vnu-eoffice/SKILL.md	delegated
 .claude/skills/workspace-rearranger/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/workspace-rearranger/SKILL.md	delegated
+.claude/skills/zotero/SKILL.md	{{ HOME }}/ai-agents-skills/canonical/skills/zotero/SKILL.md	delegated

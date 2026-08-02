@@ -61,6 +61,23 @@ active managed profile instead freezes one model: omitting `-m` uses that
 model, the same explicit `-m` is accepted, and changing models requires a new
 candidate, qualification, and activation.
 
+The managed profile does not freeze the Grok CLI forever. Ordinary managed
+dispatch securely resolves the current `~/.local/bin/grok` target on every
+invocation, hashes and retains that exact descriptor, and places its identity
+in the supervisor contract. A `grok update` can therefore replace and prune an
+older download without invalidating the profile's frozen model and route
+policy. Candidate qualification and initial activation remain bound to the
+exact Grok bytes used to create that candidate.
+
+Managed execution also fixes a private creation mask for Grok's shared model
+cache. If Grok has recreated `~/.grok/models_cache.json` as the known
+current-user regular mode `0664`, the wrapper pins that exact single-link inode,
+changes it to `0600`, and rechecks both descriptor and path before use. Other
+writable modes, links, replacements, unsafe parents, and wrong owners fail
+closed. Real-pair qualification performs this check before cache sampling, so
+running a later smoke under `umask 002` does not require a manual chmod before
+the next qualification.
+
 - **One model unlocked** → it is used. Nothing to ask.
 - **Several unlocked, first time** → you get a menu once; your pick is saved to `.model.choice`.
 - **Same models next time** → your pick is reused silently.
@@ -346,7 +363,9 @@ from ambient configuration. Promotion writes schema-9 terminal evidence that
 binds both the original full-contract digest and the conservative per-rung
 qualification digest. The same projected rung may be reusable across automatic
 and forced selection, but not across a relevant endpoint, policy, helper,
-proxy-release, model, or Grok-binary change.
+proxy-release, or model change. Its activation-time Grok identity remains
+auditable qualification metadata; ordinary execution may bind a newer current
+Grok identity while retaining only the rung set authorized by that profile.
 
 After at least the candidate's readiness minimum is promoted, activate the
 printed profile digest and verify it:
@@ -372,10 +391,16 @@ allowed to proceed unless it first re-snapshots that exact active binding.
 every frozen rung is promoted. `degraded` means the minimum is
 met and bare multi-session use is safe, but the listed optional rungs are not
 eligible. `blocked` and `unconfigured` return exit 2 and never start egress.
-An update is staged by creating and qualifying a new candidate before the root
-activation pointer is replaced, so interruption leaves the prior activation
-bytes intact. Old evidence is not silently converted when the qualification
-schema changes.
+A profile or proxy-policy update is staged by creating and qualifying a new
+candidate before the root activation pointer is replaced, so interruption
+leaves the prior activation bytes intact. A Grok CLI self-update is detected
+separately at ordinary dispatch and does not rewrite the profile. Old evidence
+is not silently converted when the qualification schema changes. Managed
+dispatch always resolves the account's canonical `~/.local/bin/grok` and ignores
+ambient `GROK_BIN`, including in isolated tests. The account-owned Grok updater
+is therefore an explicit trust boundary: the wrapper verifies and pins the
+selected inode against path retargeting, but does not provide a vendor-signature
+check or seal owner-writable bytes against a same-UID in-place race.
 
 After activation, simultaneous calls need no feature flag:
 
@@ -412,9 +437,11 @@ the installer left them absent before clearing user-side legacy state.
 Release switching snapshots the exact selected schema-9 rung records and
 active profile into per-release catalogs. Upgrade or rollback restores them
 only after revalidating host identity, terminal evidence, the private profile,
-pinned Grok bytes, and readiness. A missing or invalid catalog degrades to the
-remaining valid rungs or compatibility instead of silently authorizing stale
-state. If the still-current root pointer is an exact dormant binding for the
+historical activation binding, and readiness. Historical Grok bytes may have
+been pruned; the current canonical Grok launcher is verified separately at
+ordinary dispatch. A missing or invalid catalog degrades to the remaining
+valid rungs or compatibility instead of silently authorizing stale state. If
+the still-current root pointer is an exact dormant binding for the
 rollback target, the installer revalidates it and rebuilds missing history;
 `resume` and `abort` report the same `profile_transition` field as install and
 rollback. Invoking the immutable release payload directly applies the same managed

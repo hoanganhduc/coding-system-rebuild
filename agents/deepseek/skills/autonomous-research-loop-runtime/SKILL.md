@@ -1,8 +1,8 @@
 ---
 name: "autonomous-research-loop-runtime"
-description: "Offline runtime helper for autonomous research loop ledger initialization, iteration appends, validation, status, and selftest."
+description: "Offline runtime helper for loop ledgers plus headless drive, host-owned panel phases (--panel on, auto, or off), and the default cross-platform force-loop kit (bootstrap/start/drain with enforce/hard/notify defaults)."
 metadata:
-  short-description: "Offline runtime helper for autonomous research loop ledger initialization, iteration appends, validation, status, and selftest."
+  short-description: "Offline runtime helper for loop ledgers plus headless drive, host-owned panel phases (--panel on, auto, or off), and the default cross-platform force-loop kit (bootstrap/start/drain with enforce/hard/notify defaults)."
 ---
 
 <!-- Managed by ai-agents-skills. Generated target: deepseek. Install mode: reference. -->

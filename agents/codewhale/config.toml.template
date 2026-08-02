@@ -1,6 +1,5 @@
 allow_shell = true
 api_key = "{{ API_KEY }}"
-approval_policy = "on-request"
 base_url = "https://api.deepseek.com"
 default_text_model = "deepseek-v4-pro"
 max_subagents = 5

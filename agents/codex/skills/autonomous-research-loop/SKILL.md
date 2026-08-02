@@ -1,8 +1,8 @@
 ---
 name: "autonomous-research-loop"
-description: "Run bounded autonomous research iterations with evidence gates, recovery ledgers, and optional cross-agent handoffs."
+description: "Run bounded autonomous research iterations with evidence gates, recovery ledgers, and optional cross-agent handoffs; prefers host-owned multi-agent panel with single-path drive primary; scripted force-loop defaults (Goal Focus enforce, hard goal_priority, notify ON)."
 metadata:
-  short-description: "Run bounded autonomous research iterations with evidence gates, recovery ledgers, and optional cross-agent handoffs."
+  short-description: "Run bounded autonomous research iterations with evidence gates, recovery ledgers, and optional cross-agent handoffs; prefers host-owned multi-agent panel with single-path drive primary; scripted force-loop defaults (Goal Focus enforce, hard goal_priority, notify ON)."
 ---
 
 <!-- Managed by ai-agents-skills. Generated target: codex. Install mode: reference. -->

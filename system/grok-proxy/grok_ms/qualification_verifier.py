@@ -37,7 +37,11 @@ import uuid
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .config import build_contract, classify
-from .grok_exec import grok_release_id
+from .grok_exec import (
+    GrokExecutableError,
+    grok_release_id,
+    normalize_grok_model_cache,
+)
 from .ipc import ProtocolError, SeqPacketConnection
 from .managed_profile import (
     ManagedProfileError,
@@ -7115,6 +7119,12 @@ def run_real_pair(
     cache_path = (
         Path(pwd.getpwuid(os.getuid()).pw_dir) / ".grok/models_cache.json"
     )
+    try:
+        normalize_grok_model_cache(cache_path)
+    except GrokExecutableError as exc:
+        raise VerificationError(
+            "Grok model cache cannot be normalized safely"
+        ) from exc
     preflight_cache = CacheSampler(cache_path)
     pair_cache: CacheSampler | None = None
     preflight_cache.start()

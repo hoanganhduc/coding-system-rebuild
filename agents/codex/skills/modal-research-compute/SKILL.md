@@ -1,8 +1,8 @@
 ---
 name: "modal-research-compute"
-description: "Route heavy compute jobs to Modal through a local broker."
+description: "Route heavy compute through the unified local broker, including Modal-backed remote CPU, high-memory CPU, and GPU execution."
 metadata:
-  short-description: "Route heavy compute jobs to Modal through a local broker."
+  short-description: "Route heavy compute through the unified local broker, including Modal-backed remote CPU, high-memory CPU, and GPU execution."
 ---
 
 <!-- Managed by ai-agents-skills. Generated target: codex. Install mode: reference. -->

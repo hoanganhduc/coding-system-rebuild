@@ -163,3 +163,35 @@ export PATH="{{ HOME }}/.local/bin:$PATH"
 export PATH="$HOME/.grok/bin:$PATH"
 [[ -r "$HOME/.grok/completions/bash/grok.bash" ]] && source "$HOME/.grok/completions/bash/grok.bash"
 # <<< grok installer <<<
+
+# grok-remote now selects its installer-attested managed profile by default.
+# Set GROK_MULTI_SESSION=0 only for an explicit compatibility-lane invocation.
+
+# kimi-code
+export PATH="{{ HOME }}/.kimi-code/bin:$PATH"
+
+# >>> gauss workflow installer env >>>
+export GAUSS_HOME="${GAUSS_HOME:-{{ HOME }}/.gauss}"
+export GAUSS_INSTALL_ROOT="${GAUSS_INSTALL_ROOT:-{{ HOME }}/OpenGauss}"
+_gauss_shell_autoenv=1
+case "${BASH_EXECUTION_STRING:-}" in
+  *".opengauss-template/runtime.env"*)
+    _gauss_shell_autoenv=0
+    ;;
+esac
+if [ "${OPEN_GAUSS_SKIP_SHELL_AUTOENV:-0}" = "1" ]; then
+  _gauss_shell_autoenv=0
+fi
+if [ "$_gauss_shell_autoenv" = "1" ] && [ -f "$GAUSS_HOME/.env" ]; then
+  set -a
+  . "$GAUSS_HOME/.env"
+  set +a
+fi
+unset _gauss_shell_autoenv
+export PATH="$HOME/.local/bin:{{ HOME }}/OpenGauss/venv/bin:$HOME/.elan/bin:$PATH"
+export PROMPT_TOOLKIT_NO_CPR=1
+# <<< gauss workflow installer env <<<
+
+# OpenClaw CLI startup optimization (per openclaw doctor suggestion)
+export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
+export OPENCLAW_NO_RESPAWN=1

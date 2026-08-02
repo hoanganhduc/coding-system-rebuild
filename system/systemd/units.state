@@ -6,3 +6,4 @@ rss_news_digest_bot.timer	disabled
 moltbook-relay.service	static
 moltbook-relay.timer	enabled
 xvfb-99.service	disabled
+grok-remote-boot-revalidate.service	enabled

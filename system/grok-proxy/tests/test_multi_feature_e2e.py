@@ -294,6 +294,7 @@ class InstalledFeatureOnTests(unittest.TestCase):
                 encoding="ascii",
             )
             pinned_grok.chmod(0o700)
+            (installed_home / ".local/bin/grok").symlink_to(pinned_grok)
 
             ports: list[int] = []
             while len(ports) < 3:

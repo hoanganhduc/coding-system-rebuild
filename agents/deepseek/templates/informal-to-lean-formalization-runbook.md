@@ -14,6 +14,7 @@ hypothesis, or an added axiom is NOT a supported claim.
 It composes `lean-formalization-intake` for the local-first suitability
 decision, `formal-skeleton-helper` for minimal statement stubs and namespace
 wrappers, `lean-explore-mcp` for reuse search before stating new lemmas,
+optional `opengauss` for guided prove/draft fill when installed and ready,
 `lean-strict-verification-gate` for the scanner-first verification, and
 `cross-agent-delegation` for the fresh-context cross-check handoff.
 `decision-doubt-loop` supplies the fresh-context discipline for the acceptance
@@ -49,11 +50,14 @@ Apply every phase, in order.
 |---|---|---|---|---|---|
 | F1. Intake & suitability | Local-first decision on whether to formalize and at what granularity. | `lean-formalization-intake` |  |  |  |
 | F2. Declaration map | Map each informal step to a Lean declaration; search for reusable Mathlib results first. | `lean-explore-mcp` |  |  |  |
+| F2'. Library reuse gate | Run `lean-research-library search` per target statement; precedence is normative: mathlib > personal library > peer satellite > formalize new. `statement_only` hits are never reusable proofs. | `lean-research-library` |  |  |  |
 | F3. Skeleton | Emit minimal statement stubs and namespace wrappers with explicit `sorry` placeholders. | `formal-skeleton-helper` |  |  |  |
-| F4. Fill & track | Discharge each `sorry`; track blocking lemmas and candidate Mathlib declarations. | `lean-explore-mcp` |  |  |  |
+| F4a. Fill & track (agent/Mathlib) | Discharge each `sorry` via reuse and local proof work; track blockers. | `lean-explore-mcp` |  |  |  |
+| F4b. OpenGauss fill (optional) | When `opengauss doctor` is ready and live install exists, use guided `/prove` or `/draft` only; record `opengauss_run` provenance — never claim-support. | `opengauss` |  |  |  |
 | F5. Strict verify | Scanner-first verification; report typecheck status and claim-support status separately. | `lean-strict-verification-gate` |  |  |  |
 | F6. Fresh-context cross-check | A different context independently confirms both typecheck and claim support. | `cross-agent-delegation`, `decision-doubt-loop` |  |  |  |
 | F7. Acceptance | Decide `verified` or `not-ready`; both a clean typecheck and confirmed claim support are required. |  |  |  |  |
+| F7'. Library intake gate | After acceptance (for paper-artifact campaigns: once, after the FULL formalization), run `lean-research-library intake`. Candidate criterion: absent from mathlib AND the library (search-verified) AND useful beyond the immediate task — otherwise it stays in the paper repo. Present proposals with usefulness justifications and ASK THE USER before any `stage --apply`. Staging and anything outward-facing (repos, pushes, Zenodo) stay user-gated even in autonomous runs. | `lean-research-library` |  |  |  |
 
 ## Intake and Suitability Gate (F1)
 
@@ -132,6 +136,34 @@ Status values: `open`, `in-progress`, `discharged-by-mathlib`,
 - **A non-empty ledger of `open` / `in-progress` / `blocked` rows means the claim
   is NOT yet supported, regardless of whether the file compiles.** Lean accepts
   `sorry`-bearing proofs as compiling.
+
+## Optional OpenGauss Fill (F4b)
+
+After F3 (and usually after attempting F4a reuse), you may use OpenGauss **only
+when all of the following hold**:
+
+1. `lean-formalization-intake` decided `proceed` (or equivalent suitability).
+2. An existing Lake project root is registered (do not invent a project mid-run).
+3. `opengauss` skill `doctor` reports readiness policy; a real `gauss` install
+   exists for live work (this is manual-native — AAS does not auto-install).
+4. Workflow is MVP-safe: prefer `/prove` or `/draft`. Gate `/swarm` and unbounded
+   auto prove/formalize behind explicit budgets later.
+
+Rules:
+
+- Record harness output as **`opengauss_run` provenance**, not `formal_check`.
+- Missing OpenGauss is **not** failed theorem evidence — stay on F4a or defer.
+- Always continue to **F5** after harvest. Gauss job success never skips strict
+  verification or statement-equivalence discipline.
+- Unattended auto-launch is out of scope until a `headless_qualified` spike
+  exists; Phase 0 ships inert doctor/smoke only.
+
+| Field | Value |
+|---|---|
+| OpenGauss used? (`yes` / `no` / `unavailable`) |  |
+| Workflow (`/prove`, `/draft`, other) |  |
+| `opengauss_run` id / log ref |  |
+| Pins (gauss commit / backend if known) |  |
 
 ## Strict Verification Gate (F5)
 
@@ -228,16 +260,21 @@ build contradicts it.
 
 Most Lean elaboration is local. If a build, large `decide`/`native_decide`
 enumeration, or a Mathlib-scale rebuild is too heavy for local execution, route
-it through `modal-research-compute` (after local, then Modal, then GitHub
-Actions per repo policy).
+it through `modal-research-compute`. The recommended automatic order is
+`local > Kaggle > Modal > Hetzner > GitHub Actions`; a valid custom configured order is honored,
+with local first and remote lanes unique.
 
-- **Check Modal credit first** so a build does not fail mid-run for lack of
-  credit. If GitHub Actions is used, **check available usage minutes** and
-  confirm the runner time is enough for the Lean build.
+- Kaggle CPU is free/quota-free. Before every remote dispatch, record the
+  selected lane and enforce its applicable guard: `Kaggle GPU-hours`,
+  `Modal USD`, `Hetzner EUR`, `Hetzner teardown`, or
+  `GitHub Actions minutes`.
 - Any offloaded build script must **utilize the available hardware** (cores,
   memory) of the chosen backend.
-- Re-run the credit/usage check at each dispatching step. Insufficient credit or
-  usage maps to a `blocked` decision, not a silent retry.
+- Re-run the applicable guard at each dispatching step. If a lane's guard
+  fails, record the result and fall through to the next permitted lane in the
+  configured order. Map the run to `blocked` only after all permitted lanes are
+  exhausted or an explicit backend override fails; do not silently retry a
+  failed lane.
 
 ## Recovery Notes
 
@@ -249,7 +286,7 @@ Actions per repo policy).
 | Next safe action |  |
 | Open sorry-ledger rows |  |
 | Reused Mathlib declarations so far |  |
-| Toolchain / credit remaining |  |
+| Toolchain / attempted compute guards and selected lane |  |
 
 ## Failure Modes
 
@@ -266,7 +303,7 @@ Actions per repo policy).
 | Skeleton written for a proof that should not be formalized yet | Intake gate | Stop at F1; set `blocked`/`abandoned` and record the reason. |
 | Parallel speculative proofs kept alive | Single-path discipline | Collapse to the single highest-probability approach; drop the rest. |
 | Fresh context unavailable for acceptance | Cross-check gate | Output `BLOCKED-FRESH-CONTEXT-UNAVAILABLE` and ask for direction; do not self-confirm. |
-| Modal credit / GitHub Actions usage not checked before a heavy build | Heavy-compute offload | Re-check; mark `blocked` if insufficient. |
+| Compute guard not checked before a heavy build | Heavy-compute offload | Check candidate guards and fall through in configured order; mark `blocked` only when all permitted lanes are exhausted or an explicit backend override fails. |
 
 ## Final Outcome
 
@@ -279,3 +316,15 @@ Open sorry-ledger rows:
 Acceptance decision (`verified` / `not-ready`):
 
 Recommended next action:
+
+
+## Paper-to-artifact pipeline (autonomous runs)
+
+For end-to-end "formalize this paper" requests, drive F1-F7' with
+`autonomous-research-loop` (`formal_policy: force`, headless drive). Set
+`closed_deps: true` in the lean-research-library config when the run must use
+only Lean core, Mathlib, and the personal library. The run terminates in one
+of exactly two states, decided by `lean-strict-verification-gate`: a
+sorry-free artifact scaffolded via `lean-research-library artifact new`, or an
+honest ledger of open statements. Approval gates batch at run boundaries:
+library staging and artifact publication always wait for the user.

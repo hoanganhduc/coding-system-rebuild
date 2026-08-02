@@ -273,3 +273,34 @@ Tailscale admin approval, and modifying Grok itself remain out of scope.
    focused/full deterministic tests, source checks, and a fresh-context trust-
    boundary review.  Leave production install, live canaries, activation,
    commit, and push to a separately authorized operational step.
+
+## Rolling Grok executable discovery
+
+1. Add regressions for the observed update sequence: activate against one
+   versioned Grok target, remove it, point the canonical launcher at a new safe
+   target, and require ordinary managed loading and dispatch to use the new
+   descriptor and digest.
+2. Restrict production Grok discovery to `~/.local/bin/grok`; preserve
+   `GROK_BIN` only for isolated tests.  Separate structural profile loading from
+   activation-time executable revalidation in the ordinary client path.
+3. Derive an ephemeral request contract by replacing only the historical Grok
+   identity with the freshly verified current identity.  Carry the rung set
+   authorized by the active profile explicitly so old terminal evidence is not
+   reinterpreted as evidence for a different full contract.
+4. Make bare dispatch and `doctor --json` use the same current executable
+   resolution.  Keep candidate creation, profile canaries, promotion, and new
+   activation exact-byte-bound.
+5. Let release-history snapshot and restore validate the profile/activation
+   binding without reopening pruned historical Grok bytes; keep activation of a
+   new candidate strict.
+6. Update operator documentation, run focused and composite verification, and
+   inspect the final diff for weakened ambient authority or evidence bypass.
+7. Adversarially review the new executable boundary.  Keep managed execution
+   fixed to the canonical launcher even under test isolation, and document the
+   account-updater provenance and same-inode mutation trust assumptions.
+8. Before release staging, reconcile the authoring runtime with the selected
+   signed production hardening baseline.  Require byte parity for the
+   supervisor, permit only reviewed pre-sampler cache normalization in the
+   qualification verifier and rolling-discovery/cache deltas in the client and
+   installer, and rerun hardening, rolling, cache-mode, and isolated composite
+   regressions.

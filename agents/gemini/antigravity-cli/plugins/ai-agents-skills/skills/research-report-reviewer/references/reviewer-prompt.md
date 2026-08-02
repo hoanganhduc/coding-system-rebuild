@@ -12,8 +12,17 @@ Review the draft against this list:
 - Does the draft answer the stated question without wandering?
 - Are key uncertainties or exclusions named?
 - Is any recommendation stronger than the cited evidence allows?
+- **Undisclosed truncation (BLOCK if load-bearing):** does a claim rest on a
+  source that was read only in part — a payload reporting `complete: false`,
+  capped tool or subprocess output, a partial retrieval — without the draft
+  saying so? Treat the claim as unsupported until the full source is read or
+  the partial read is disclosed.
 - For blog/article/report drafting, were prior posts, templates, style guides,
   or supplied examples inspected before writing?
+- **Formal overclaim (BLOCK if present):** draft says proved/machine-checked/
+  formalized claim C while citing only `opengauss_run`/job success, active
+  `sorry`/`admit`, missing lead/human equivalence, or no local `formal_check`.
+- **Formal FLAG:** formal work incomplete but language is hedged as partial.
 
 Compact output shape:
 

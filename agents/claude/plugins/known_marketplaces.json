@@ -5,6 +5,15 @@
       "repo": "anthropics/claude-plugins-official"
     },
     "installLocation": "{{ HOME }}/.claude/plugins/marketplaces/claude-plugins-official",
-    "lastUpdated": "2026-07-13T03:46:49.960Z"
+    "lastUpdated": "2026-07-25T20:47:41.646Z"
+  },
+  "lean4-skills": {
+    "source": {
+      "source": "github",
+      "repo": "cameronfreer/lean4-skills"
+    },
+    "installLocation": "{{ HOME }}/.claude/plugins/marketplaces/lean4-skills",
+    "lastUpdated": "2026-08-02T12:59:50.749Z",
+    "autoUpdate": true
   }
 }

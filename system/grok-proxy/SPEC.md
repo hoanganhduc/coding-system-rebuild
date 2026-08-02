@@ -837,3 +837,92 @@ fresh model-probe admission for a nonblocked `DE` route, retained rejection of
 the five default-blocked countries, isolated full verification, a new immutable
 release and profile, direct real-pair promotion, and two simultaneous real Grok
 sessions sharing one qualified generation.
+
+## Rolling Grok executable discovery — 2026-07-23
+
+### Goal and scope
+
+An ordinary managed `grok-remote` invocation shall continue to work after
+`grok update` replaces the current Grok CLI and removes an older downloaded
+binary.  The active profile remains the immutable authority for the model,
+route ladder, endpoints, helper release, policy, and readiness requirements;
+it no longer requires its activation-time Grok executable to remain present
+for ordinary dispatch, readiness inspection, release-history archival, or
+rollback restoration.
+
+Production discovery is fixed to the current account's canonical
+`~/.local/bin/grok` launcher.  Managed execution ignores `GROK_BIN`, including
+in test mode; the variable remains only an isolated fixture seam for unprofiled
+paths.
+Every ordinary invocation opens the launcher's resolved target through
+`VerifiedGrokExecutable`, checks its owner, mode, type, and nonempty bytes,
+hashes the retained descriptor, rechecks it immediately before execution, and
+executes that same descriptor.  This pins the selected inode against later
+launcher or symlink retargeting.  The account-owned Grok updater and executable
+remain inside the same-UID trust boundary: this version does not establish
+vendor provenance or seal an owner-writable inode against a synchronized
+in-place mutation race.
+
+Grok's shared `~/.grok/models_cache.json` is mutable cache data, not authority.
+Before managed Grok execution, the wrapper fixes `umask 077` and revalidates the
+cache through its retained descriptor.  It may repair only the observed
+cooperative recreation mode `0664` on a current-UID-owned, single-link, bounded
+regular file beneath a current-UID-owned non-world-writable `.grok` directory;
+the descriptor and named inode are rechecked after `fchmod(0600)`.  Symlinks,
+hard links, replacement races, other writable modes, wrong owners, special
+files, oversized content, and unsafe parents fail closed.  Real-pair
+qualification performs the same repair before starting its strict cache
+sampler, so a later CLI smoke cannot permanently poison qualification merely by
+recreating the cache under a cooperative `umask 002`.
+
+### Authority boundary
+
+The profile and activation record retain their activation-time Grok path and
+identity as historical qualification metadata.  Rungs promoted for the exact
+active profile remain the externally authorized route set across a later Grok
+CLI update.  Ordinary dispatch intersects that set with the requested frozen
+ladder, substitutes only the freshly verified Grok identity into an ephemeral
+`RouteContract`, and uses the resulting full contract as the supervisor-sharing
+boundary.  Existing and updated Grok binaries therefore never share an epoch
+unless their executable digests are identical.
+
+Promoted rungs authorize the frozen route and provider policy, not Grok vendor
+provenance.  Automatic update detection consequently trusts the account-owned
+canonical launcher and updater; live model/provider probes provide functional
+admission for the new CLI but are not a signature check.
+
+This portability applies only to ordinary profile-backed execution.  Candidate
+creation, profile-bound canaries, rung promotion, and initial activation remain
+bound to one exact Grok descriptor and identity.  Ambient route configuration,
+models, endpoints, helpers, and policies never enter the rolling resolution
+path.  Live provider/model probes remain responsible for rejecting a current
+Grok CLI that cannot operate through an authorized rung.
+
+Release switching may archive and restore a structurally valid profile binding
+whose historical Grok bytes have been pruned; it still validates the canonical
+profile, root activation binding, selected proxy release, terminal rung
+evidence, and readiness.  Activating a new candidate continues to require its
+exact referenced Grok bytes.
+
+### Acceptance
+
+Acceptance requires seen-to-fail coverage proving that a deleted activation-
+time binary is replaced by the verified current launcher for bare and gated
+managed execution; the effective contract contains the current digest; unsafe
+or missing current launchers fail closed; profile-authorized rungs remain
+bounded by the requested ladder; `doctor --json` reports the current digest;
+profile-bound canaries and activation retain exact-byte validation; and release
+history snapshot/restore no longer depends on pruned historical bytes.  Focused
+managed-profile, client, contract, and installer tests plus the repository's
+relevant composite verification must pass.
+
+The rolling change must also preserve the selected signed production
+hardening baseline (`81eb528e...5892f`): supervisor control and ready-peer
+identity remain descriptor-bound; direct-rung recovery remains authenticated;
+qualification authority remains exact-pidfd and probe-quiescence bound with
+granular fixed-stage/fault-consumption evidence; generation repair remains
+single-owner; and watchdog recovery remains owner-quiescent.  Acceptance
+requires `supervisor.py` to match that baseline exactly.
+`qualification_verifier.py` may add only the reviewed pre-sampler cache-mode
+normalization, while `client.py` and `install-release.py` may differ only by
+reviewed rolling-executable, cache-normalization, and historical-binding deltas.

@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenClaw Gateway (v2026.6.6)
+Description=OpenClaw Gateway (v2026.7.1-2)
 After=network-online.target
 Wants=network-online.target
 StartLimitBurst=5
@@ -13,17 +13,19 @@ RestartPreventExitStatus=78
 TimeoutStopSec=30
 TimeoutStartSec=30
 SuccessExitStatus=0 143
+OOMPolicy=continue
 KillMode=control-group
 Environment=DISPLAY=:99
 Environment=HOME={{ HOME }}
 Environment=TMPDIR=/tmp
-Environment=PATH=/usr/bin:{{ HOME }}/.npm-global/bin:{{ HOME }}/.bun/bin:{{ HOME }}/.local/bin:{{ HOME }}/bin:{{ HOME }}/.nix-profile/bin:{{ HOME }}/.local/share/pnpm:/usr/local/bin:/bin
+Environment=PATH=/usr/bin:/usr/local/bin:/bin:{{ HOME }}/.bun/bin:{{ HOME }}/.local/bin:{{ HOME }}/.npm-global/bin:{{ HOME }}/bin:{{ HOME }}/.nix-profile/bin:{{ HOME }}/.local/share/pnpm
 Environment=OPENCLAW_GATEWAY_PORT=18789
 Environment=OPENCLAW_SYSTEMD_UNIT=openclaw-gateway.service
 Environment="OPENCLAW_WINDOWS_TASK_NAME=OpenClaw Gateway"
+Environment=OPENCLAW_WINDOWS_TASK_HIDDEN_LAUNCHER=1
 Environment=OPENCLAW_SERVICE_MARKER=openclaw
 Environment=OPENCLAW_SERVICE_KIND=gateway
-Environment=OPENCLAW_SERVICE_VERSION=2026.6.6
+Environment=OPENCLAW_SERVICE_VERSION=2026.7.1-2
 
 [Install]
 WantedBy=default.target

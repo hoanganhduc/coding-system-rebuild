@@ -561,3 +561,65 @@
 - [ ] Provision and preflight the disposable package state anchors, rerun the
   clean gate, and require an exact-commit manual `install-degraded` Actions run
   to pass before deployment.
+
+## Rolling Grok executable discovery — 2026-07-23
+
+- [x] Confirm the production failure is a deleted activation-time Grok target,
+  not a Grok argument or egress failure.
+- [x] Define the profile/current-executable authority boundary and verification
+  plan before editing runtime code.
+- [x] Add and observe failing client regressions for deleted-old/current-new and
+  unsafe-current executable cases.
+- [x] Implement current executable discovery and ephemeral contract rebinding
+  without importing ambient route/model authority.
+- [x] Make readiness and bare managed commands use the current executable.
+- [x] Preserve exact candidate, canary, promotion, and activation validation.
+- [x] Allow release-history archival/restoration after historical Grok pruning
+  and add installer regressions.
+- [x] Update README operational semantics and the same-UID updater trust boundary.
+- [x] Run focused tests, downstream installed-wrapper E2E, relevant fixed-inventory
+  cases, adversarial review, and final diff review.
+- [x] Reconcile the repository bootstrap/CI workflow fixture drift by restoring
+  the reviewed delegated-install launcher/tests, bootstrap assertions, ledger
+  inventory, and source-backup placeholder; the exact composite ledger now passes.
+
+### Signed hardening reconciliation — 2026-07-23
+
+- [x] Inspect the selected signed production release
+  `81eb528e...5892f`, its bootstrap selector, and the reviewed common baseline;
+  confirm the four divergent runtime files and the absence of a discoverable
+  production signing authority in the authoring workspace.
+- [x] Three-way reconcile `client.py`, `qualification_verifier.py`,
+  `supervisor.py`, and `install-release.py`, preserving all reviewed 81eb
+  hardening while retaining only the rolling Grok discovery/history deltas.
+- [x] Restore the hardening regressions and observe them fail against the
+  pre-reconciliation runtime before applying the runtime merge.
+- [x] Pass the hardening selection (10 tests), rolling selection (7), full
+  client (63), supervisor (89), and live qualification-verifier (100) suites.
+- [x] Overlay the exact reconciled runtime/tests on the reviewed isolated CI
+  tree and pass the complete ledger: 696 tests across 29 cases with seven
+  allowed skips; the installer module passes 140 tests with six allowed skips.
+- [x] Confirm `supervisor.py` is byte-identical to signed 81eb and audit the
+  qualification-verifier, client, and installer differences as only the
+  reviewed cache-normalization and rolling-executable deltas.
+- [ ] Sign, publish, select, or install a new immutable production release;
+  this remains an explicitly authorized operational step requiring the
+  legitimate offline signing authority.
+
+### Recreated Grok model-cache correction — 2026-07-23
+
+- [x] Observe that a successful later smoke recreated
+  `~/.grok/models_cache.json` as mode `0664`, proving a manual `chmod 0600` was
+  not a durable qualification prerequisite.
+- [x] Add seen-to-fail coverage for the missing normalization helper, managed
+  client boundary, and real-pair pre-sampler ordering.
+- [x] Before managed Grok execution, set `umask 077` and normalize only an
+  exact current-UID, single-link, bounded regular cache inode from known mode
+  `0664` to `0600`; reject symlink, hard-link, replacement, unsafe-parent, and
+  other writable-mode cases without changing their targets.
+- [x] Apply the same exact repair before real-pair cache sampling so future
+  qualification recovers safely after any cooperative-mode smoke recreation.
+- [x] Rerun focused client/config/verifier coverage, static/leak checks, and the
+  complete isolated ledger after this final runtime delta: 698 tests across 29
+  cases with seven allowed skips; ledger SHA-256
+  `3d508ef0eb2461681a174db446da17bda3f08b5413c99e57dcf759810edb147d`.

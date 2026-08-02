@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -28,10 +29,62 @@ from grok_ms.grok_exec import (  # noqa: E402
     GrokExecutableError,
     VerifiedGrokExecutable,
     grok_release_id,
+    normalize_grok_model_cache,
 )
 
 
 class ConfigTests(unittest.TestCase):
+    def test_model_cache_normalization_is_inode_bound_and_narrow(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grok_home = root / ".grok"
+            grok_home.mkdir(mode=0o775)
+            cache = grok_home / "models_cache.json"
+            cache.write_text('{"models":[]}\n', encoding="ascii")
+            cache.chmod(0o664)
+            before = cache.stat()
+
+            normalize_grok_model_cache(cache)
+
+            after = cache.stat()
+            self.assertEqual((after.st_dev, after.st_ino), (before.st_dev, before.st_ino))
+            self.assertEqual(stat.S_IMODE(after.st_mode), 0o600)
+            self.assertEqual(cache.read_text(encoding="ascii"), '{"models":[]}\n')
+
+            victim = root / "victim"
+            victim.write_text("unchanged", encoding="ascii")
+            victim.chmod(0o664)
+            cache.unlink()
+            cache.symlink_to(victim)
+            with self.assertRaisesRegex(GrokExecutableError, "unsafe identity"):
+                normalize_grok_model_cache(cache)
+            self.assertEqual(stat.S_IMODE(victim.stat().st_mode), 0o664)
+
+            cache.unlink()
+            cache.write_text('{"models":[]}\n', encoding="ascii")
+            cache.chmod(0o666)
+            with self.assertRaisesRegex(GrokExecutableError, "unsafe mode"):
+                normalize_grok_model_cache(cache)
+            self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o666)
+
+            cache.unlink()
+            cache.write_text('{"models":[]}\n', encoding="ascii")
+            cache.chmod(0o664)
+            alias = root / "cache-alias"
+            os.link(cache, alias)
+            with self.assertRaisesRegex(GrokExecutableError, "unsafe identity"):
+                normalize_grok_model_cache(cache)
+            self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o664)
+            alias.unlink()
+
+            grok_home.chmod(0o777)
+            with self.assertRaisesRegex(GrokExecutableError, "parent"):
+                normalize_grok_model_cache(cache)
+            self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o664)
+            grok_home.chmod(0o700)
+            cache.unlink()
+            self.assertFalse(normalize_grok_model_cache(cache))
+
     def test_gate_is_exact(self) -> None:
         self.assertTrue(gate_enabled("1"))
         for value in (None, "", "0", "true", "01", " 1"):

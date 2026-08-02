@@ -2441,6 +2441,12 @@ class LiveVerifierHelperTests(unittest.TestCase):
         )
 
     def test_cache_sampling_and_output_collection_fail_closed(self) -> None:
+        source = inspect.getsource(VERIFY.run_real_pair)
+        self.assertIn("normalize_grok_model_cache(cache_path)", source)
+        self.assertLess(
+            source.index("normalize_grok_model_cache(cache_path)"),
+            source.index("preflight_cache = CacheSampler(cache_path)"),
+        )
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "models.json"
             cache.write_text('{"models":[]}', encoding="ascii")

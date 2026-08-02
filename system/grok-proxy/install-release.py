@@ -12331,13 +12331,6 @@ os.execve("/bin/bash", ["/bin/bash", "-p", target, *sys.argv[1:]], user_env)
             expected_sha256=activation.profile_sha256,
         )
         activation.validate_profile(profile)
-        with open_profile_grok(
-            profile,
-            allowed_owner_uids=frozenset(
-                (self.layout.root_uid, self.layout.target_uid)
-            ),
-        ):
-            pass
         return activation, profile
 
     def _write_profile_activation_history(

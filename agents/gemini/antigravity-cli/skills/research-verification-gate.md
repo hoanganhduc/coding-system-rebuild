@@ -32,8 +32,19 @@ Use this as the last gate before claiming a research output is ready.
   `active_overlays`, `active_requirement_ids`, and `style_applied`
 - mathematical, TCS, graph-theoretic, formal-proof, or LaTeX writing loaded
   `math-manuscript-style.md`
+- every input the conclusions rest on was read whole, or its truncation is
+  disclosed: tool payloads reporting `complete: false`, capped subprocess
+  output, partial retrievals, and summaries standing in for full sources
 - remaining gaps are disclosed
-- `incomplete analysis` is used when material scope is still unchecked
+- `incomplete analysis` is used when material scope is still unchecked, and when
+  a load-bearing source was read only in part
+- residual uncertainty is listed for unfinished or disputed load-bearing claims
+- multi-LLM LGTM / same-family agreement alone is not bankable supporting
+  evidence; require different-family re-derivation and/or a machine-checkable
+  artifact for banking language
+- review rounds that only reword without an evidence delta do not count as
+  progress; do not continue until all reviewers approve
+- open negative-space / blocked-route failures stay disclosed (halt and disclose)
 
 ## Output contract
 
@@ -42,11 +53,21 @@ Produce a short visible section titled `Delivery Check`.
 Include:
 
 - `Status` — `READY` or `NOT READY`
+- `Gate version` — the `version` recorded for `research-verification-gate` in
+  `manifest/skills.yaml` (`unversioned` when absent), so past verdicts stay
+  interpretable as the gate evolves
 - `Confirmed` — the key checks that passed
 - `Gaps` — anything still blocking delivery
+- `Residual uncertainty` — unfinished / disputed / negative-space items
 - `Next step` — deliver now or fix specific gaps first
 - `Style` — `style_profile_ref`, active overlays, `active_requirement_ids`, and
   whether `style_applied` is supported
+- `Formal status` (when formal claims appear) —
+  - `opengauss_run`: completed | failed | not_used
+  - `lean_check_status` / placeholder / trust-base from strict gate
+  - `claim_support_status` from deep-research ladder
+  - `statement_relation_status` / `review_status`
+  - OpenGauss success alone → **NOT READY** for “proved C”
 
 Use the checklist in `references/checklist.md`.
 
@@ -54,12 +75,21 @@ Use the checklist in `references/checklist.md`.
 
 - do not silently downgrade a blocker into a caveat
 - if material scope is unchecked, require `incomplete analysis`
+- treat undisclosed truncation as unchecked scope, not as a formatting nit: a
+  conclusion drawn from a silently partial source is unsupported, whatever the
+  source appeared to say
+- do not treat multi-LLM LGTM as proved or supported without different-family
+  or machine-checkable support
 - keep the gate short and concrete
+- staged fail-visible rollout: while enforcement is warn-only, log every
+  downgraded blocker or skipped check (in the run ledger when one exists) with
+  its reason; a later fail-closed stage may make `NOT READY` a hard stop, and
+  the override log is itself research evidence
 
 ## Recommended templates
 
 When this skill is involved, consider these workflow templates (install via
 the `workflow-templates` artifact profile, or `--with-deps` to pull backing skills):
 
-- `autonomous-research-loop-runbook` -- Bounded autonomous research-loop runbook with four stop conditions, single-path solving, mandatory cross-agent verification, fresh-agent backtracking, and Modal/GitHub Actions credit-gated heavy-compute offload.
+- `autonomous-research-loop-runbook` -- Bounded autonomous research-loop runbook with four stop conditions, single-path solving, mandatory cross-agent verification, fresh-agent backtracking, and five-lane broker-routed heavy-compute offload with per-lane safety gates.
 - `cross-agent-adversarial-review` -- Producer-never-confirmer adversarial review of a paper, proof, or code artifact across agent families with a fresh-agent confirmation gate.

@@ -43,7 +43,7 @@ Required profile fields:
 ```json
 {
   "profile_id": "provider-or-cli-profile-slug",
-  "provider": "claude | deepseek | copilot | other",
+  "provider": "claude | deepseek | copilot | antigravity | grok | kimi | other",
   "cli_name": "string",
   "cli_version": "string or unknown",
   "profile_source": "probe artifact ref",
@@ -52,7 +52,7 @@ Required profile fields:
   "cwd_assumptions": "string",
   "auth_status": "available | missing | unknown | not_checked",
   "config_status": "available | missing | unknown | not_checked",
-  "input_transports_tested": ["stdin", "prompt_file", "file_read", "inline_excerpt"],
+  "input_transports_tested": ["stdin", "prompt_file", "runtime_argv_prompt", "file_read", "inline_excerpt"],
   "output_modes_tested": ["json", "text", "parseable_envelope"],
   "file_read_fidelity": "passed | failed | not_needed | not_checked",
   "timeout_behavior": "completed | timed_out | not_checked",
@@ -119,11 +119,258 @@ export AAS_CLAUDE_LATEST_MODEL='<current-latest-model>'
 export AAS_CLAUDE_HIGHEST_THINKING='xhigh'
 ```
 
+`{model}`, `{thinking}`, and `{reasoning}` are substituted when the dispatch plan
+is built, from `--resolved-model` / `--resolved-thinking` or the matching
+`AAS_<PROVIDER>_LATEST_MODEL` / `AAS_<PROVIDER>_HIGHEST_THINKING` variables. A
+template that uses one of them with nothing resolved **blocks that participant**
+with a reason naming the placeholder, rather than passing the internal sentinel
+`not-specified` to the CLI as a model name. Either resolve the value or drop the
+placeholder from the template. `{prompt}` is different: it is substituted at
+execution time, per argv token (see the argv-transport providers below).
+
+For Antigravity, managed dispatch uses **runtime argv prompt** transport (like
+Kimi), not stdin. The default prefix is the bare `agy` binary; `run_command`
+appends `-p <prompt> --dangerously-skip-permissions` after the prompt is known.
+
+Research runs may configure:
+
+```bash
+# Prefix only — do NOT put -p/--print or --dangerously-skip-permissions here
+# (managed path appends them in the correct order).
+export AAS_ANTIGRAVITY_DISPATCH_COMMAND='agy'
+export AAS_ANTIGRAVITY_LATEST_MODEL='<current-latest-model>'
+export AAS_ANTIGRAVITY_HIGHEST_THINKING='high'
+```
+
+Or an explicit template with a prompt placeholder (prompt must follow `-p`
+immediately):
+
+```bash
+export AAS_ANTIGRAVITY_DISPATCH_COMMAND='agy -p {prompt} --dangerously-skip-permissions --model {model}'
+```
+
+`{prompt}` is substituted into the already-split argv tokens, so the prompt is
+always delivered as a single argument no matter what whitespace or quote
+characters it contains. Do not quote the placeholder in the template.
+
+Antigravity prompts are held to `ANTIGRAVITY_MAX_PROMPT_CHARS` (currently
+24_000). That is the same conservative argv ceiling as Kimi rather than a probed
+`agy` boundary; an over-budget prompt fails the participant with
+`shell_argument_limit` instead of reaching `execve`.
+
+The dispatcher does not use `ANTIGRAVITY_LS_ADDRESS`; that variable belongs to
+language-server integrations outside this CLI subprocess adapter.
+
+#### Antigravity one-shot / AGD panel rules (host-proved 2026-07-25)
+
+1. **`-p` / `--print` consumes the next argv as the prompt.**  
+   Treat it like a value-taking flag. Never put another flag between `-p` and
+   the prompt string.
+
+   | Correct | Wrong |
+   |---------|--------|
+   | `agy -p "$PROMPT" --dangerously-skip-permissions` | `agy --print --dangerously-skip-permissions "$PROMPT"` |
+   | `agy -p "$PROMPT" --dangerously-skip-permissions --print-timeout=40m0s` | `agy --print --effort high --print-timeout=40m0s "$PROMPT"` |
+
+   Wrong order makes the model answer *about the flag name* (meta help) with
+   exit 0 — treat that as **mis-invoked argv**, not usable review content.
+
+2. **`agy` does not read the user prompt from stdin.**  
+   Piping the prompt into `agy --print` does not deliver the task. Always pass
+   the prompt as the `-p` value (managed dispatch does this).
+
+3. **Headless tool use needs skip-permissions after the prompt.**  
+   Default settings often have `permissions=<nil>` /
+   `toolPermission=request-review`. Without
+   `--dangerously-skip-permissions` (placed **after** the prompt), headless
+   `read_file` fails with jetski permission denial.
+
+4. **Timeouts and models.**  
+   Default `--print-timeout` is 5m — raise for long reviews
+   (`--print-timeout=40m0s`, after the prompt). List models with `agy models`.
+   Optional `--model <id>` and `--effort low|medium|high` also go **after** the
+   prompt.
+
+5. **Path-ref briefs.**  
+   Prefer short prompts that open files under `--add-dir` rather than multi-KB
+   inline plans on argv.
+
+6. **Stdout contract.**  
+   - Flag-meta / “what is --effort?” prose → reject, fix argv, retry once.  
+   - Empty stdout + permission jetski message → missing skip-permissions.  
+   - Exit 0 + required markers (`VERDICT`, final marker) → usable.
+
+7. **Capability profile.**  
+   Record `input_transports_tested: ["runtime_argv_prompt"]` (not bare
+   `stdin` for the user prompt). Probe smoke:
+   `agy -p 'AGY_OK' --dangerously-skip-permissions`.
+
+Diagnostic codes: reuse `input_transport_failed` for stdin-mistaken launches;
+`output_parse_failed` for flag-meta bodies; `file_read_fidelity_failed` when
+tools are denied without skip-permissions.
+
+For Grok, the managed dispatch shape is `grok --prompt-file /dev/stdin`.
+The dispatcher delivers the prompt on stdin, and grok's `-p`/`--single` requires
+the prompt as an argv value (it does not read stdin), so the prompt is passed as a
+file read from fd 0; a bare `grok --single` here exits 2 with the prompt never
+sent.
+
+Automatic Grok selection is bare-first and model-gated:
+
+1. When a concrete latest model is resolved, run bare `grok models` and parse
+   only exact anchored available-model rows of the form `* <model>` or
+   `* <model> (default)`. Prose, the `Default model:` header, substrings,
+   non-zero exits, timeouts, and unrecognized output do not confirm membership.
+   On POSIX, invoke model probes, remote readiness checks, and actual Grok
+   children with umask `0077` so Grok-created cache files are private even when
+   the caller's ambient umask is permissive.
+2. If the exact resolved model is listed, dispatch through bare Grok and add
+   `--model <resolved-model>`.
+3. Only when bare Grok is missing or that exact membership probe is not
+   confirmed may automatic selection consider `grok-remote`. The proxy must
+   then pass its managed-profile readiness probe and report the same model.
+4. Without a resolved model, automatic selection uses bare Grok only, records
+   the model probe as not performed, and does not authorize proxy fallback.
+
+Generic provider prechecks are bare-only. They do not discover, version-probe,
+or execute `grok-remote`; proxy discovery exists only inside step 3 after a
+valid exact model has already authorized fallback.
+
+The dispatcher invokes an automatically selected `grok-remote` route-neutrally:
+it neither sets `GROK_MULTI_SESSION` nor adds `--vpn`, `--host`, `--iphone`, or
+`--ios`. A bare proxy command delegates route selection to its active managed
+profile. Concurrent Grok participants must resolve the same ready profile and
+concrete model. Unlike other research providers, Grok does not require an
+explicit dispatch-command variable because its automatic route is resolved and
+model-pinned by these probes; latest-model and highest-thinking values remain
+mandatory.
+
+Operator overrides remain authoritative. `AAS_GROK_DISPATCH_COMMAND` is
+preserved verbatim, and `AAS_GROK` selects its exact binary. An explicit bare
+command with a resolved model must pass the same membership probe but is never
+silently replaced with the proxy. An explicit proxy command still requires its
+managed-profile readiness/model check. For example, this deliberately forces
+the proxy and disables automatic bare-first selection:
+
+```bash
+export AAS_GROK_DISPATCH_COMMAND='grok-remote --prompt-file /dev/stdin --model {model}'
+export AAS_GROK_LATEST_MODEL='<current-latest-model>'
+export AAS_GROK_HIGHEST_THINKING='high'
+```
+
+For a direct manual invocation outside the dispatcher, use the equivalent
+shape:
+
+```bash
+grok-remote -m <concrete-model> --prompt-file <path>
+```
+
+For proxy fallback or an explicit proxy command, the parent runs
+`grok-remote doctor --json`, requires the
+`grok-remote.profile-status.v1` contract to report `ready` or `degraded`, and
+checks its `model_id` against the resolved model. `blocked`, `unconfigured`,
+invalid, inconsistent, or timed-out results fail closed. Only the contract's
+sanitized profile, release, model, rung, and reason fields enter parent-owned
+capability metadata; endpoints, ports, and node identities do not. The
+dispatcher first requires `--help` to advertise that exact command, so an older
+proxy fails closed without receiving `doctor` as ordinary Grok input.
+
+Grok authenticates through an interactive OIDC session rather than an API-key
+environment variable, so the dispatcher does not read a Grok token from the
+environment. Local read-only diagnostics (`grok inspect`) resolve a bare `grok`
+so they never bring up the `grok-remote` tunnel.
+
+For Kimi Code CLI, the managed dispatch shape is **runtime argv prompt**:
+`kimi -p <prompt>` is appended by the dispatcher after the prompt is known
+(Kimi has no `--prompt-file`). Capability profiles must record
+`runtime_argv_prompt`, not `stdin`. Research runs require
+`AAS_KIMI_DISPATCH_COMMAND` plus resolved model metadata
+(`AAS_KIMI_LATEST_MODEL`). Auth is config/credentials under `~/.kimi-code` and
+must never enter packets. Long prompts must stay within the dispatcher argv
+budget (`KIMI_MAX_PROMPT_CHARS`, currently 24_000); do not invent temp prompt
+files without a verified Kimi file-based flag.
+
+```bash
+export AAS_KIMI_DISPATCH_COMMAND='kimi'
+export AAS_KIMI_LATEST_MODEL='<model-alias>'
+export AAS_KIMI_HIGHEST_THINKING='high'
+```
+
+#### Kimi one-shot / AGD panel rules (host-observed)
+
+These rules come from a live AGD strategy-panel failure (Kimi Code CLI ≥0.29).
+They apply to parent-owned launches, not only `delegate-agent`.
+
+1. **Do not combine `-p` / `--prompt` with agent-mode flags.**  
+   Observed hard error: `Cannot combine --prompt with --yolo.`  
+   Forbidden alongside one-shot `-p` for panel/discussion roles:
+   `-y`, `--yolo`, `--auto` (and any flag that enables multi-turn tool autonomy
+   for the same invocation). Use pure one-shot:
+   `kimi -p "<prompt>" --output-format text` (optional `-m <model>`).
+
+2. **Keep one-shot prompts compact.**  
+   Full evidence dumps (25k–100k characters) are a poor fit for argv transport
+   and encourage long tool-using digressions. For AGD Round-1 style roles:
+   - put a **compressed brief** (≤ ~8–12k chars) in the prompt body, or
+   - pass **inert path refs** and a short task contract, and accept that
+     file-read fidelity must be freshly probed if the role depends on tools.
+
+3. **Prefer text one-shot for discussion/falsifier roles.**  
+   When the contract is “Markdown final answer only,” do not start Kimi in
+   interactive or auto tool mode. Long stderr monologues without a final
+   stdout body are a **participant failure** (`output_parse_failed` /
+   `timeout_no_final` / empty stdout), not usable panel evidence.
+
+4. **Stdout is the contract surface.**  
+   Capture `stdout` as the reply; treat `stderr` as diagnostics only. If
+   stdout is empty/short and stderr is long, mark the participant
+   `invalid` or `partial` and continue the panel with other agents—do not
+   silently promote stderr thinking as the result packet body.
+
+5. **Dispatcher / template hygiene.**  
+   `AAS_KIMI_DISPATCH_COMMAND` must not itself include `-p`, `--prompt`,
+   `-y`, `--yolo`, or `--auto`. The managed path appends `-p <prompt>` (and
+   optional `-m`) at execution time. Pre-baking those flags causes flag
+   conflicts or double-prompt errors.
+
+Diagnostic codes (in addition to the shared taxonomy): `kimi_flag_conflict`
+when the CLI rejects prompt+agent-mode combinations;
+`shell_argument_limit` when the prompt exceeds the argv budget.
+
+For DeepSeek (CodeWhale CLI), the managed dispatch shape is **runtime argv
+prompt**: the dispatcher appends the prompt as the trailing positional
+argument. codewhale `exec` does not read the user prompt from stdin (a piped
+prompt exits with a usage error — host-probed 2026-07-30). Flag order is
+strict: `--model` is a global flag before the `exec` subcommand;
+`--reasoning-effort` is an exec-subcommand flag after it.
+
+```bash
+export AAS_DEEPSEEK_DISPATCH_COMMAND='codewhale exec --reasoning-effort max'
+export AAS_DEEPSEEK_LATEST_MODEL='<current-latest-model>'
+export AAS_DEEPSEEK_HIGHEST_THINKING='max'
+```
+
+The dispatcher inserts a resolved `--model <model>` immediately after the
+binary when the template does not pin one. It fails closed with
+`shell_argument_limit` when the prompt exceeds `DEEPSEEK_MAX_PROMPT_CHARS`
+(currently 2_000): codewhale 0.9.1 exits 0 with empty stdout/stderr on longer
+prompts (probed boundary: 2400 chars completed, ~3500 failed silently), which
+would otherwise record a silent empty participant. The over-budget participant
+is recorded as failed with `shell_argument_limit` in its validation artifact;
+participants that already ran keep their results and the run manifest is still
+written. Budget accordingly: the participant prompt scaffolding costs 540–575
+characters — it grows with the role name, the template name, and the resolved
+model ID — so keep task text under about 1,400 characters and compact, chunk, or
+route longer tasks to a provider with a wider budget. A zero-byte successful
+result is reported as `empty_stdout` in validation.
+
 Do not hardcode provider model names into shared templates unless a specific
 target system has just probed and recorded that model as current.
 
-For long prompts or long drafts, avoid shell argument transport. Use stdin,
-prompt files, or bounded chunks with a manifest.
+For long prompts or long drafts on providers that support stdin or prompt
+files, prefer those transports. **Kimi is the exception:** it remains argv
+`-p` only—compact or chunk with a manifest; do not fall back to stdin as if
+it were Claude/Grok.
 
 ## Artifact Layout
 
@@ -173,6 +420,13 @@ Use stable diagnostic codes in participant state and validation artifacts:
 - `missing_artifact`
 - `evidence_contract_failed`
 - `stale_capability_profile`
+- `kimi_flag_conflict`
+- `dispatch_cli_unavailable`
+
+A participant whose CLI cannot be launched — a configured binary that is missing
+or not executable — fails with `dispatch_cli_unavailable` at the smoke phase.
+Like `shell_argument_limit`, this fails that participant only: the other
+participants keep their results and the run manifest is still written.
 
 ## Role-Aware Evidence Policy
 

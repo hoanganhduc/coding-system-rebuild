@@ -7042,6 +7042,10 @@ os._exit(0)
 
             catalog = installer._read_qualified_rung_catalog(release_id)
             self.assertEqual([item["rung"] for item in catalog], ["direct"])
+            # A Grok self-update may prune the exact activation-time download.
+            # Release history remains profile/evidence authority and must not
+            # depend on those historical executable bytes still existing.
+            grok.unlink()
             write_source(source, "v2")
             next_release = installer.install().release_id
             self.assertNotEqual(next_release, release_id)
@@ -7128,6 +7132,7 @@ os._exit(0)
 
             published = layout.active_profile.read_bytes()
             grok.write_text("#!/usr/bin/env sh\nexit 9\n", encoding="ascii")
+            grok.chmod(0o700)
             with self.assertRaisesRegex(
                 release_installer.ReleaseError,
                 "identity mismatch",

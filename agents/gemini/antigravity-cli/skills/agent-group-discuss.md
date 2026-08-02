@@ -43,6 +43,18 @@ Read these when relevant:
 
 If the user requests a named template, or if the task clearly matches one, open `TEMPLATES.md` and `EXECUTION.md` before spawning any agents.
 
+## Long multi-agent jobs and remote notify
+
+For multi-round / multi-hour panels, the parent should notify via `remote-bridge`
+when secrets are configured (same policy as ARL `--notify auto`):
+
+- on panel start and terminal synthesis
+- optionally on each round boundary when wall time is high
+
+Prefer structured `remote-bridge send --channel zulip|telegram|both` over raw
+shell notify. Do not block the panel if notify fails. Short single-round
+spawns need not notify.
+
 ## Clarification policy
 
 If the request is underspecified, ask only for the minimum needed.
@@ -648,6 +660,6 @@ Also include a compact run summary:
 When this skill is involved, consider these workflow templates (install via
 the `workflow-templates` artifact profile, or `--with-deps` to pull backing skills):
 
-- `autonomous-research-loop-runbook` -- Bounded autonomous research-loop runbook with four stop conditions, single-path solving, mandatory cross-agent verification, fresh-agent backtracking, and Modal/GitHub Actions credit-gated heavy-compute offload.
+- `autonomous-research-loop-runbook` -- Bounded autonomous research-loop runbook with four stop conditions, single-path solving, mandatory cross-agent verification, fresh-agent backtracking, and five-lane broker-routed heavy-compute offload with per-lane safety gates.
 - `cross-agent-adversarial-review` -- Producer-never-confirmer adversarial review of a paper, proof, or code artifact across agent families with a fresh-agent confirmation gate.
-- `engineering-delivery-loop-runbook` -- Bounded build-and-deliver loop runbook: single-path implementation with seen-to-fail proof, cross-agent diff verification, behavior-preserving cleanup, and credit-gated heavy-compute offload.
+- `engineering-delivery-loop-runbook` -- Bounded build-and-deliver loop runbook: single-path implementation with seen-to-fail proof, cross-agent diff verification, behavior-preserving cleanup, and five-lane broker-routed heavy-compute offload with per-lane safety gates.

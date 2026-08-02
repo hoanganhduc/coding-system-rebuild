@@ -14,10 +14,115 @@ from typing import AbstractSet, Mapping, NoReturn, Sequence
 _RELEASE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HASH_CHUNK = 1024 * 1024
 _MAX_FIXTURE_SCRIPT = 1024 * 1024
+_MAX_MODEL_CACHE = 1024 * 1024
+_REPAIRABLE_MODEL_CACHE_MODE = 0o664
 
 
 class GrokExecutableError(ValueError):
     """The selected Grok executable is unsafe or changed during verification."""
+
+
+def normalize_grok_model_cache(path: Path) -> bool:
+    """Make one known cooperative cache mode private through its exact inode."""
+
+    if not path.is_absolute() or path.name != "models_cache.json":
+        raise GrokExecutableError("Grok model cache path is invalid")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        parent_descriptor = os.open(path.parent, directory_flags)
+    except FileNotFoundError:
+        try:
+            path.parent.lstat()
+        except FileNotFoundError:
+            return False
+        raise GrokExecutableError("Grok model cache parent changed during normalization")
+    except OSError as exc:
+        raise GrokExecutableError("Grok model cache parent has an unsafe identity") from exc
+    try:
+        parent_before = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISDIR(parent_before.st_mode)
+            or parent_before.st_uid != os.getuid()
+            or stat.S_IMODE(parent_before.st_mode) & 0o002
+        ):
+            raise GrokExecutableError("Grok model cache parent has an unsafe identity")
+        file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        file_flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path.name, file_flags, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            try:
+                os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            raise GrokExecutableError("Grok model cache changed during normalization")
+        except OSError as exc:
+            raise GrokExecutableError("Grok model cache has an unsafe identity") from exc
+        try:
+            before = os.fstat(descriptor)
+            mode = stat.S_IMODE(before.st_mode)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_uid != os.getuid()
+                or before.st_nlink != 1
+                or not 0 <= before.st_size <= _MAX_MODEL_CACHE
+            ):
+                raise GrokExecutableError("Grok model cache has an unsafe identity")
+            if mode & 0o022:
+                if mode != _REPAIRABLE_MODEL_CACHE_MODE:
+                    raise GrokExecutableError("Grok model cache has an unsafe mode")
+                try:
+                    os.fchmod(descriptor, 0o600)
+                except OSError as exc:
+                    raise GrokExecutableError(
+                        "Grok model cache mode cannot be normalized"
+                    ) from exc
+            after = os.fstat(descriptor)
+            try:
+                named = os.stat(
+                    path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                parent_named = path.parent.lstat()
+            except OSError as exc:
+                raise GrokExecutableError(
+                    "Grok model cache changed during normalization"
+                ) from exc
+
+            stable_file = lambda value: (
+                value.st_dev,
+                value.st_ino,
+                value.st_uid,
+                value.st_gid,
+                value.st_nlink,
+                value.st_size,
+                value.st_mtime_ns,
+            )
+            stable_parent = lambda value: (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_uid,
+                value.st_gid,
+            )
+            if (
+                stable_file(before) != stable_file(after)
+                or stable_file(after) != stable_file(named)
+                or stat.S_IMODE(after.st_mode) & 0o022
+                or after.st_mode != named.st_mode
+                or stable_parent(parent_before) != stable_parent(os.fstat(parent_descriptor))
+                or stable_parent(parent_before) != stable_parent(parent_named)
+            ):
+                raise GrokExecutableError(
+                    "Grok model cache changed during normalization"
+                )
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
+    return True
 
 
 def _fixture_script_exec(
@@ -228,4 +333,5 @@ __all__ = [
     "GrokExecutableError",
     "VerifiedGrokExecutable",
     "grok_release_id",
+    "normalize_grok_model_cache",
 ]

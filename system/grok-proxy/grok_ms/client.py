@@ -41,7 +41,11 @@ from .contract import (
     canonical_json_bytes,
     qualification_route_profile_matches,
 )
-from .grok_exec import GrokExecutableError, VerifiedGrokExecutable
+from .grok_exec import (
+    GrokExecutableError,
+    VerifiedGrokExecutable,
+    normalize_grok_model_cache,
+)
 from .ipc import ProtocolError, SeqPacketConnection
 from .detached_scope import DetachedScopeRecord, DetachedScopeStore
 from .process_scope import LinuxCgroupV2Scope, ProcessScopeBackend, ScopeHandle
@@ -141,8 +145,32 @@ def _grok_home(env: Mapping[str, str]) -> Path:
     return fixed
 
 
+def _prepare_grok_cache(env: Mapping[str, str]) -> None:
+    """Constrain cache recreation and repair only the known cooperative mode."""
+
+    os.umask(0o077)
+    try:
+        normalize_grok_model_cache(_grok_home(env) / "models_cache.json")
+    except GrokExecutableError as exc:
+        raise ClientError(f"managed Grok model cache is unsafe: {exc}") from exc
+
+
+def _current_grok_bin(env: Mapping[str, str]) -> Path:
+    """Return the canonical account launcher without ambient override authority."""
+
+    selected = _home(env) / ".local/bin/grok"
+    if not selected.is_absolute():
+        raise ClientError("current Grok launcher must be an absolute path")
+    return selected
+
+
 def _grok_bin(env: Mapping[str, str]) -> Path:
-    selected = Path(env.get("GROK_BIN", str(_home(env) / ".local/bin/grok")))
+    fixed = _current_grok_bin(env)
+    selected = (
+        Path(env["GROK_BIN"])
+        if env.get("GROK_TESTING") == "1" and "GROK_BIN" in env
+        else fixed
+    )
     if not selected.is_absolute():
         raise ClientError("GROK_BIN must be an absolute path")
     return selected
@@ -770,15 +798,27 @@ def _qualified_contract(
     contract: RouteContract,
     selection: Mapping[str, Any],
     env: dict[str, str],
+    *,
+    authorized_rungs: Sequence[str] | None = None,
 ) -> tuple[RouteContract, _ProviderCanary | None]:
     """Constrain the immutable ladder to externally promoted exact rungs."""
 
     canary_rung, provider_canary = _canary_rung(contract, env)
-    eligible = (
-        (canary_rung,)
-        if canary_rung is not None
-        else _eligible_qualified_rungs(contract, selection)
-    )
+    if canary_rung is not None:
+        if authorized_rungs is not None:
+            raise ClientError("profile rung authority conflicts with a live canary")
+        eligible = (canary_rung,)
+    elif authorized_rungs is None:
+        eligible = _eligible_qualified_rungs(contract, selection)
+    else:
+        supplied = tuple(authorized_rungs)
+        if (
+            any(type(rung) is not str or _RUNG_RE.fullmatch(rung) is None for rung in supplied)
+            or len(set(supplied)) != len(supplied)
+        ):
+            raise ClientError("profile-authorized rung set is invalid")
+        allowed = set(supplied)
+        eligible = tuple(rung for rung in contract.ladder if rung in allowed)
     if not eligible:
         raise ClientError(
             "no rung is externally promoted for this release/Grok/rung qualification"
@@ -1700,6 +1740,7 @@ def _load_active_managed_profile(
             activation_uid=_release_root_uid(env),
             activation_gid=_release_root_gid(env),
             expected_release_id=_release_id(release_dir, env),
+            verify_executable=False,
         )
     except ManagedProfileError as exc:
         raise ClientError("active managed profile is invalid") from exc
@@ -1910,8 +1951,12 @@ def _doctor(release_dir: Path, env: Mapping[str, str]) -> int:
             _validate_current_boot_inventory(release_dir, env)
             active = _load_active_managed_profile(release_dir, env)
             eligible = _eligible_qualified_rungs(active.profile.contract, selection)
-            status = active.profile.readiness(eligible)
-        except (ClientError, ManagedProfileError, OSError):
+            with VerifiedGrokExecutable.open(_current_grok_bin(env)) as grok:
+                status = replace(
+                    active.profile.readiness(eligible),
+                    grok_release_id=grok.release_id,
+                )
+        except (ClientError, GrokExecutableError, ManagedProfileError, OSError):
             status = blocked_status("active_profile_invalid")
     print(json.dumps(status.to_dict(), sort_keys=True, separators=(",", ":")))
     return 0 if status.status in {"ready", "degraded"} else 2
@@ -2320,6 +2365,7 @@ def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
             strict_direct=strict_direct_recovery,
         )
     if classification.kind is CommandKind.BARE:
+        _prepare_grok_cache(execution_env)
         if managed_requested:
             selection = _release_gate(release_dir, execution_env)
             active = _load_active_managed_profile(release_dir, execution_env)
@@ -2329,20 +2375,26 @@ def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
             if status.status not in {"ready", "degraded"}:
                 raise ClientError("active managed profile is not ready")
             try:
-                with open_profile_grok(active.profile) as grok:
+                with VerifiedGrokExecutable.open(
+                    _current_grok_bin(execution_env)
+                ) as grok:
                     grok.exec(
                         [str(grok.path), *classification.grok_argv],
                         execution_env,
                     )
-            except ManagedProfileError as exc:
-                raise ClientError("active managed Grok executable is invalid") from exc
+            except (GrokExecutableError, OSError) as exc:
+                raise ClientError(
+                    f"cannot verify current managed Grok executable: {exc}"
+                ) from exc
         _bare_exec(_grok_bin(execution_env), classification.grok_argv, execution_env)
     if classification.force_pick:
         raise ClientError("--pick-model is not supported in noninteractive v1 admission; pass -m")
 
+    _prepare_grok_cache(execution_env)
     selection = _release_gate(release_dir, execution_env)
     release_lock_fd = _release_lock_fd(execution_env)
     provider_canary: _ProviderCanary | None = None
+    profile_authorized_rungs: tuple[str, ...] | None = None
     try:
         _close_frontend_release_lock(execution_env)
         grok_home = _grok_home(execution_env)
@@ -2373,9 +2425,11 @@ def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
                 ) from exc
         elif managed_requested:
             active = _load_active_managed_profile(release_dir, execution_env)
-            readiness = active.profile.readiness(
-                _eligible_qualified_rungs(active.profile.contract, selection)
+            profile_authorized_rungs = _eligible_qualified_rungs(
+                active.profile.contract,
+                selection,
             )
+            readiness = active.profile.readiness(profile_authorized_rungs)
             if readiness.status not in {"ready", "degraded"}:
                 raise ClientError("active managed profile is not ready")
             model_id, explicit = _managed_model(
@@ -2385,9 +2439,23 @@ def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
                 active.profile, classification, model_id
             )
             try:
-                grok = open_profile_grok(active.profile)
-            except ManagedProfileError as exc:
-                raise ClientError("active managed Grok executable is invalid") from exc
+                grok = VerifiedGrokExecutable.open(
+                    _current_grok_bin(execution_env)
+                )
+            except (GrokExecutableError, OSError) as exc:
+                raise ClientError(
+                    f"cannot verify current managed Grok executable: {exc}"
+                ) from exc
+            try:
+                contract = replace(
+                    contract,
+                    grok_release_id=grok.release_id,
+                )
+            except ValueError as exc:
+                grok.close()
+                raise ClientError(
+                    f"cannot bind current managed Grok executable: {exc}"
+                ) from exc
         else:
             grok_bin = _grok_bin(execution_env)
             model_id, explicit = resolve_model(
@@ -2412,6 +2480,7 @@ def run(argv: Sequence[str], release_dir: Path, env: Mapping[str, str]) -> int:
                 contract,
                 selection,
                 execution_env,
+                authorized_rungs=profile_authorized_rungs,
             )
             if explicit:
                 _remember_explicit_model(

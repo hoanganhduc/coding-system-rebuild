@@ -9,14 +9,16 @@
 <!-- ai-agents-skills:annotated-review:end -->
 
 <!-- ai-agents-skills:autonomous-research-loop:start -->
-- `autonomous-research-loop`: Run bounded autonomous research iterations with evidence gates, recovery ledgers, and optional cross-agent handoffs.
+- `autonomous-research-loop`: Run bounded autonomous research iterations with evidence gates, recovery ledgers, and optional cross-agent handoffs; prefers host-owned multi-agent panel with single-path drive primary; scripted force-loop defaults (Goal Focus enforce, hard goal_priority, notify ON).
 
 <!-- ai-agents-skills:autonomous-research-loop:end -->
 
 <!-- ai-agents-skills:autonomous-research-loop-runtime:start -->
-- `autonomous-research-loop-runtime`: Offline runtime helper for autonomous research loop ledger initialization, iteration appends, validation, status, and selftest.
+- `autonomous-research-loop-runtime`: Offline runtime helper for loop ledgers plus headless drive, host-owned panel phases (--panel on, auto, or off), and the default cross-platform force-loop kit (bootstrap/start/drain with enforce/hard/notify defaults).
 
 <!-- ai-agents-skills:autonomous-research-loop-runtime:end -->
+
+
 
 <!-- ai-agents-skills:behavior-preserving-cleanup:start -->
 - `behavior-preserving-cleanup`: Clarity-only edit pass behind a comprehension gate with verify-after-each-change so behavior stays fixed.
@@ -99,9 +101,10 @@
 <!-- ai-agents-skills:manim-math-animation:end -->
 
 <!-- ai-agents-skills:modal-research-compute:start -->
-- `modal-research-compute`: Route heavy compute jobs to Modal through a local broker.
+- `modal-research-compute`: Route heavy compute through the unified local broker, including Modal-backed remote CPU, high-memory CPU, and GPU execution.
 
 <!-- ai-agents-skills:modal-research-compute:end -->
+
 
 <!-- ai-agents-skills:model-router:start -->
 - `model-router`: Choose an appropriate model, reasoning level, and role for subagents or multi-agent research work.
@@ -272,3 +275,38 @@ Generated target: antigravity.
 - `zotero`: Zotero paper search, retrieval, ingest, and collection workflow.
 
 <!-- ai-agents-skills:zotero:end -->
+
+<!-- ai-agents-skills:hetzner-research-compute:start -->
+- `hetzner-research-compute`: Route heavy CPU or high-memory compute to a disposable Hetzner Cloud server through the local broker, with agent-driven provision, run, collect, and destroy under hard cost caps.
+
+<!-- ai-agents-skills:hetzner-research-compute:end -->
+
+<!-- ai-agents-skills:kaggle-research-compute:start -->
+- `kaggle-research-compute`: Route heavy compute to free Kaggle Kernels through the local broker, with agent-driven push, poll, fetch, and a multi-run resume loop across concurrent kernels; free CPU (quota-free) and GPU under a self-imposed weekly GPU-hour cap.
+
+<!-- ai-agents-skills:kaggle-research-compute:end -->
+
+<!-- ai-agents-skills:remote-bridge:start -->
+- `remote-bridge`: Cross-target remote control plane: Zulip default control plus optional Telegram mobile notify, mailbox approvals/instructions, and ARL drive integration. Not an OpenClaw skill target; optional dual-route /aas adapter is published from canonical runtime into OpenClaw workspace.
+
+<!-- ai-agents-skills:remote-bridge:end -->
+
+
+<!-- ai-agents-skills:opengauss:start -->
+- `opengauss`: Optional inert readiness helper for Math Inc. OpenGauss Lean prove/formalize workflows; live install is manual-native.
+
+<!-- ai-agents-skills:opengauss:end -->
+
+<!-- ai-agents-skills:venue-ranking-evidence:start -->
+- `venue-ranking-evidence`: Resolve partial journal and conference names and preserve source-specific rank/index observations. ICORE alone has built-in live edition discovery and verified browser-print proof; nine other built-ins accept authorized normalized imports without establishing latest status, and Conference Ranks remains legacy.
+
+<!-- ai-agents-skills:venue-ranking-evidence:end -->
+
+<!-- ai-agents-skills:lean-research-library:start -->
+- `lean-research-library`: Use when any Lean formalization task starts (reuse Mathlib and the personal research library first) or ends (user-gated intake of results into the library, mathlib-PR flagging, paper-artifact scaffolding and gated Zenodo publishing).
+
+<!-- ai-agents-skills:lean-research-library:end -->
+
+## Lean formalization gate (user rule)
+
+Before any Lean formalization, run `lean-research-library search` per target statement (mathlib > personal library HoangMathLib > formalize new). After acceptance, run `lean-research-library intake`; staging and outward-facing actions always wait for user approval.

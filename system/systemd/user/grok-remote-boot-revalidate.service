@@ -1,0 +1,22 @@
+[Unit]
+Description=Revalidate grok-proxy release admission for the current boot
+Documentation=file:%h/grok-proxy/grok-remote-boot-revalidate.sh
+ConditionPathExists=/var/lib/grok-proxy/release-control/selected-release.json
+
+[Service]
+Type=oneshot
+ExecStart=%h/grok-proxy/grok-remote-boot-revalidate.sh
+# Required, not cosmetic: user services run under user@<uid>.service/app.slice,
+# whose cgroup.subtree_control is "memory pids". Without the cpu controller the
+# service cgroup has no cpu.max, and the installer aborts its ancestor walk with
+# "cannot preserve the caller's effective cpu.max limit". Setting any cpu
+# property makes systemd enable cpu on the parent slice.
+CPUWeight=100
+# Fail-closed by design: a failed revalidate must leave grok-remote blocked
+# rather than retry into a loop. Diagnose with:
+#   journalctl --user -u grok-remote-boot-revalidate
+Restart=no
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

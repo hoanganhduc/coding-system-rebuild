@@ -44,12 +44,14 @@ Open these only when relevant:
 - Topic/news digests route to `research-digest-wrapper` or `rss-news-digest`.
 - Digest-to-paper extraction routes to `digest-bridge`.
 - Explicit phased deep research with structured source handoff routes to `deep-research-workflow`.
+- Load-bearing lemmas that may need formalization: **mention/tag** as formal candidates and hand off to `lean-formalization-intake` / informal-to-lean runbook; do **not** run OpenGauss from discovery. Use `opengauss` only after intake `proceed` and (for live work) a manual Gauss install.
 - Writing, report, review, digest, or final-answer workflows must load
   `writing-style-settings.md`; math or LaTeX writing must also load
   `math-manuscript-style.md`.
 - Explicit TikZ drawing, refactoring, extraction, compile, or diagram-review requests route to `tikz-draw`.
 - Small graph-theoretic verification routes to `graph-verifier`.
 - Mathematical research tasks that need heavy graph-theoretic, combinatorial, algebraic, or spectral computation route to `sagemath`.
+Formal candidates that pass intake also run `lean-research-library search` before any new formalization is attempted.
 
 ## Default workflow
 

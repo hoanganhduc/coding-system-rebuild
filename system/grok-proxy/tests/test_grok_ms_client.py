@@ -8,6 +8,7 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass, replace
 import fcntl
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -58,6 +59,7 @@ from grok_ms.managed_profile import (  # noqa: E402
     ManagedProfile,
     ReadinessPolicy,
     write_activation_record,
+    write_content_addressed_profile,
 )
 
 
@@ -132,6 +134,31 @@ def qualified_record(
 
 
 class ClientTests(unittest.TestCase):
+    def test_prepare_grok_cache_repairs_recreated_cooperative_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            grok_home = home / ".grok"
+            grok_home.mkdir(mode=0o775)
+            cache = grok_home / "models_cache.json"
+            cache.write_text('{"models":[]}\n', encoding="ascii")
+            cache.chmod(0o664)
+            with mock.patch.object(client.os, "umask") as private_mask:
+                client._prepare_grok_cache(
+                    {
+                        "GROK_TESTING": "1",
+                        "HOME": str(home),
+                        "GROK_HOME": str(grok_home),
+                    }
+                )
+            private_mask.assert_called_once_with(0o077)
+            self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o600)
+            self.assertEqual(
+                inspect.getsource(client.run).count(
+                    "_prepare_grok_cache(execution_env)"
+                ),
+                2,
+            )
+
     _PTY_CHILD = r'''#!/usr/bin/env python3
 import json, os, signal, sys
 mode = sys.argv[-1]
@@ -1157,6 +1184,247 @@ while True:
                 ("home:lab", "direct"),
             )
 
+    def test_managed_runtime_uses_current_grok_after_profile_binary_is_pruned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = make_managed_profile(root)
+            profile.grok_path.unlink()
+            current = root / "grok-0.2.111-linux-aarch64"
+            current.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="ascii")
+            current.chmod(0o700)
+            launcher = root / ".local/bin/grok"
+            launcher.parent.mkdir(mode=0o700, parents=True)
+            launcher.symlink_to(current)
+            current_release = grok_release_id(current)
+            selection = {
+                "qualified_rungs": [qualified_record(profile, "direct", "1")]
+            }
+            environment = {
+                "GROK_TESTING": "1",
+                "HOME": str(root),
+                "GROK_HOME": str(root / ".grok"),
+            }
+            connection = mock.Mock()
+            captured: dict[str, object] = {}
+
+            def ensure(_release_dir, contract, _environment, **_kwargs):
+                captured["contract"] = contract
+                return connection
+
+            def run_child(
+                _connection,
+                _registration,
+                grok,
+                _argv,
+                _model_id,
+                _explicit,
+                _environment,
+            ):
+                captured["grok_path"] = grok.path
+                captured["grok_release_id"] = grok.release_id
+                return 17
+
+            with (
+                mock.patch.object(
+                    client, "_prepare_canary_dispatch", return_value=False
+                ),
+                mock.patch.object(
+                    client, "_managed_activation_matches_release", return_value=True
+                ),
+                mock.patch.object(client, "_validate_current_boot_inventory"),
+                mock.patch.object(client, "_release_gate", return_value=selection),
+                mock.patch.object(client, "_release_lock_fd", return_value=None),
+                mock.patch.object(client, "_close_frontend_release_lock"),
+                mock.patch.object(
+                    client,
+                    "_load_active_managed_profile",
+                    return_value=SimpleNamespace(profile=profile),
+                ),
+                mock.patch.object(client, "ensure_supervisor", side_effect=ensure),
+                mock.patch.object(client, "_request", return_value={}),
+                mock.patch.object(client, "run_owned_child", side_effect=run_child),
+            ):
+                result = client.run(("prompt",), ROOT, environment)
+
+            self.assertEqual(result, 17)
+            contract = captured["contract"]
+            self.assertIsInstance(contract, RouteContract)
+            self.assertEqual(contract.grok_release_id, current_release)
+            self.assertEqual(contract.ladder, ("direct",))
+            self.assertEqual(captured["grok_path"], current.resolve())
+            self.assertEqual(captured["grok_release_id"], current_release)
+            connection.close.assert_called_once_with()
+
+    def test_managed_bare_command_uses_current_grok_after_profile_binary_is_pruned(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = make_managed_profile(root)
+            profile.grok_path.unlink()
+            current = root / "grok-0.2.111-linux-aarch64"
+            current.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="ascii")
+            current.chmod(0o700)
+            launcher = root / ".local/bin/grok"
+            launcher.parent.mkdir(mode=0o700, parents=True)
+            launcher.symlink_to(current)
+            current_release = grok_release_id(current)
+            selection = {
+                "qualified_rungs": [qualified_record(profile, "direct", "1")]
+            }
+            environment = {
+                "GROK_TESTING": "1",
+                "GROK_MANAGED_PROFILE_AVAILABLE": "1",
+                "HOME": str(root),
+                "GROK_HOME": str(root / ".grok"),
+            }
+            captured: dict[str, object] = {}
+
+            def capture_exec(executable, argv, _environment):
+                captured["path"] = executable.path
+                captured["release_id"] = executable.release_id
+                captured["argv"] = tuple(argv)
+                raise RuntimeError("captured current bare Grok")
+
+            with (
+                mock.patch.object(
+                    client, "_prepare_canary_dispatch", return_value=False
+                ),
+                mock.patch.object(client, "_validate_current_boot_inventory"),
+                mock.patch.object(client, "_release_gate", return_value=selection),
+                mock.patch.object(
+                    client,
+                    "_load_active_managed_profile",
+                    return_value=SimpleNamespace(profile=profile),
+                ),
+                mock.patch.object(
+                    VerifiedGrokExecutable,
+                    "exec",
+                    new=capture_exec,
+                ),
+                self.assertRaisesRegex(RuntimeError, "captured current bare Grok"),
+            ):
+                client.run(("inspect",), ROOT, environment)
+
+            self.assertEqual(captured["path"], current.resolve())
+            self.assertEqual(captured["release_id"], current_release)
+            self.assertEqual(captured["argv"], (str(current.resolve()), "inspect"))
+
+    def test_active_profile_metadata_load_survives_pruned_historical_grok(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            profile_root = state / "grok-proxy/profiles"
+            profile_root.mkdir(mode=0o700, parents=True)
+            root_control = root / "root-control"
+            root_control.mkdir(mode=0o755)
+            profile = make_managed_profile(root)
+            write_content_addressed_profile(
+                profile_root,
+                profile,
+                owner_uid=os.getuid(),
+                owner_gid=os.getgid(),
+            )
+            write_activation_record(
+                root_control / "active-profile.json",
+                ActivationRecord.from_profile(profile, activated_unix_ns=1),
+                owner_uid=os.getuid(),
+                owner_gid=os.getgid(),
+            )
+            profile.grok_path.unlink()
+            environment = {
+                "GROK_TESTING": "1",
+                "HOME": str(root),
+                "XDG_STATE_HOME": str(state),
+                "GROK_TEST_ROOT_RELEASE_CONTROL": str(root_control),
+            }
+            with mock.patch.object(
+                client,
+                "_release_id",
+                return_value=profile.contract.release_id,
+            ):
+                active = client._load_active_managed_profile(ROOT, environment)
+            self.assertEqual(active.profile, profile)
+
+    def test_production_grok_discovery_ignores_ambient_override(self) -> None:
+        account = Path("/srv/example-account")
+        with mock.patch.object(client, "_account_home", return_value=account):
+            self.assertEqual(
+                client._grok_bin({"GROK_BIN": "/tmp/ambient-grok"}),
+                account / ".local/bin/grok",
+            )
+        self.assertEqual(
+            client._grok_bin(
+                {
+                    "GROK_TESTING": "1",
+                    "HOME": "/tmp/test-home",
+                    "GROK_BIN": "/tmp/test-grok",
+                }
+            ),
+            Path("/tmp/test-grok"),
+        )
+        self.assertEqual(
+            client._current_grok_bin(
+                {
+                    "GROK_TESTING": "1",
+                    "HOME": "/tmp/test-home",
+                    "GROK_BIN": "/tmp/ambient-grok",
+                }
+            ),
+            Path("/tmp/test-home/.local/bin/grok"),
+        )
+
+    def test_managed_runtime_rejects_missing_or_unsafe_current_grok(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = make_managed_profile(root)
+            profile.grok_path.unlink()
+            current = root / "grok-0.2.111-linux-aarch64"
+            launcher = root / ".local/bin/grok"
+            launcher.parent.mkdir(mode=0o700, parents=True)
+            launcher.symlink_to(current)
+            selection = {
+                "qualified_rungs": [qualified_record(profile, "direct", "1")]
+            }
+            environment = {
+                "GROK_TESTING": "1",
+                "HOME": str(root),
+                "GROK_HOME": str(root / ".grok"),
+            }
+            cases = (
+                ("missing", "current managed Grok executable.*cannot resolve"),
+                ("unsafe", "current managed Grok executable.*group/world writable"),
+            )
+            for state, expected in cases:
+                if state == "unsafe":
+                    current.write_text(
+                        "#!/usr/bin/env sh\nexit 0\n",
+                        encoding="ascii",
+                    )
+                    current.chmod(0o722)
+                with (
+                    self.subTest(state=state),
+                    mock.patch.object(
+                        client, "_prepare_canary_dispatch", return_value=False
+                    ),
+                    mock.patch.object(
+                        client,
+                        "_managed_activation_matches_release",
+                        return_value=True,
+                    ),
+                    mock.patch.object(client, "_validate_current_boot_inventory"),
+                    mock.patch.object(client, "_release_gate", return_value=selection),
+                    mock.patch.object(client, "_release_lock_fd", return_value=None),
+                    mock.patch.object(client, "_close_frontend_release_lock"),
+                    mock.patch.object(
+                        client,
+                        "_load_active_managed_profile",
+                        return_value=SimpleNamespace(profile=profile),
+                    ),
+                    self.assertRaisesRegex(client.ClientError, expected),
+                ):
+                    client.run(("prompt",), ROOT, environment)
+
     def test_doctor_emits_exact_redacted_states_without_provider_calls(self) -> None:
         expected_fields = {
             "schema_version",
@@ -1211,6 +1479,14 @@ while True:
             activation = root_control / "active-profile.json"
             activation.write_bytes(b"present\n")
             profile = make_managed_profile(root)
+            current = root / "grok-0.2.111-linux-aarch64"
+            current.write_text("#!/usr/bin/env sh\nexit 11\n", encoding="ascii")
+            current.chmod(0o700)
+            launcher = root / "home/.local/bin/grok"
+            launcher.parent.mkdir(mode=0o700, parents=True)
+            launcher.symlink_to(current)
+            current_release = grok_release_id(current)
+            profile.grok_path.unlink()
             active = SimpleNamespace(profile=profile)
             inventory = {
                 "schema_version": 1,
@@ -1268,6 +1544,7 @@ while True:
                 self.assertEqual(returncode, expected_rc)
                 self.assertEqual(record["status"], state_name)
                 self.assertEqual(record["reason_code"], reason)
+                self.assertEqual(record["grok_release_id"], current_release)
                 provider_open.assert_not_called()
 
             with (
@@ -1901,8 +2178,18 @@ while True:
             self.assertEqual(environment["GROK_HOME"], "/canonical/home/.grok")
             self.assertEqual(environment["XDG_STATE_HOME"], "/canonical/home/.local/state")
             self.assertEqual(client._grok_bin(environment), Path("/canonical/home/.local/bin/grok"))
+            self.assertEqual(
+                client._grok_bin({**environment, "GROK_BIN": "relative-grok"}),
+                Path("/canonical/home/.local/bin/grok"),
+            )
             with self.assertRaisesRegex(client.ClientError, "absolute"):
-                client._grok_bin({**environment, "GROK_BIN": "relative-grok"})
+                client._grok_bin(
+                    {
+                        **environment,
+                        "GROK_TESTING": "1",
+                        "GROK_BIN": "relative-grok",
+                    }
+                )
 
     def test_secure_json_requires_exact_mode_and_rejects_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2549,7 +2836,7 @@ while True:
                 mock.patch.object(
                     client,
                     "_qualified_contract",
-                    side_effect=lambda contract, _selection, _env: (
+                    side_effect=lambda contract, _selection, _env, **_kwargs: (
                         contract,
                         None,
                     ),
