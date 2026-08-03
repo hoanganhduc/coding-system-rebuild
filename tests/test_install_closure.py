@@ -32,7 +32,10 @@ class InstallClosureTests(unittest.TestCase):
         self.assertIn("openclaw sandbox recreate --all --force", source)
         owner_restore = source.index("restore-openclaw-owner-data.sh")
         component_converge = source.index("--convergent", owner_restore)
+        config_migration = source.index("migrate-openclaw-config.py", component_converge)
+        plugin_install = source.index("openclaw plugins install", component_converge)
         self.assertLess(owner_restore, component_converge)
+        self.assertLess(config_migration, plugin_install)
 
     def test_required_python_environments_are_not_suppressed(self) -> None:
         source = (ROOT / "bin/install.sh").read_text(encoding="utf-8")

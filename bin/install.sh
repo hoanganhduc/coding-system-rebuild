@@ -408,6 +408,13 @@ if (( START <= 7 )); then
       SHA_AFTER=$(sha256sum "$HOME/.openclaw/secrets.json" 2>/dev/null | cut -d' ' -f1 || true)
       [[ "$SHA_BEFORE" == "$SHA_AFTER" ]] || { echo "FAIL: openclaw-bot install clobbered restored secrets.json"; exit 2; }
     fi
+    MIGRATE_ARGS=(
+      --config "$HOME/.openclaw/openclaw.json"
+      --lock "$REPO/system/openclaw/compatibility.lock.json"
+    )
+    [[ $DEGRADED_MODE -eq 1 ]] && MIGRATE_ARGS+=(--degraded)
+    python3 "$REPO/bin/migrate-openclaw-config.py" "${MIGRATE_ARGS[@]}"
+    openclaw config validate >/dev/null
     [[ -d "$HOME/.openclaw/npm/projects" ]] \
       || { echo "FAIL: required OpenClaw npm project closure is missing"; exit 2; }
     for p in "$HOME/.openclaw/npm/projects"/*/; do
@@ -422,13 +429,6 @@ if (( START <= 7 )); then
       'import json,sys; print(*json.load(open(sys.argv[1]))["required_plugin_packages"], sep="\n")' \
       "$REPO/system/openclaw/skill-closure.json")
     openclaw plugins doctor >/dev/null
-    MIGRATE_ARGS=(
-      --config "$HOME/.openclaw/openclaw.json"
-      --lock "$REPO/system/openclaw/compatibility.lock.json"
-    )
-    [[ $DEGRADED_MODE -eq 1 ]] && MIGRATE_ARGS+=(--degraded)
-    python3 "$REPO/bin/migrate-openclaw-config.py" "${MIGRATE_ARGS[@]}"
-    openclaw config validate >/dev/null
     openclaw exec-policy set --host sandbox --security allowlist \
       --ask on-miss --ask-fallback deny --json >/dev/null
     gate "openclaw config has no dangling openclaw-src references"

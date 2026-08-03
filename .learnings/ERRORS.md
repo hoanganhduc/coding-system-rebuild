@@ -498,6 +498,33 @@ isolated config derived from the complete public template.
 
 ---
 
+## [ERR-20260803-085] plugin-command-consumed-config-before-migration
+
+**Logged**: 2026-08-03T13:02:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+The degraded migration produced a schema-valid config in isolation, but phase
+7 invoked `openclaw plugins install` first. That command validates the active
+config and stopped on the redacted public template before migration could run.
+
+### Response
+
+Converge and validate restored/fresh config immediately after component
+materialization, before any OpenClaw command that consumes it. Install and
+doctor the exact plugins only after that gate. A source-order regression binds
+restore, component convergence, config migration, and plugin installation in
+the required sequence.
+
+### Metadata
+
+- Reproducible: yes, fresh degraded home
+- Related Files: `bin/install.sh`, `tests/test_install_closure.py`
+
+---
+
 ## [ERR-20260712-001] make-test-manifest-drift
 
 **Logged**: 2026-07-12T14:59:54Z
