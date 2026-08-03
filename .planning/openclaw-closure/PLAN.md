@@ -74,7 +74,7 @@ plan first repairs deterministic defects, then closes the restoration graph.
 
 ## Closure Results
 
-- OpenClaw `2026.7.1-2`, component commit `c3c1f09`, plugin locks, config
+- OpenClaw `2026.7.1-2`, component commit `8dd852a`, plugin locks, config
   schema, and the public multi-architecture sandbox index form one enforced
   compatibility tuple.
 - The sandbox image contains the exact Modal SDK/CLI and GetSciPapers wheel

@@ -337,6 +337,85 @@ binds that precedence so unrelated authoring trees cannot create false drift.
 
 ---
 
+## [ERR-20260803-079] heredoc-python-consumed-pipeline-input
+
+**Logged**: 2026-08-03T12:31:00Z
+**Priority**: low
+**Status**: resolved
+
+### Summary
+
+A diagnostic piped `openclaw plugins list --json` into `python3 -` while also
+supplying the Python program with a here-document. The here-document owned
+standard input, so Python saw no JSON and the producer received `EPIPE`.
+
+### Response
+
+Use `jq` for direct JSON projections in a pipeline, or place the Python program
+in a file/`-c` argument so standard input remains the data stream. The plugin
+inventory was rerun with `jq` and confirmed the exact managed generation.
+
+### Metadata
+
+- Reproducible: yes, POSIX shells
+- Related Files: diagnostic command only
+
+---
+
+## [ERR-20260803-080] fresh-nonlogin-install-lacked-user-bin-path
+
+**Logged**: 2026-08-03T12:39:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+The manual GitHub installer rehearsal installed the exact OpenClaw npm package
+under `~/.npm-global/bin`, but the non-login orchestrator did not add that
+directory to its own `PATH`. Phase 7 therefore failed with `openclaw: command
+not found`. The same fresh workspace also lacked Git author identity, so its
+rollback-baseline commit emitted a fatal diagnostic that the component had
+previously suppressed.
+
+### Response
+
+Bind both user executable roots in the orchestrator before any phase, require
+the OpenClaw CLI in phase 2, and create the fresh workspace baseline with
+command-scoped deterministic Git identity. Baseline commit failure is no longer
+suppressed. Focused regressions cover both contracts before rerunning the full
+manual rehearsal.
+
+### Metadata
+
+- Reproducible: yes, fresh non-login Ubuntu CI user
+- Related Files: `bin/install.sh`, `external/openclaw-bot/install.sh`, installer tests
+
+---
+
+## [ERR-20260803-081] component-lock-sha-was-transcribed-from-short-output
+
+**Logged**: 2026-08-03T12:42:00Z
+**Priority**: medium
+**Status**: resolved
+
+### Summary
+
+The first umbrella lock update expanded the component commit from the short
+commit display instead of reading the authoritative full object ID. Static
+compatibility verification correctly rejected the nonexistent object.
+
+### Response
+
+Read the component ID with `git rev-parse HEAD`, update both lock locations
+from that exact value, and rerun the Git-blob-bound compatibility verifier.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `components.lock`, `system/openclaw/compatibility.lock.json`
+
+---
+
 ## [ERR-20260712-001] make-test-manifest-drift
 
 **Logged**: 2026-07-12T14:59:54Z

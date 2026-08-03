@@ -12,7 +12,7 @@
   },
   "component": {
     "name": "openclaw-bot",
-    "commit": "c3c1f09ab19599d663b55942610b5674485ac40d",
+    "commit": "8dd852afc36c0a01fb2bb4606a5ff381960ef405",
     "config_template_sha256": "8cfeffa6e016d9b31f1f09d1caa919e1ffb69e3afb6fa2e94273e61515a01700"
   },
   "skill_closure_sha256": "acc92e31eeaa49616013594990fd3986e59a9b5826b4ccdfc63c82844d32d609",

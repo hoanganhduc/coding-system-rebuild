@@ -14,6 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 class InstallClosureTests(unittest.TestCase):
     def test_component_cannot_downgrade_openclaw_and_plugins_use_lockfiles(self) -> None:
         source = (ROOT / "bin/install.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"', source
+        )
+        self.assertIn("openclaw missing from the restored command path", source)
         self.assertIn("--skip-openclaw-install", source)
         self.assertIn("--convergent", source)
         self.assertIn("npm ci --ignore-scripts --omit=dev", source)

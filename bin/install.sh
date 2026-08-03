@@ -18,6 +18,10 @@ START="${PHASE:-1}"
 DEGRADED_MODE=0
 [[ -z "${SECRETS:-}" ]] && DEGRADED_MODE=1
 export DEGRADED_MODE
+# prepare.sh installs user-scoped executables in these two roots, but a child
+# process cannot update this orchestrator's PATH. Bind them before every phase
+# so fresh non-login CI and restored shells see the same command closure.
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 
 if [[ -z "${OWNER_DATA:-}" ]]; then
   OWNER_DATA="$(ls -1t "$HOME"/openclaw-backups/openclaw-private-*.tar.gz.gpg 2>/dev/null | head -1 || true)"
@@ -328,6 +332,7 @@ if (( START <= 2 )); then
   for b in git jq pandoc python3; do command -v "$b" >/dev/null || { echo "FAIL: $b missing"; exit 2; }; done
   skip_enabled SKIP_NODE || command -v node >/dev/null || { echo "FAIL: node missing"; exit 2; }
   { skip_enabled SKIP_NODE || skip_enabled SKIP_NPM_GLOBALS; } || command -v npm >/dev/null || { echo "FAIL: npm missing"; exit 2; }
+  { skip_enabled SKIP_NODE || skip_enabled SKIP_NPM_GLOBALS; } || command -v openclaw >/dev/null || { echo "FAIL: openclaw missing from the restored command path"; exit 2; }
   skip_enabled SKIP_DOCKER || command -v docker >/dev/null || { echo "FAIL: docker missing"; exit 2; }
 fi
 
