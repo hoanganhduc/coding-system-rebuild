@@ -343,7 +343,7 @@ fi
 
 # 5 ─ components
 if (( START <= 5 )); then
-  phase 5 "components (openclaw-bot, ai-agents-skills)"
+  phase 5 "components (openclaw-bot, ai-agents-skills, vnu-eoffice)"
   bash "$REPO/bin/components.sh" || [[ $DEGRADED_MODE -eq 1 ]]
 fi
 
@@ -365,6 +365,7 @@ fi
 # 7 ─ OpenClaw slice (delegated component)
 if (( START <= 7 )); then
   phase 7 "OpenClaw slice via openclaw-bot"
+  python3 "$REPO/bin/lib/bridge_vnu_eoffice_secrets.py"
   if [[ -x "$REPO/external/openclaw-bot/install.sh" ]]; then
     SHA_BEFORE=$(sha256sum "$HOME/.openclaw/secrets.json" 2>/dev/null | cut -d' ' -f1 || true)
     bash "$REPO/external/openclaw-bot/install.sh" --prefix "$HOME/.openclaw" --skip-docker --skip-services --skip-config

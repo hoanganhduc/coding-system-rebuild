@@ -34,6 +34,10 @@ copy remains recommended as a human-readable fallback.
 | `MOLTBOOK_API_KEY` | moltbook agent | moltbook account |
 | `VNU_EOFFICE_USERNAME` / `VNU_EOFFICE_PASSWORD` | VNU eOffice skill | VNU account |
 
+During install, the two VNU keys are copied without logging their values into
+`~/.openclaw/workspace/secrets/vnu-eoffice/secrets.json`. This workspace-visible
+view is also included in later encrypted backups when present.
+
 ## Shell env file `~/.secrets.env` (sourced by the managed bashrc block)
 
 | Var | Feature |

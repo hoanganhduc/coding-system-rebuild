@@ -35,9 +35,9 @@ Phases (each gated; resume after a failure with `PHASE=<n> bin/install.sh`):
 | 1 | doctor + dirs | doctor exit 0 |
 | 2 | prepare: apt, xtradeb PPA (chromium/calibre), texlive-full, tailscale, NodeSource node 22, npm prefix, npm globals (pinned), pipx, rustup, bun, elan, modal, docker, images | binaries respond |
 | 3 | restore secrets + chmod fixups (+ `tailscale up --authkey` if provided) | required entries present |
-| 5 | components: clone openclaw-bot → `external/`; ensure the pinned ai-agents-skills object exists in the compatibility/development repository at `~/ai-agents-skills` without changing an existing worktree | exact pinned object is locally available |
+| 5 | components: clone openclaw-bot → `external/`; ensure the pinned ai-agents-skills object exists at `~/ai-agents-skills`; clone the pinned VNU eOffice package → `~/.openclaw/workspace/vnueoffice_repo` and retain a `~/vnueoffice` compatibility symlink for older host launchers | exact pinned objects are locally available |
 | 6 | render configs/scripts/symlinks into $HOME; atomically install the immutable grok-proxy user/root release | no unresolved `{{ HOME }}`; one coherent admitted Grok release |
-| 7 | OpenClaw slice via openclaw-bot (`--skip-docker --skip-services`); npm install channel plugins | secrets untouched; no dangling refs |
+| 7 | derive the VNU-only sandbox secret view; install the OpenClaw slice via openclaw-bot (`--skip-docker --skip-services`); npm install channel plugins | secrets untouched; no dangling refs; VNU adapter can see its checkout and credentials |
 | 8 | bind the materializer by its recorded SHA-256 into a root-owned no-replace helper, materialize the exact pinned ai-agents-skills Git blobs at `/usr/local/libexec/coding-system/components/ai-agents-skills/<sha>`, then install `research_compute` from that stable tree under a closed environment + `verify` | helper digest/authority, blob/mode parity, immutable ownership, idempotent no-replace publication, and `_run.sh` broker smoke |
 | 8b| re-overlay zip secrets; `_run.sh` sha check | verify-secrets OK |
 | 9 | python envs from pip freezes (workspace-local target dir, ~/.venvs, docling-venv, lean-explore) | import smokes |

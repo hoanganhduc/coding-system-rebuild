@@ -107,6 +107,59 @@ correctly constrained.
 
 ---
 
+## [ERR-20260803-001] openclaw-vnu-derived-runtime-state-missing
+
+**Logged**: 2026-08-03T07:19:36Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+A restored OpenClaw installation had the authoritative VNU credentials and the
+adapter skill, but the sandbox could not import `vnu_eoffice` because neither
+the workspace-visible package checkout nor its derived secret view was part of
+the rebuild contract.
+
+### Error
+
+    ModuleNotFoundError: No module named 'vnu_eoffice'
+
+### Context
+
+- The cron helper expects `/workspace/vnueoffice_repo` and
+  `/workspace/secrets/vnu-eoffice/secrets.json`.
+- The encrypted archive restored the VNU keys only inside
+  `~/.claude/secrets.json`.
+- The OpenClaw adapter installer copied the launcher but did not materialize
+  the package checkout.
+
+### Suggested Fix
+
+Treat sandbox-visible package checkouts and derived least-privilege secret
+views as explicit rebuild artifacts. Pin the package, generate the secret view
+without logging values, cover it in the encrypted-backup manifest, and verify
+the exact scheduled command from inside the target runtime.
+
+### Canonical Integration Plan
+
+- Related Skills: vnu-eoffice, self-improving-agent
+- Related Settings Or Artifacts: component lock, secrets manifest, installer, tests
+- Affected Install Targets: openclaw
+- Affected OS/Substrates: linux
+- Canonical Repo Change: not needed; integration is owned by `coding-system-rebuild` and `openclaw-bot`
+- Docs And Generated Outputs: update rebuild install/secrets docs
+- Verification Plan: bridge unit tests, package tests, rebuild roundtrip, no-notify live cron run
+- Blocked Or Unsupported Targets: macOS, Windows, and non-OpenClaw targets unverified
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: `components.lock`, `bin/components.sh`,
+  `bin/lib/bridge_vnu_eoffice_secrets.py`, `secrets/secrets-manifest.yaml`,
+  `openclaw-bot/workspace/skills/vnu-eoffice/run_vnu_eoffice.sh`
+
+---
+
 ## [ERR-20260717-043] parallel-roundtrip-shared-staging-race
 
 **Logged**: 2026-07-17T01:30:03Z

@@ -14,7 +14,11 @@ while IFS='=' read -r name rest; do
   # references.  An existing development checkout is never checked out or
   # cleaned here: phase 8 executes a root-owned materialization of the exact
   # pinned object instead of mutable worktree bytes.
-  if [[ "$name" == "ai-agents-skills" ]]; then dest="$HOME/$name"; else dest="$REPO/external/$name"; fi
+  case "$name" in
+    ai-agents-skills) dest="$HOME/$name" ;;
+    vnu-eoffice) dest="$HOME/.openclaw/workspace/vnueoffice_repo" ;;
+    *) dest="$REPO/external/$name" ;;
+  esac
   if [[ "$ref" == LOCAL:* || "${LOCAL:-0}" == "1" ]]; then
     path="${ref#LOCAL:}"; path="${path/#\~/$HOME}"
     if [[ -d "$path" ]]; then
@@ -58,4 +62,18 @@ while IFS='=' read -r name rest; do
   head=$(git -C "$dest" rev-parse HEAD)
   [[ "$head" == "$ref"* ]] && echo "component $name @ ${head:0:12}" || { echo "ERROR: $name HEAD != lock" >&2; RC=1; }
 done < "$REPO/components.lock"
+
+# Compatibility for older host-side OpenClaw launchers that predate the
+# sandbox-visible workspace checkout path.
+VNU_REPO="$HOME/.openclaw/workspace/vnueoffice_repo"
+VNU_LEGACY="$HOME/vnueoffice"
+if [[ -d "$VNU_REPO/.git" ]]; then
+  if [[ -L "$VNU_LEGACY" ]]; then
+    ln -sfn "$VNU_REPO" "$VNU_LEGACY"
+  elif [[ ! -e "$VNU_LEGACY" ]]; then
+    ln -s "$VNU_REPO" "$VNU_LEGACY"
+  else
+    echo "WARN: preserving existing non-symlink $VNU_LEGACY" >&2
+  fi
+fi
 exit $RC
