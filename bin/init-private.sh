@@ -131,6 +131,7 @@ echo "== (d) systemd units.state =="
 mkdir -p "$REPO/system/systemd"
 : > "$REPO/system/systemd/units.state"
 for u in openclaw-gateway.service send-queue-worker.service \
+         syncthing.service grok-remote-boot-revalidate.service \
          rss_news_digest_bot.service rss_news_digest_bot.timer \
          moltbook-relay.service moltbook-relay.timer xvfb-99.service; do
   state=$(systemctl --user is-enabled "$u" 2>/dev/null) || true

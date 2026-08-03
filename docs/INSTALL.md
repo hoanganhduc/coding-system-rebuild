@@ -5,7 +5,10 @@
 1. This repo (public).
 2. The secrets zip + its password (see [SECRETS.md](SECRETS.md)). Optional —
    without it the install completes in **degraded mode**.
-3. A user with sudo. Examples assume user `ubuntu`; any user works — every
+3. The newest `openclaw-private-*.tar.gz.gpg` owner-data archive when prior
+   sessions, memory, research data, or workspace history must survive. Without
+   it, the installer declares and initializes a fresh owner-state baseline.
+4. A user with sudo. Examples assume user `ubuntu`; any user works — every
    captured path is `{{ HOME }}`-templated and rendered at install time.
 
 ## 1. Bootstrap
@@ -24,7 +27,9 @@ architecture without a pinned SageMath image.
 ## 2. Full install
 
 ```bash
-make install SECRETS=/path/to/coding-system-secrets-<stamp>.zip
+make install \
+  SECRETS=/path/to/coding-system-secrets-<stamp>.zip \
+  OWNER_DATA=/path/to/openclaw-private-<stamp>.tar.gz.gpg
 # password read from CSR_SECRETS_PASSWORD or prompted
 ```
 
@@ -34,16 +39,16 @@ Phases (each gated; resume after a failure with `PHASE=<n> bin/install.sh`):
 |---|---|---|
 | 1 | doctor + dirs | doctor exit 0 |
 | 2 | prepare: apt, xtradeb PPA (chromium/calibre), texlive-full, tailscale, NodeSource node 22, npm prefix, npm globals (pinned), pipx, rustup, bun, elan, modal, docker, images | binaries respond |
-| 3 | restore secrets + chmod fixups (+ `tailscale up --authkey` if provided) | required entries present |
+| 3 | restore secrets + chmod fixups; materialize the OpenClaw-relative research-compute config and least-privilege GetSciPapers credential view (+ `tailscale up --authkey` if provided) | required entries present; derived config has a sandbox-writable state root; credential copies are mode 0600 |
 | 5 | components: clone openclaw-bot → `external/`; ensure the pinned ai-agents-skills object exists at `~/ai-agents-skills`; clone the pinned VNU eOffice package → `~/.openclaw/workspace/vnueoffice_repo` and retain a `~/vnueoffice` compatibility symlink for older host launchers | exact pinned objects are locally available |
 | 6 | render configs/scripts/symlinks into $HOME; atomically install the immutable grok-proxy user/root release | no unresolved `{{ HOME }}`; one coherent admitted Grok release |
-| 7 | derive the VNU-only sandbox secret view; install the OpenClaw slice via openclaw-bot (`--skip-docker --skip-services`); npm install channel plugins | secrets untouched; no dangling refs; VNU adapter can see its checkout and credentials |
-| 8 | bind the materializer by its recorded SHA-256 into a root-owned no-replace helper, materialize the exact pinned ai-agents-skills Git blobs at `/usr/local/libexec/coding-system/components/ai-agents-skills/<sha>`, then install `research_compute` from that stable tree under a closed environment + `verify` | helper digest/authority, blob/mode parity, immutable ownership, idempotent no-replace publication, and `_run.sh` broker smoke |
+| 7 | restore owner data as the older overlay; converge the OpenClaw slice without downgrading the CLI; derive the VNU-only sandbox secret view; install exact plugin locks and integrity records; migrate config/access policy | owner state preserved without rolling runtime files backward; secrets untouched; no dangling refs; config validates; plugin doctor clean |
+| 8 | bind the materializer by its recorded SHA-256 into a root-owned no-replace helper, materialize the exact pinned ai-agents-skills Git blobs at `/usr/local/libexec/coding-system/components/ai-agents-skills/<sha>`, install the Modal skill, and restore the complete Codex runtime runner plus vendored runtime skill files | helper digest/authority, blob/mode parity, immutable ownership, runtime verification, and executable `~/.codex/runtime/run_skill.sh` |
 | 8b| re-overlay zip secrets; `_run.sh` sha check | verify-secrets OK |
-| 9 | python envs from pip freezes (workspace-local target dir, ~/.venvs, docling-venv, lean-explore) | import smokes |
-| 10| docker images re-check (arch-conditional) | images present |
-| 11| systemd units rendered + per-unit enable state applied; linger; crontab marker block | states match `units.state` |
-| 12| post-install notes + `make verify` | verify green / green-with-degraded |
+| 9 | exact Python environments; bounded Calibre `metadata.db` bootstrap; workspace-portable GetSciPapers fallback | import/CLI smokes, SQLite quick-check and `books` table |
+| 10| content-addressed sandbox images re-check (arch-conditional) | locked image present and compatibility tuple passes |
+| 11| systemd units; gateway restart/readiness poll; sandbox recreation; crontab marker block | gateway healthy and stale sandboxes removed |
+| 12| explicit-profile verification | `full` proves gateway/channels/plugins/skills/image/security; `ci` lists every intentionally unavailable live check |
 
 Phase 6 treats `~/grok-proxy` as the editable Grok authoring source while
 preserving its private configuration, credentials, model cache, locks, and

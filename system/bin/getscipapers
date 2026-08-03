@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VENV="{{ HOME }}/.openclaw/workspace/.local/venv_getscipapers"
+PYTHON="$VENV/bin/python"
+ENTRYPOINT="$VENV/bin/getscipapers"
+
+[[ -x "$PYTHON" && -f "$ENTRYPOINT" ]] || {
+  echo "getscipapers runtime missing: $VENV" >&2
+  exit 127
+}
+exec "$PYTHON" "$ENTRYPOINT" "$@"

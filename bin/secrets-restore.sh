@@ -29,4 +29,5 @@ else
   CSR_SECRETS_HOME="$DEST" python3 "$REPO/bin/lib/secrets_tool.py" fixperms "$MANIFEST"
   echo "restored into $DEST (test mode; manifest modes)"
 fi
+HOME_OVERRIDE="$DEST" bash "$REPO/bin/materialize-openclaw-runtime.sh"
 echo "secrets restored from $ZIP"

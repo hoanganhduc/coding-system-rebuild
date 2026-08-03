@@ -402,7 +402,7 @@ entries:
   # ---------------------------------------------------------------- ~/.local/bin
   - id: localbin-wrappers
     root: .local/bin
-    match: ["digest-bridge", "gsp", "lean-explore-mcp-api", "model-router",
+    match: ["digest-bridge", "getscipapers", "gsp", "lean-explore-mcp-api", "model-router",
             "research-digest", "rss-news-digest", "sage"]
     class: public-template
     dest_dir: system/bin

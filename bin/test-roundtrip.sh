@@ -69,8 +69,37 @@ mkdir -p "$RUN/home2"
 SECRETS="$ZIP" CSR_SECRETS_PASSWORD=fixturepw HOME="$RUN/home2" \
   bash "$REPO/bin/secrets-restore.sh" >/dev/null || fail "fixture restore"
 ( cd "$RUN/home2" && find . -type f | sed 's|^\./||' | sort ) > "$RUN/restored-list"
-comm -3 "$LIST" "$RUN/restored-list" > "$RUN/list-diff"
+DERIVED_RESEARCH_CONFIG=".openclaw/workspace/config/research-compute.toml"
+DERIVED_MODAL_CONFIG=".openclaw/workspace/.modal.toml"
+awk -v research_config="$DERIVED_RESEARCH_CONFIG" -v modal_config="$DERIVED_MODAL_CONFIG" '
+  $0 == research_config { next }
+  $0 == modal_config { next }
+  $0 ~ /^\.openclaw\/workspace\/secrets\/getscipapers\/[^/]+\/credentials\.json$/ { next }
+  { print }
+' "$RUN/restored-list" > "$RUN/restored-archive-list"
+comm -3 "$LIST" "$RUN/restored-archive-list" > "$RUN/list-diff"
 [[ ! -s "$RUN/list-diff" ]] && echo "ok (listing)" || fail "restored listing differs"
+[[ -f "$RUN/home2/$DERIVED_RESEARCH_CONFIG" ]] \
+  || fail "derived research-compute config missing"
+grep -Fqx 'broker_state_root = "data/research/research-compute"' \
+  "$RUN/home2/$DERIVED_RESEARCH_CONFIG" \
+  || fail "derived research-compute state root is not sandbox-writable"
+[[ "$(stat -c '%a' "$RUN/home2/$DERIVED_RESEARCH_CONFIG" 2>/dev/null)" == "600" ]] \
+  || fail "derived research-compute config mode is not 600"
+cmp -s "$RUN/home2/.modal.toml" "$RUN/home2/$DERIVED_MODAL_CONFIG" \
+  || fail "derived Modal credential differs"
+[[ "$(stat -c '%a' "$RUN/home2/$DERIVED_MODAL_CONFIG" 2>/dev/null)" == "600" ]] \
+  || fail "derived Modal credential mode is not 600"
+while IFS= read -r source_credential; do
+  [[ -z "$source_credential" ]] && continue
+  service="${source_credential#.config/getscipapers/}"
+  service="${service%%/*}"
+  derived_credential=".openclaw/workspace/secrets/getscipapers/$service/credentials.json"
+  cmp -s "$RUN/home2/$source_credential" "$RUN/home2/$derived_credential" \
+    || { fail "derived GetSciPapers credential differs: $service"; break; }
+  [[ "$(stat -c '%a' "$RUN/home2/$derived_credential" 2>/dev/null)" == "600" ]] \
+    || { fail "derived GetSciPapers credential mode is not 600: $service"; break; }
+done < <(grep -E '^\.config/getscipapers/[^/]+/credentials\.json$' "$LIST")
 while read -r f; do
   [[ -z "$f" ]] && continue
   cmp -s "$FIX/$f" "$RUN/home2/$f" || { fail "restored content differs: $f"; break; }

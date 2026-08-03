@@ -1,6 +1,6 @@
 # Pinned docker images. Format: image|arch (any | arm64 | amd64). Hand-curated.
 sagemath/sagemath:10.8|amd64
 ghcr.io/hoanganhduc/sagemath:10.8|arm64
-ghcr.io/hoanganhduc/openclaw-sandbox:latest|any
+ghcr.io/hoanganhduc/coding-system-rebuild-openclaw-sandbox@sha256:f868c49205a1bad3edfbb6a92e1b184f0ab9f7bfe66d11a939d611f081a1f030|any
 zotero/translation-server:latest|arm64
 ghcr.io/hoanganhduc/translation-server:latest|amd64

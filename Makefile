@@ -4,7 +4,7 @@ SHELL := /bin/bash
 REPO  := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 DENY  := $(HOME)/.config/coding-system/leak-denylist.txt
 
-.PHONY: help doctor init-private sync backup secrets-pack verify-secrets restore-secrets \
+.PHONY: help doctor init-private sync backup secrets-pack verify-secrets restore-secrets restore-owner-data closure-drift \
         leak-scan leak-scan-history push test verify smoke roundtrip status clean \
         prepare install components
 
@@ -63,6 +63,13 @@ verify-secrets: ## verify secrets vs manifest (live $$HOME, or SECRETS=zip)
 restore-secrets: ## extract SECRETS=zip into $$HOME + perm fixups
 	@bash bin/secrets-restore.sh
 
+restore-owner-data: ## restore OWNER_DATA=openclaw-private-*.tar.gz.gpg into OpenClaw
+	@test -n "$(OWNER_DATA)" || { echo "OWNER_DATA is required" >&2; exit 2; }
+	@bash bin/restore-openclaw-owner-data.sh "$(OWNER_DATA)"
+
+closure-drift: ## report installed/upstream drift without changing release locks
+	@python3 bin/check-closure-drift.py --upstream
+
 leak-scan: ## scan the repo working tree for secrets/personal IDs
 	@bash bin/leak-scan.sh
 
@@ -83,6 +90,10 @@ test: ## self-tests: canary scan + field-set guard + rotation units + grok-proxy
 	@bash tests/rotation_unit.sh
 	@python3 -B tests/test_aas_component.py
 	@python3 -B tests/test_render_install.py
+	@python3 -B tests/test_install_closure.py
+	@python3 -B tests/test_materialize_openclaw_runtime.py
+	@python3 -B tests/test_openclaw_compatibility.py
+	@python3 -B external/openclaw-bot/tests/test_runtime_contracts.py
 	@python3 tests/test_stage_backup.py
 	@bash system/grok-proxy/tests/run.sh
 	@bash bin/test-roundtrip.sh

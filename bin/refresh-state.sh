@@ -3,7 +3,8 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG="$REPO/system/packages"
-mkdir -p "$PKG/requirements" "$REPO/system/cron"
+OBS="$PKG/observed"
+mkdir -p "$PKG/requirements" "$OBS/requirements" "$REPO/system/cron"
 mkdir -p "$REPO/.staging"
 REFRESH_LEDGER="$REPO/.staging/refresh-output-paths.nul"
 REFRESH_RECORDS="$REPO/.staging/refresh-output-records.json"
@@ -14,13 +15,13 @@ record_output() {
   printf '%s\0' "$1" >> "$REFRESH_LEDGER"
 }
 
-echo "-- npm globals"
+echo "-- observed npm globals (release lock is not changed)"
 npm ls -g --depth=0 --json 2>/dev/null | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
 for name,info in sorted(d.get("dependencies",{}).items()):
-    print("%s@%s" % (name, info.get("version","")))' > "$PKG/npm-globals.txt"
-record_output system/packages/npm-globals.txt
+    print("%s@%s" % (name, info.get("version","")))' > "$OBS/npm-globals.txt"
+record_output system/packages/observed/npm-globals.txt
 
 echo "-- pipx packages"
 if command -v pipx >/dev/null; then
@@ -29,12 +30,13 @@ import json,sys
 d=json.load(sys.stdin)
 for name,meta in sorted(d.get("venvs",{}).items()):
     pkg=meta["metadata"]["main_package"]
-    print("%s==%s" % (pkg["package"], pkg["package_version"]))' > "$PKG/pipx.txt" || true
-  record_output system/packages/pipx.txt
+    print("%s==%s" % (pkg["package"], pkg["package_version"]))' > "$OBS/pipx.txt" || true
+  record_output system/packages/observed/pipx.txt
 fi
 
 echo "-- pip freezes (4 environments)"
 # Prefer a host Python with pip (PATH may put a bare venv without pip first).
+: > "$OBS/requirements/workspace-local.txt"
 FREEZE_PY="${CSR_FREEZE_PYTHON:-}"
 if [[ -z "$FREEZE_PY" ]]; then
   for candidate in /usr/bin/python3.12 /usr/bin/python3.11 /usr/bin/python3 python3; do
@@ -47,28 +49,28 @@ if [[ -z "$FREEZE_PY" ]]; then
 fi
 if [[ -n "$FREEZE_PY" ]]; then
   PYV=$("$FREEZE_PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])')
-  echo "python $PYV" > "$PKG/requirements/PYTHON_VERSION"
-  record_output system/packages/requirements/PYTHON_VERSION
+  echo "python $PYV" > "$OBS/requirements/PYTHON_VERSION"
+  record_output system/packages/observed/requirements/PYTHON_VERSION
   "$FREEZE_PY" -m pip freeze --path "$HOME/.openclaw/workspace/.local" \
-    > "$PKG/requirements/workspace-local.txt" 2>/dev/null \
+    > "$OBS/requirements/workspace-local.txt" 2>/dev/null \
     || echo "WARN: workspace-local freeze failed"
 else
   echo "WARN: no Python with pip found for freezes" >&2
 fi
-record_output system/packages/requirements/workspace-local.txt
+record_output system/packages/observed/requirements/workspace-local.txt
 if [ -x "$HOME/.venvs/bin/pip" ]; then
-  "$HOME/.venvs/bin/pip" freeze > "$PKG/requirements/venvs.txt" 2>/dev/null || true
-  record_output system/packages/requirements/venvs.txt
+  "$HOME/.venvs/bin/pip" freeze > "$OBS/requirements/venvs.txt" 2>/dev/null || true
+  record_output system/packages/observed/requirements/venvs.txt
 fi
 if [ -x "$HOME/.local/share/docling-venv/bin/pip" ]; then
   "$HOME/.local/share/docling-venv/bin/pip" freeze \
-    > "$PKG/requirements/docling-venv.txt" 2>/dev/null || true
-  record_output system/packages/requirements/docling-venv.txt
+    > "$OBS/requirements/docling-venv.txt" 2>/dev/null || true
+  record_output system/packages/observed/requirements/docling-venv.txt
 fi
 LE="$HOME/.codex/runtime/workspace/.venvs/lean-explore/bin/pip"
 if [ -x "$LE" ]; then
-  "$LE" freeze > "$PKG/requirements/lean-explore.txt" 2>/dev/null || true
-  record_output system/packages/requirements/lean-explore.txt
+  "$LE" freeze > "$OBS/requirements/lean-explore.txt" 2>/dev/null || true
+  record_output system/packages/observed/requirements/lean-explore.txt
 fi
 
 echo "-- crontab template"
@@ -102,11 +104,10 @@ if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
   done < "$PKG/docker-images.txt"
 fi
 
-echo "-- component drift"
-# SHA-pinned components: if the live checkout at ~/<name> has moved past the
-# pin AND its HEAD is pushed to origin, bump the pin in components.lock so a
-# restore reproduces the current system. Unpushed or dirty HEADs only warn.
-COMPONENTS_CHANGED=0
+echo "-- component drift (release locks are not changed)"
+# Backups capture observations but never promote a partial compatibility tuple.
+# Promotion occurs only after the complete OpenClaw/component/image candidate
+# passes the architecture and runtime gates.
 while IFS='=' read -r name rest; do
   [[ -z "$name" || "$name" == \#* ]] && continue
   ref="${rest##*@}"
@@ -118,9 +119,7 @@ while IFS='=' read -r name rest; do
       [[ "$dirty" -gt 0 ]] && echo "WARN: component $name has $dirty uncommitted changes at $path"
       if [[ -n "$head" && "$head" != "$ref" ]]; then
         if [[ -n "$(git -C "$path" branch -r --contains "$head" 2>/dev/null)" ]]; then
-          sed -i "s|^$name=\(.*\)@$ref\$|$name=\1@$head|" "$REPO/components.lock"
-          COMPONENTS_CHANGED=1
-          echo "pin-bump: $name ${ref:0:9} -> ${head:0:9}"
+          echo "DRIFT: component $name pushed HEAD ${head:0:9} differs from release pin ${ref:0:9}"
         else
           echo "WARN: component $name HEAD ${head:0:9} is ahead of pin ${ref:0:9} but NOT pushed — pin left unchanged"
         fi
@@ -137,9 +136,8 @@ while IFS='=' read -r name rest; do
     fi
   fi
 done < "$REPO/components.lock"
-if [[ "$COMPONENTS_CHANGED" -eq 1 ]]; then
-  record_output components.lock
-fi
+"$REPO/bin/check-closure-drift.py" --output "$OBS/closure-drift.json"
+record_output system/packages/observed/closure-drift.json
 /usr/bin/python3 -I -B "$REPO/bin/lib/write_output_records.py" \
   --repo "$REPO" --ledger "$REFRESH_LEDGER" --output "$REFRESH_RECORDS"
 echo "refresh-state: done"

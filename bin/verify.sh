@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
-# Post-install health checks. DEGRADED=1 relaxes secret-dependent checks.
-# --smoke runs only the quick CLI version checks.
+# Post-install checks with an explicit profile. Full is fail-closed and proves
+# the effective OpenClaw runtime; ci records exactly which live checks are absent.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG="$REPO/system/packages"
-SMOKE_ONLY=0; [[ "${1:-}" == "--smoke" ]] && SMOKE_ONLY=1
+PROFILE="full"
+if [[ "${1:-}" == "--smoke" ]]; then
+  PROFILE="smoke"
+elif [[ "${1:-}" == "--profile" && -n "${2:-}" ]]; then
+  PROFILE="$2"
+fi
+case "$PROFILE" in full|ci|smoke) ;; *) echo "usage: $0 [--smoke|--profile full|ci]" >&2; exit 2;; esac
+SMOKE_ONLY=0; [[ "$PROFILE" == "smoke" ]] && SMOKE_ONLY=1
+DEGRADED=0; [[ "$PROFILE" == "ci" ]] && DEGRADED=1
 PASS=0; FAILN=0; SKIP=0
 ok()   { printf 'OK    %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf 'FAIL  %s\n' "$1"; FAILN=$((FAILN+1)); }
 skp()  { printf 'SKIP  %s\n' "$1"; SKIP=$((SKIP+1)); }
 
 # --- environment probes ----------------------------------------------------------
-# The live arm64 host has a user systemd session, cron, restored secrets, and the npm
-# global bin on PATH (via login shells). The Codespaces/CI replica has none of these.
-# Detect them so the SAME `make verify` is clean in the replica yet still runs full
-# checks on the host. An explicit DEGRADED=1 is always honored.
+# The live host has a user systemd session, cron, restored secrets, and the npm
+# global bin on PATH. CI limitations are declared by --profile ci, never inferred.
 # /run/systemd/system exists iff systemd is the init (this is how sd_booted() works).
 # `systemctl --user` returns 0 even in containers where systemd is NOT running, so it is
 # not a usable probe — check the directory instead.
@@ -24,9 +30,6 @@ have_cron()         { pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null
 for d in "$(npm config get prefix 2>/dev/null)/bin" "$HOME/.npm-global/bin"; do
   [[ -d "$d" ]] && case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH";; esac
 done
-# no user systemd session ⇒ this is the non-live replica (also implies degraded)
-DEGRADED="${DEGRADED:-0}"; have_user_systemd || DEGRADED=1
-
 echo "--- agent CLI versions vs pins ---"
 declare -A BIN=( ["@anthropic-ai/claude-code"]="claude" ["@github/copilot"]="copilot"
                  ["@openai/codex"]="codex" ["codewhale"]="codewhale"
@@ -92,11 +95,11 @@ echo "--- skill smokes ---"
 if [[ "${DEGRADED:-0}" == "1" ]]; then
   skp "zotero doctor / digest / sage (degraded)"
 else
-  if [[ -x "$HOME/.claude/skills/_run.sh" ]]; then
-    timeout 120 bash "$HOME/.claude/skills/_run.sh" skills/zotero/run_zot.sh doctor >/dev/null 2>&1 \
+  if [[ -x "$HOME/.openclaw/workspace/skills/zotero/run_zot.sh" ]]; then
+    timeout 120 bash "$HOME/.openclaw/workspace/skills/zotero/run_zot.sh" doctor >/dev/null 2>&1 \
       && ok "zotero doctor" || bad "zotero doctor"
   else
-    bad "~/.claude/skills/_run.sh missing"
+    bad "OpenClaw Zotero runtime missing"
   fi
   if [[ "$(uname -m)" == "aarch64" ]] && command -v docker >/dev/null; then
     timeout 180 "$HOME/.local/bin/sage" -c 'print(2**10)' 2>/dev/null | grep -q 1024 \
@@ -152,6 +155,16 @@ for c in openclaw-bot ai-agents-skills; do
     [[ -d "$REPO/external/$c/.git" ]] && ok "component present: external/$c" || skp "component absent: external/$c (run make components)"
   fi
 done
+
+echo "--- OpenClaw effective runtime closure ($PROFILE) ---"
+if [[ "$PROFILE" != "smoke" ]]; then
+  if python3 "$REPO/bin/verify-openclaw-runtime.py" --profile "$PROFILE" \
+      --output "$REPO/.staging/openclaw-runtime-verification.json"; then
+    ok "OpenClaw effective runtime closure ($PROFILE)"
+  else
+    bad "OpenClaw effective runtime closure ($PROFILE)"
+  fi
+fi
 
 echo
 echo "verify: $PASS ok, $FAILN fail, $SKIP skipped"

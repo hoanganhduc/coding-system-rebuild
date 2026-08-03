@@ -16,6 +16,21 @@ The weekly cron (`bin/auto-backup.sh`, Mon 05:26 UTC) runs the same capture
 unattended, plus the owner-data snapshot and the passphrase-escrow ensure; it
 commits locally but does **not** publish unless `CSR_AUTO_PUSH=1` is set.
 
+### Release locks versus observed updates
+
+Backup and release promotion are intentionally separate. A routine backup
+captures installed npm/pip inventories under `system/packages/observed/` and
+runs `bin/check-closure-drift.py`, but it never rewrites restoration locks.
+`components.lock`, the OpenClaw compatibility lock, plugin integrity records,
+and the sandbox image digest remain the last fully tested release tuple.
+
+Use `make closure-drift` to compare that tuple with the live host and current
+upstream heads. An update is promoted only as a complete candidate after exact
+OpenClaw/component/plugin tests, native amd64 and arm64 image builds, the
+read-only sandbox contract, and a restoration rehearsal pass. This prevents a
+normal backup from advancing one component while leaving its config schema or
+sandbox image behind.
+
 The off-machine copy is automatic: `make backup` uploads the new AES-256 zip
 to `dropbox:Misc/coding-system-backups` via rclone (ciphertext only;
 `CSR_NO_OFFSITE=1` skips). Extra copies on an encrypted USB or another cloud
@@ -55,7 +70,13 @@ phase 8 publishes the raw pinned blobs under the stable root-owned SHA path and
 installs from there to the runtime root. The `_run.sh` shim forwards the documented
 call to it. Only its
 **per-install config** (`research-compute.toml`, with the `[gha]` repo targets — no tokens)
-rides the secrets zip. After a restore without the zip, run the broker's `bootstrap` once to
+rides the secrets zip. Secret restore also derives
+`~/.openclaw/workspace/config/research-compute.toml` from that authoritative
+copy and rewrites only `broker_state_root` to the sandbox-writable workspace
+data tree. The same materialization step copies each restored
+`.config/getscipapers/<service>/credentials.json` into the narrow
+workspace-visible `secrets/getscipapers/` view with mode `0600`; it does not log
+credential contents. After a restore without the zip, run the broker's `bootstrap` once to
 regenerate config and authenticate `gh`. See
 [github-actions-experiment-runner-plan.md](github-actions-experiment-runner-plan.md).
 
@@ -63,14 +84,17 @@ regenerate config and authenticate `gh`. See
 
 This repo's zip carries OpenClaw **secrets/config only**. Research data,
 sessions, memory, and the workspace git history are the domain of
-`openclaw-bot/backup.sh` (GPG tar.gz, ~600MB–1GB). Since 2026-07-03 the weekly
+`openclaw-bot/backup.sh` (GPG tar.gz). Since 2026-07-03 the weekly
 `bin/auto-backup.sh` cron runs it automatically after a successful `make
 backup`: age-gated (at most one snapshot per 6 days), guarded by a 5GB
 free-disk check, refreshed via `make components` so the pinned copy is
 current, encrypted non-interactively with the same passphrase file as the zip
 (`~/.config/coding-system/zip-password.txt`, via
 `OPENCLAW_BACKUP_PASSPHRASE_FILE`), verified by decrypt+list, and pruned to
-the newest 2 archives under `~/openclaw-backups/`. Manual run:
+the newest 2 archives under `~/openclaw-backups/`. Each new encrypted owner
+snapshot is also uploaded to
+`dropbox:Misc/coding-system-backups/openclaw-owner`; that offsite location keeps
+the newest two plus one snapshot per older month. Manual run:
 
 ```bash
 OPENCLAW_BACKUP_PASSPHRASE_FILE=~/.config/coding-system/zip-password.txt \
@@ -83,11 +107,25 @@ Machine-loss recovery of the passphrase itself: fetch any two escrow shares
 `bin/escrow-passphrase.sh recover <share> <share>` — proven by a live
 disaster drill on 2026-07-03.
 
-Restore a snapshot with `gpg --decrypt <archive> | tar -xzf - -C ~/.openclaw`
-(prompted, or batch with the same passphrase-file mechanism). Archives created
+Restore a snapshot through the bounded allowlist validator:
+
+```bash
+OPENCLAW_BACKUP_PASSPHRASE_FILE=~/.config/coding-system/zip-password.txt \
+  make restore-owner-data OWNER_DATA=/path/openclaw-private-<stamp>.tar.gz.gpg
+```
+
+For a complete install, pass the same archive as `OWNER_DATA=/path/...`.
+`REQUIRE_OWNER_DATA=1` makes its absence fatal; otherwise the installer
+explicitly creates a fresh owner-state baseline. Archives created
 before 2026-07-03 used an interactively entered password and the older
 `*-openclaw-backup.tar.gz` naming; the current chain is
 `openclaw-private-<stamp>.tar.gz.gpg`.
+
+Current archives are link-free, member-count and expanded-size bounded, and
+validated against the owner-data allowlist before extraction. Runtime symlinks,
+dependency trees, and other derived state are recreated by the installer. A
+fresh owner baseline should be created and uploaded immediately after any
+restore when no historical owner archive is available.
 
 ## Optional: restoring the DeepSeek plugin in OpenClaw (decision 10)
 

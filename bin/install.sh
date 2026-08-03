@@ -19,6 +19,18 @@ DEGRADED_MODE=0
 [[ -z "${SECRETS:-}" ]] && DEGRADED_MODE=1
 export DEGRADED_MODE
 
+if [[ -z "${OWNER_DATA:-}" ]]; then
+  OWNER_DATA="$(ls -1t "$HOME"/openclaw-backups/openclaw-private-*.tar.gz.gpg 2>/dev/null | head -1 || true)"
+fi
+if [[ -n "$OWNER_DATA" && ! -f "$OWNER_DATA" ]]; then
+  echo "ERROR: OWNER_DATA archive not found: $OWNER_DATA" >&2
+  exit 2
+fi
+if [[ -z "$OWNER_DATA" && "${REQUIRE_OWNER_DATA:-0}" == "1" ]]; then
+  echo "ERROR: REQUIRE_OWNER_DATA=1 but no OWNER_DATA archive is available" >&2
+  exit 2
+fi
+
 phase() { echo; echo "########## PHASE $1: $2 ##########"; }
 gate()  { echo "---- gate: $1"; }
 skip_enabled() { [[ "${!1:-0}" == "1" ]]; }
@@ -367,8 +379,23 @@ if (( START <= 7 )); then
   phase 7 "OpenClaw slice via openclaw-bot"
   python3 "$REPO/bin/lib/bridge_vnu_eoffice_secrets.py"
   if [[ -x "$REPO/external/openclaw-bot/install.sh" ]]; then
+    # Owner state is the older overlay. Restore it first, then converge the
+    # tested public component and exact plugin generation on top so an archive
+    # can never roll runnable skill code or package locks backward.
+    if [[ -n "$OWNER_DATA" ]]; then
+      OPENCLAW_BACKUP_PASSPHRASE_FILE="${OPENCLAW_BACKUP_PASSPHRASE_FILE:-$HOME/.config/coding-system/zip-password.txt}" \
+        bash "$REPO/bin/restore-openclaw-owner-data.sh" "$OWNER_DATA"
+    else
+      echo "NOTICE: no owner-data archive; continuing with an explicit fresh owner-state baseline"
+    fi
     SHA_BEFORE=$(sha256sum "$HOME/.openclaw/secrets.json" 2>/dev/null | cut -d' ' -f1 || true)
-    bash "$REPO/external/openclaw-bot/install.sh" --prefix "$HOME/.openclaw" --skip-docker --skip-services --skip-config
+    bash "$REPO/external/openclaw-bot/install.sh" \
+      --prefix "$HOME/.openclaw" \
+      --skip-docker \
+      --skip-services \
+      --skip-config \
+      --skip-openclaw-install \
+      --convergent
     # the "don't clobber restored secrets" gate only applies when secrets were
     # actually restored (non-degraded); in degraded mode there is no live
     # secrets.json to protect and the component renders one from its template.
@@ -377,11 +404,26 @@ if (( START <= 7 )); then
       SHA_AFTER=$(sha256sum "$HOME/.openclaw/secrets.json" 2>/dev/null | cut -d' ' -f1 || true)
       [[ "$SHA_BEFORE" == "$SHA_AFTER" ]] || { echo "FAIL: openclaw-bot install clobbered restored secrets.json"; exit 2; }
     fi
-    if [[ -d "$HOME/.openclaw/npm/projects" ]]; then
-      for p in "$HOME/.openclaw/npm/projects"/*/; do
-        [[ -f "$p/package.json" ]] && (cd "$p" && npm install --silent || echo "WARN: npm install failed in $p")
-      done
-    fi
+    [[ -d "$HOME/.openclaw/npm/projects" ]] \
+      || { echo "FAIL: required OpenClaw npm project closure is missing"; exit 2; }
+    for p in "$HOME/.openclaw/npm/projects"/*/; do
+      [[ -f "$p/package.json" && -f "$p/package-lock.json" ]] \
+        || { echo "FAIL: required npm project has no package.json/package-lock.json: $p"; exit 2; }
+      (cd "$p" && npm ci --ignore-scripts --omit=dev --silent)
+    done
+    while IFS= read -r plugin_spec; do
+      [[ -n "$plugin_spec" ]] || continue
+      openclaw plugins install --pin --force "$plugin_spec" >/dev/null
+    done < <(python3 -c \
+      'import json,sys; print(*json.load(open(sys.argv[1]))["required_plugin_packages"], sep="\n")' \
+      "$REPO/system/openclaw/skill-closure.json")
+    openclaw plugins doctor >/dev/null
+    python3 "$REPO/bin/migrate-openclaw-config.py" \
+      --config "$HOME/.openclaw/openclaw.json" \
+      --lock "$REPO/system/openclaw/compatibility.lock.json"
+    openclaw config validate >/dev/null
+    openclaw exec-policy set --host sandbox --security allowlist \
+      --ask on-miss --ask-fallback deny --json >/dev/null
     gate "openclaw config has no dangling openclaw-src references"
     grep -q 'openclaw-src' "$HOME/.openclaw/openclaw.json" 2>/dev/null && { echo "FAIL: openclaw.json references openclaw-src"; exit 2; } || true
   else
@@ -623,21 +665,37 @@ sys.stdout.buffer.flush()
   (
     cd "$AAS_IMMUTABLE"
     /usr/bin/env -i "${AAS_CLOSED_ENV[@]}" AAS_INSTALL_CONFIRM="$AAS_PHRASE" \
-      /bin/sh "$AAS_IMMUTABLE/installer/bootstrap.sh" install \
+      /bin/sh "$AAS_IMMUTABLE/installer/bootstrap.sh" --root "$HOME" install \
         --skills modal-research-compute --runtime-profile auto \
         --apply --real-system --backup-replace
   )
   echo 'CSR_GATE_JSON {"case_id":"install.phase8.aas-install","schema_version":1,"status":"passed"}'
   (
     cd "$AAS_IMMUTABLE"
+    /usr/bin/env -i "${AAS_CLOSED_ENV[@]}" AAS_INSTALL_CONFIRM="$AAS_PHRASE" \
+      /bin/sh "$AAS_IMMUTABLE/installer/bootstrap.sh" \
+        --root "$HOME" --agents codex install \
+        --no-skills --runtime-profile full \
+        --runtime-root "$HOME/.codex/runtime" \
+        --apply --real-system --backup-replace
+  )
+  [[ -x "$HOME/.codex/runtime/run_skill.sh" ]] \
+    || { echo "FAIL: Codex runtime runner was not installed"; exit 2; }
+  echo 'CSR_GATE_JSON {"case_id":"install.phase8.codex-runtime","schema_version":1,"status":"passed"}'
+  (
+    cd "$AAS_IMMUTABLE"
     /usr/bin/env -i "${AAS_CLOSED_ENV[@]}" \
-      /bin/sh "$AAS_IMMUTABLE/installer/bootstrap.sh" verify
+      /bin/sh "$AAS_IMMUTABLE/installer/bootstrap.sh" --root "$HOME" verify
+    /usr/bin/env -i "${AAS_CLOSED_ENV[@]}" \
+      /bin/sh "$AAS_IMMUTABLE/installer/bootstrap.sh" \
+        --root "$HOME" --agents codex verify
   )
   echo 'CSR_GATE_JSON {"case_id":"install.phase8.aas-verify","schema_version":1,"status":"passed"}'
   phase 8b "re-overlay zip secrets (idempotent re-extract) + clobber checks"
   if [[ $DEGRADED_MODE -eq 0 ]]; then
     SECRETS="$SECRETS" bash "$REPO/bin/secrets-restore.sh"
   fi
+  bash "$REPO/bin/materialize-openclaw-runtime.sh"
   gate "_run.sh intact"
   if [[ -f "$HOME/.config/coding-system/run_sh.sha256" && -f "$HOME/.claude/skills/_run.sh" ]]; then
     want=$(cat "$HOME/.config/coding-system/run_sh.sha256")
@@ -651,22 +709,49 @@ if (( START <= 9 )); then
   phase 9 "python environments from pip freezes"
   RQ="$REPO/system/packages/requirements"
   mkdir -p "$HOME/.openclaw/workspace/.local"
-  [[ -s "$RQ/workspace-local.txt" ]] && python3 -m pip install -q --target "$HOME/.openclaw/workspace/.local" -r "$RQ/workspace-local.txt" || true
+  if [[ -s "$RQ/workspace-local.txt" ]]; then
+    python3 -m pip install -q --target "$HOME/.openclaw/workspace/.local" -r "$RQ/workspace-local.txt"
+  fi
   if [[ -s "$RQ/venvs.txt" ]]; then
     [[ -d "$HOME/.venvs" ]] || python3 -m venv "$HOME/.venvs"
-    "$HOME/.venvs/bin/pip" install -q -r "$RQ/venvs.txt" || true
+    "$HOME/.venvs/bin/pip" install -q -r "$RQ/venvs.txt"
   fi
   if [[ -s "$RQ/docling-venv.txt" ]]; then
     [[ -d "$HOME/.local/share/docling-venv" ]] || python3 -m venv "$HOME/.local/share/docling-venv"
-    "$HOME/.local/share/docling-venv/bin/pip" install -q -r "$RQ/docling-venv.txt" || true
+    "$HOME/.local/share/docling-venv/bin/pip" install -q -r "$RQ/docling-venv.txt"
   fi
   if [[ -s "$RQ/lean-explore.txt" ]]; then
     LV="$HOME/.codex/runtime/workspace/.venvs/lean-explore"
     [[ -d "$LV" ]] || python3 -m venv "$LV"
-    "$LV/bin/pip" install -q -r "$RQ/lean-explore.txt" || true
+    "$LV/bin/pip" install -q -r "$RQ/lean-explore.txt"
+  fi
+  if [[ -s "$RQ/getscipapers.txt" ]]; then
+    GSP_VENV="$HOME/.openclaw/workspace/.local/venv_getscipapers"
+    [[ -x "$GSP_VENV/bin/python" ]] || python3 -m venv "$GSP_VENV"
+    "$GSP_VENV/bin/pip" install -q -r "$RQ/getscipapers.txt"
+    "$GSP_VENV/bin/python" "$GSP_VENV/bin/getscipapers" --help >/dev/null
   fi
   gate "import smoke"
-  PYTHONPATH="$HOME/.openclaw/workspace/.local" python3 -c 'import requests' || { echo "FAIL: workspace-local imports broken"; exit 2; }
+  PYTHONPATH="$HOME/.openclaw/workspace/.local" python3 -c \
+    'import requests, modal, googleapiclient, ebooklib' \
+    || { echo "FAIL: workspace-local imports broken"; exit 2; }
+  if [[ $DEGRADED_MODE -eq 0 ]]; then
+    gate "bounded Calibre metadata bootstrap"
+    /usr/bin/timeout --signal=TERM --kill-after=15s 180s \
+      bash "$HOME/.openclaw/workspace/skills/calibre/run_cal.sh" sync --force
+    python3 - "$HOME/.openclaw/workspace/data/calibre/cache/metadata.db" <<'PY'
+import sqlite3
+import sys
+path = sys.argv[1]
+connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+try:
+    if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
+        raise SystemExit("Calibre metadata.db failed post-bootstrap quick_check")
+    connection.execute("SELECT 1 FROM books LIMIT 1").fetchone()
+finally:
+    connection.close()
+PY
+  fi
 fi
 
 # 10 ─ docker images (already handled by prepare; re-check)
@@ -686,6 +771,16 @@ if (( START <= 10 )); then
       docker image inspect "$img" >/dev/null 2>&1 || { echo "FAIL: docker image missing: $img"; exit 2; }
     done < "$REPO/system/packages/docker-images.txt"
   fi
+fi
+
+gate "OpenClaw compatibility tuple before service startup"
+if [[ $DEGRADED_MODE -eq 1 ]]; then
+  python3 "$REPO/bin/verify-openclaw-compat.py" --static-only
+elif skip_enabled SKIP_DOCKER || skip_enabled SKIP_DOCKER_IMAGES; then
+  echo "FAIL: a full restore cannot skip the locked OpenClaw sandbox image" >&2
+  exit 2
+else
+  python3 "$REPO/bin/verify-openclaw-compat.py"
 fi
 
 # 11 ─ services + cron
@@ -715,7 +810,15 @@ if (( START <= 11 )); then
   if [[ "${CSR_NO_GATEWAY:-0}" == "1" ]]; then
     echo "(CSR_NO_GATEWAY=1: services rendered, gateway NOT started — start it manually for a live demo)"
   elif [[ $DEGRADED_MODE -eq 0 ]]; then
-    systemctl --user start openclaw-gateway 2>/dev/null || echo "WARN: gateway did not start (check journalctl --user -u openclaw-gateway)"
+    systemctl --user restart openclaw-gateway \
+      || { echo "FAIL: gateway restart failed (check journalctl --user -u openclaw-gateway)" >&2; exit 2; }
+    ready=0
+    for _ in $(seq 1 60); do
+      if openclaw health --json >/dev/null 2>&1; then ready=1; break; fi
+      sleep 1
+    done
+    [[ "$ready" -eq 1 ]] || { echo "FAIL: gateway did not become healthy within 60 seconds" >&2; exit 2; }
+    openclaw sandbox recreate --all --force >/dev/null
   else
     echo "(degraded: services rendered + enable-states applied, nothing started)"
   fi
@@ -744,7 +847,11 @@ Post-install manual verifications (see docs/TROUBLESHOOTING.md):
   * Zulip stays disabled by default; re-enable runbook is in TROUBLESHOOTING.
   * Zalo net.js shim: only if gateway logs show the missing-module error.
 EONOTE
-  DEGRADED="$DEGRADED_MODE" bash "$REPO/bin/verify.sh"
+  if [[ $DEGRADED_MODE -eq 1 ]]; then
+    bash "$REPO/bin/verify.sh" --profile ci
+  else
+    bash "$REPO/bin/verify.sh" --profile full
+  fi
   if [[ $DEGRADED_MODE -eq 1 ]]; then
     echo; echo "*** install finished in DEGRADED MODE — missing features: ***"
     bash "$REPO/bin/secrets-verify.sh" --degraded || true

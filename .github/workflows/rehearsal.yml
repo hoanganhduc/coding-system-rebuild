@@ -23,6 +23,26 @@ permissions:
   contents: read
 
 jobs:
+  # Observational only: updates are promoted as a complete tested tuple in a
+  # separate release change. Upstream drift must never rewrite restore locks.
+  closure-drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Observe release drift
+        run: python3 bin/check-closure-drift.py --upstream | tee closure-drift.json
+      - name: Summary
+        run: |
+          {
+            echo '## OpenClaw closure drift (observation only)'
+            echo 'No restoration lock was changed.'
+            echo '```json'
+            cat closure-drift.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ---------------------------------------------------------------- no secrets
   rehearsal-core:
     runs-on: ubuntu-24.04
@@ -611,6 +631,7 @@ jobs:
               "install.phase6.grok-status",
               "install.phase8.aas-pin",
               "install.phase8.aas-install",
+              "install.phase8.codex-runtime",
               "install.phase8.aas-verify",
           }
           missing = sorted(expected - set(records))

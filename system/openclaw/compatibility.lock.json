@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "supported_hosts": [
+    "ubuntu-24.04/linux-amd64",
+    "ubuntu-24.04/linux-arm64"
+  ],
+  "openclaw": {
+    "version": "2026.7.1-2",
+    "npm_integrity": "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==",
+    "config_contract": "openclaw-2026.7.1",
+    "config_schema_sha256": "aee8189ff1156a1a9b7b9c884c5960c2d033276a0ef2e938c6109204d3e35cef"
+  },
+  "component": {
+    "name": "openclaw-bot",
+    "commit": "c3c1f09ab19599d663b55942610b5674485ac40d",
+    "config_template_sha256": "8cfeffa6e016d9b31f1f09d1caa919e1ffb69e3afb6fa2e94273e61515a01700"
+  },
+  "skill_closure_sha256": "acc92e31eeaa49616013594990fd3986e59a9b5826b4ccdfc63c82844d32d609",
+  "sandbox": {
+    "image": "ghcr.io/hoanganhduc/coding-system-rebuild-openclaw-sandbox@sha256:f868c49205a1bad3edfbb6a92e1b184f0ab9f7bfe66d11a939d611f081a1f030",
+    "index_digest": "sha256:f868c49205a1bad3edfbb6a92e1b184f0ab9f7bfe66d11a939d611f081a1f030",
+    "platform_digests": {
+      "linux/amd64": "sha256:e4c4d8e87f2b11be1cf7811acc5943e6841da5dec66396f3bb801fe2feb1a1d8",
+      "linux/arm64": "sha256:4a91f89348046a589018fc66c1b5905956d9e13130981fc82bf94026ec277b2a"
+    }
+  }
+}

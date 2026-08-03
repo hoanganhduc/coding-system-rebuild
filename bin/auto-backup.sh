@@ -55,6 +55,13 @@ notify_fail() {
       elif OPENCLAW_BACKUP_PASSPHRASE_FILE="$PWFILE" \
            bash "$REPO/external/openclaw-bot/backup.sh" --output "$SNAP_DIR" --verify; then
         echo "data-snapshot OK"
+        NEWEST="$(ls -1t "$SNAP_DIR"/openclaw-private-*.tar.gz.gpg | head -1)"
+        if bash "$REPO/bin/offsite-owner-sync.sh" "$NEWEST"; then
+          echo "data-snapshot offsite OK"
+        else
+          echo "data-snapshot offsite FAILED"
+          notify_fail
+        fi
         ls -1t "$SNAP_DIR"/openclaw-private-*.tar.gz.gpg 2>/dev/null | tail -n +3 | xargs -r rm -f
       else
         echo "data-snapshot FAILED"
