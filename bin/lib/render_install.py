@@ -111,10 +111,9 @@ def install_file(src, dst, home, report, skip_if_exists=False,
         rendered = text.replace("{{ HOME }}", home)
         if os.path.exists(dst):
             try:
-                with open(dst, "r", errors="surrogateescape") as fh:
-                    if fh.read() == rendered:
-                        report["installed"] += 1
-                        return
+                if read(dst) == rendered:
+                    report["installed"] += 1
+                    return
             except UnicodeError:
                 pass
             if overwrite_existing:
