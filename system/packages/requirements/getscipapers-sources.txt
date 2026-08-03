@@ -1,0 +1,2 @@
+git+https://github.com/hoanganhduc/getscipapers.git@59a3da24bfbf7c5a5c59d19b0a6d4beeea22daef
+git+https://github.com/fabiobatalha/crossrefapi.git@bce414d32fb8ccc394fd859381d64bed544dc332

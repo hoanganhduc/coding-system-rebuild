@@ -1,0 +1,100 @@
+name: openclaw-sandbox
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/openclaw-sandbox.yml'
+      - 'system/docker/openclaw-sandbox/**'
+      - 'system/packages/requirements/getscipapers-*.txt'
+      - 'system/packages/requirements/workspace-local.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  IMAGE: ghcr.io/hoanganhduc/openclaw-sandbox
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            suffix: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and publish native candidate
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: system/docker/openclaw-sandbox/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: ${{ env.IMAGE }}:candidate-${{ github.sha }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=openclaw-sandbox-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=openclaw-sandbox-${{ matrix.suffix }}
+      - name: Verify candidate as non-root
+        run: |
+          docker run --rm \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 512 \
+            --memory 4g \
+            --memory-swap 4g \
+            --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=512m \
+            --tmpfs /var/tmp:rw,nosuid,nodev,noexec,size=64m \
+            --tmpfs /run:rw,nosuid,nodev,noexec,size=64m \
+            --tmpfs /workspace:rw,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=0700 \
+            "${IMAGE}:candidate-${GITHUB_SHA}-${{ matrix.suffix }}" \
+            verify-openclaw-sandbox
+
+  publish-index:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Publish tested multi-architecture index
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE}:sha-${GITHUB_SHA}" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}:candidate-${GITHUB_SHA}-amd64" \
+            "${IMAGE}:candidate-${GITHUB_SHA}-arm64"
+          docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}" \
+            --format '{{json .Manifest}}' > manifest.json
+          digest="$(docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}" \
+            --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "OPENCLAW_SANDBOX_DIGEST=$digest" >> "$GITHUB_ENV"
+          echo "Published ${IMAGE}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-sandbox-manifest
+          path: manifest.json
