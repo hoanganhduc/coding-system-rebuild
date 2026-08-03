@@ -17,7 +17,10 @@ permissions:
   attestations: write
 
 env:
-  IMAGE: ghcr.io/hoanganhduc/openclaw-sandbox
+  # The shorter package name predates this repository and does not grant this
+  # repository's GITHUB_TOKEN write access. This repository-owned package is
+  # created and published only by the native qualification workflow below.
+  IMAGE: ghcr.io/hoanganhduc/coding-system-rebuild-openclaw-sandbox
 
 jobs:
   build:
