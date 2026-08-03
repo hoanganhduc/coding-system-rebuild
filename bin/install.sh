@@ -398,7 +398,6 @@ if (( START <= 7 )); then
       --prefix "$HOME/.openclaw" \
       --skip-docker \
       --skip-services \
-      --skip-config \
       --skip-openclaw-install \
       --convergent
     # the "don't clobber restored secrets" gate only applies when secrets were
@@ -423,9 +422,12 @@ if (( START <= 7 )); then
       'import json,sys; print(*json.load(open(sys.argv[1]))["required_plugin_packages"], sep="\n")' \
       "$REPO/system/openclaw/skill-closure.json")
     openclaw plugins doctor >/dev/null
-    python3 "$REPO/bin/migrate-openclaw-config.py" \
-      --config "$HOME/.openclaw/openclaw.json" \
+    MIGRATE_ARGS=(
+      --config "$HOME/.openclaw/openclaw.json"
       --lock "$REPO/system/openclaw/compatibility.lock.json"
+    )
+    [[ $DEGRADED_MODE -eq 1 ]] && MIGRATE_ARGS+=(--degraded)
+    python3 "$REPO/bin/migrate-openclaw-config.py" "${MIGRATE_ARGS[@]}"
     openclaw config validate >/dev/null
     openclaw exec-policy set --host sandbox --security allowlist \
       --ask on-miss --ask-fallback deny --json >/dev/null

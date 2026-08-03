@@ -416,6 +416,88 @@ from that exact value, and rerun the Git-blob-bound compatibility verifier.
 
 ---
 
+## [ERR-20260803-082] fresh-install-skipped-required-openclaw-config
+
+**Logged**: 2026-08-03T12:50:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+After the user-command path was fixed, the fresh degraded rehearsal reached
+config migration and failed because phase 7 unconditionally invoked the
+component with `--skip-config`. A restored host already had `openclaw.json`,
+which had masked the missing fresh-state creation path.
+
+### Response
+
+Use the component's preserve-safe default config behavior: create the tested
+template only when config is absent, retain and validate an existing restored
+config, and keep existing secrets. The umbrella secret hash gate remains after
+component convergence, and a regression forbids reintroducing the unconditional
+skip.
+
+### Metadata
+
+- Reproducible: yes, fresh degraded home without `openclaw.json`
+- Related Files: `bin/install.sh`, `tests/test_install_closure.py`
+
+---
+
+## [ERR-20260803-083] chained-diagnostic-continued-after-validation-failure
+
+**Logged**: 2026-08-03T12:55:00Z
+**Priority**: medium
+**Status**: resolved
+
+### Summary
+
+The first isolated fresh-config diagnostic chained commands without enabling
+fail-fast shell behavior. `openclaw config validate` returned `127`, but the
+following unit test and unconditional success message still ran, creating a
+false-green diagnostic transcript.
+
+### Response
+
+Rerun multi-step gates under `set -euo pipefail`, use an explicit executable
+path, and only emit the success marker after every command returns zero. That
+strict rerun exposed the remaining sanitized-template schema failures.
+
+### Metadata
+
+- Reproducible: yes, shell command chains without `set -e`
+- Related Files: diagnostic command only
+
+---
+
+## [ERR-20260803-084] sanitized-public-config-was-not-schema-valid
+
+**Logged**: 2026-08-03T12:57:00Z
+**Priority**: high
+**Status**: resolved
+
+### Summary
+
+Creating the component config on a fresh degraded home exposed redaction
+placeholders in typed fields: booleans, integers, enum values, model IDs,
+credential references, and agent workspace access. JSON parsing passed, but
+OpenClaw schema validation correctly rejected the configuration.
+
+### Response
+
+Add an explicit degraded migration mode that removes unresolved placeholders,
+disables secret-backed channels, clears credential maps, chooses a safe
+syntactic model baseline, normalizes workspace access, and retains the exact
+plugin generation and sandbox policy. The real OpenClaw CLI now validates an
+isolated config derived from the complete public template.
+
+### Metadata
+
+- Reproducible: yes, fresh degraded home
+- Related Files: `bin/migrate-openclaw-config.py`, `bin/install.sh`, migration tests
+
+---
+
 ## [ERR-20260712-001] make-test-manifest-drift
 
 **Logged**: 2026-07-12T14:59:54Z

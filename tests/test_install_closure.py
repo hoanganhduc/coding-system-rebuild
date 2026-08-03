@@ -20,6 +20,10 @@ class InstallClosureTests(unittest.TestCase):
         self.assertIn("openclaw missing from the restored command path", source)
         self.assertIn("--skip-openclaw-install", source)
         self.assertIn("--convergent", source)
+        component_call = source.split(
+            'bash "$REPO/external/openclaw-bot/install.sh"', 1
+        )[1].split("# the \"don't clobber restored secrets\" gate", 1)[0]
+        self.assertNotIn("--skip-config", component_call)
         self.assertIn("npm ci --ignore-scripts --omit=dev", source)
         self.assertIn('openclaw plugins install --pin --force "$plugin_spec"', source)
         self.assertNotIn("npm install --silent || echo", source)
@@ -165,6 +169,52 @@ class InstallClosureTests(unittest.TestCase):
             self.assertNotIn("dangerouslyAllowExternalBindSources", worker_docker)
             self.assertEqual(worker_docker["binds"], [])
             self.assertEqual(migrated["agents"]["defaults"]["model"]["fallbacks"], ["strong"])
+
+    def test_degraded_migration_removes_placeholders_and_disables_channels(self) -> None:
+        lock = ROOT / "system/openclaw/compatibility.lock.json"
+        template = ROOT / "external/openclaw-bot/config/openclaw.json.template"
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            config = home / "openclaw.json"
+            rendered = (
+                template.read_text(encoding="utf-8")
+                .replace("{{ OPENCLAW_HOME }}", str(home / ".openclaw"))
+                .replace("{{ OPENCLAW_WORKSPACE }}", str(home / ".openclaw/workspace"))
+                .replace("{{ USER_HOME }}", str(home))
+                .replace(
+                    "{{ WRITING_STYLE_FILE }}",
+                    str(home / ".openclaw/workspace/data/writing-style.md"),
+                )
+                .replace(
+                    "{{ PRIVATE_DATA_DIR }}", str(home / ".openclaw/workspace/data")
+                )
+            )
+            config.write_text(rendered, encoding="utf-8")
+
+            subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "bin/migrate-openclaw-config.py"),
+                    "--config",
+                    str(config),
+                    "--lock",
+                    str(lock),
+                    "--degraded",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            migrated = json.loads(config.read_text(encoding="utf-8"))
+            self.assertNotIn("{{", json.dumps(migrated))
+            self.assertEqual(migrated["gateway"]["auth"]["mode"], "none")
+            self.assertFalse(migrated["browser"]["ssrfPolicy"]["dangerouslyAllowPrivateNetwork"])
+            self.assertTrue(
+                all(not channel["enabled"] for channel in migrated["channels"].values())
+            )
+            self.assertEqual(
+                migrated["agents"]["defaults"]["model"]["primary"],
+                "openrouter/auto",
+            )
 
 
 if __name__ == "__main__":
