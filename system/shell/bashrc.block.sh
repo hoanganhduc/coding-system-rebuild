@@ -1,0 +1,223 @@
+# ~/.bashrc: executed by bash(1) for non-login shells.
+# see /usr/share/doc/bash/examples/startup-files (in the package bash-doc)
+# for examples
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# don't put duplicate lines or lines starting with space in the history.
+# See bash(1) for more options
+HISTCONTROL=ignoreboth
+
+# append to the history file, don't overwrite it
+shopt -s histappend
+
+# for setting history length see HISTSIZE and HISTFILESIZE in bash(1)
+HISTSIZE=1000
+HISTFILESIZE=2000
+
+# check the window size after each command and, if necessary,
+# update the values of LINES and COLUMNS.
+shopt -s checkwinsize
+
+# If set, the pattern "**" used in a pathname expansion context will
+# match all files and zero or more directories and subdirectories.
+#shopt -s globstar
+
+# make less more friendly for non-text input files, see lesspipe(1)
+[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"
+
+# set variable identifying the chroot you work in (used in the prompt below)
+if [ -z "${debian_chroot:-}" ] && [ -r /etc/debian_chroot ]; then
+    debian_chroot=$(cat /etc/debian_chroot)
+fi
+
+# set a fancy prompt (non-color, unless we know we "want" color)
+case "$TERM" in
+    xterm-color|*-256color) color_prompt=yes;;
+esac
+
+# uncomment for a colored prompt, if the terminal has the capability; turned
+# off by default to not distract the user: the focus in a terminal window
+# should be on the output of commands, not on the prompt
+#force_color_prompt=yes
+
+if [ -n "$force_color_prompt" ]; then
+    if [ -x /usr/bin/tput ] && tput setaf 1 >&/dev/null; then
+	# We have color support; assume it's compliant with Ecma-48
+	# (ISO/IEC-6429). (Lack of such support is extremely rare, and such
+	# a case would tend to support setf rather than setaf.)
+	color_prompt=yes
+    else
+	color_prompt=
+    fi
+fi
+
+if [ "$color_prompt" = yes ]; then
+    PS1='${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+else
+    PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '
+fi
+unset color_prompt force_color_prompt
+
+# If this is an xterm set the title to user@host:dir
+case "$TERM" in
+xterm*|rxvt*)
+    PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
+    ;;
+*)
+    ;;
+esac
+
+# enable color support of ls and also add handy aliases
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    #alias dir='dir --color=auto'
+    #alias vdir='vdir --color=auto'
+
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
+fi
+
+# colored GCC warnings and errors
+#export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
+
+# some more ls aliases
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+
+# Add an "alert" alias for long running commands.  Use like so:
+#   sleep 10; alert
+alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo error)" "$(history|tail -n1|sed -e '\''s/^\s*[0-9]\+\s*//;s/[;&|]\s*alert$//'\'')"'
+
+# Alias definitions.
+# You may want to put all your additions into a separate file like
+# ~/.bash_aliases, instead of adding them here directly.
+# See /usr/share/doc/bash-doc/examples in the bash-doc package.
+
+if [ -f ~/.bash_aliases ]; then
+    . ~/.bash_aliases
+fi
+
+# enable programmable completion features (you don't need to enable
+# this, if it's already enabled in /etc/bash.bashrc and /etc/profile
+# sources /etc/bash.bashrc).
+if ! shopt -oq posix; then
+  if [ -f /usr/share/bash-completion/bash_completion ]; then
+    . /usr/share/bash-completion/bash_completion
+  elif [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+  fi
+fi
+export PATH="$HOME/.npm-global/bin:$PATH"
+
+# OpenClaw Completion
+[[ -r "$HOME/.openclaw/completions/openclaw.bash" ]] && source "$HOME/.openclaw/completions/openclaw.bash"
+
+# Created by `pipx` on 2026-03-08 08:39:42
+export PATH="$PATH:{{ HOME }}/.local/bin"
+export OPENCLAW_WORKSPACE="${HOME}/.openclaw/workspace"
+
+eval "$(register-python-argcomplete pipx)"
+
+#case $- in
+ # *i*) [ -f "$HOME/.venvs/bin/activate" ] && source "$HOME/.venvs/bin/activate" ;;
+
+#esac
+
+# coding-system: personal/secret exports live in ~/.secrets.env (restored from the encrypted archive)
+
+export CHROMEDRIVER_PATH=/usr/bin/chromedriver
+export CHROME_BINARY=/usr/bin/chromium
+export CHROMIUM_BINARY=/usr/bin/chromium
+
+# bun
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+
+export PATH=$PATH:{{ HOME }}/.npm-global/bin
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
+
+# Added by Antigravity CLI installer
+export PATH="{{ HOME }}/.local/bin:$PATH"
+# coding-system: personal/secret exports live in ~/.secrets.env (restored from the encrypted archive)
+
+
+# >>> grok installer >>>
+export PATH="$HOME/.grok/bin:$PATH"
+[[ -r "$HOME/.grok/completions/bash/grok.bash" ]] && source "$HOME/.grok/completions/bash/grok.bash"
+# <<< grok installer <<<
+
+# grok-remote now selects its installer-attested managed profile by default.
+# Set GROK_MULTI_SESSION=0 only for an explicit compatibility-lane invocation.
+
+# kimi-code
+export PATH="{{ HOME }}/.kimi-code/bin:$PATH"
+
+# >>> gauss workflow installer env >>>
+export GAUSS_HOME="${GAUSS_HOME:-{{ HOME }}/.gauss}"
+export GAUSS_INSTALL_ROOT="${GAUSS_INSTALL_ROOT:-{{ HOME }}/OpenGauss}"
+export PATH="$HOME/.local/bin:{{ HOME }}/OpenGauss/venv/bin:$HOME/.elan/bin:$PATH"
+export PROMPT_TOOLKIT_NO_CPR=1
+# <<< gauss workflow installer env <<<
+
+# OpenClaw CLI startup optimization (per openclaw doctor suggestion)
+export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
+export OPENCLAW_NO_RESPAWN=1
+# >>> coding-system secrets >>>
+# coding-system: private owner settings are data, never executable shell.
+CSR_OWNER_SETTINGS_STATUS=NOT_CONFIGURED
+CSR_OWNER_SETTINGS_RC=0
+if [ -e "$HOME/.secrets.env" ]; then
+  _csr_owner_status=0
+  _csr_owner_keys=()
+  _csr_owner_values=()
+  if exec {_csr_owner_fd}< <(
+    /usr/bin/python3 -I -B \
+      "$HOME/.local/share/coding-system/repository/bin/lib/owner_settings.py" emit0 \
+      --path "$HOME/.secrets.env"
+  ); then
+    _csr_owner_pid=$!
+    while IFS= read -r -d '' -u "$_csr_owner_fd" _csr_owner_key; do
+      if ! IFS= read -r -d '' -u "$_csr_owner_fd" _csr_owner_value; then
+        _csr_owner_status=2
+        break
+      fi
+      case "$_csr_owner_key" in
+        CLASSROOM50_ORG_ALLOWLIST|TELEGRAM_CHAT_ID|MOLBOOK_AGENT_ID|MOLTBOOK_ALLOWLIST|MOLTBOOK_AUTONOMOUS|MOLTBOOK_COLOR|MOLTBOOK_PROFILE|MOLTBOOK_URL|MOLTBOOK_WORKSPACE|CSR_OWNER_TIMEZONE|CSR_RSS_DIGEST_ONCALENDAR|CSR_RCLONE_DEST|CSR_OWNER_RCLONE_DEST|CSR_ESCROW_GDRIVE|CSR_ESCROW_GH_REPO) ;;
+        *) _csr_owner_status=2; continue ;;
+      esac
+      _csr_owner_keys+=("$_csr_owner_key")
+      _csr_owner_values+=("$_csr_owner_value")
+    done
+    if ! wait "$_csr_owner_pid"; then
+      _csr_owner_status=2
+    fi
+    exec {_csr_owner_fd}<&-
+  else
+    _csr_owner_status=2
+  fi
+  if (( _csr_owner_status == 0 )); then
+    for _csr_owner_index in "${!_csr_owner_keys[@]}"; do
+      printf -v "${_csr_owner_keys[$_csr_owner_index]}" '%s' \
+        "${_csr_owner_values[$_csr_owner_index]}"
+      export "${_csr_owner_keys[$_csr_owner_index]}"
+    done
+    CSR_OWNER_SETTINGS_STATUS=READY
+  else
+    CSR_OWNER_SETTINGS_STATUS=INVALID
+    CSR_OWNER_SETTINGS_RC=2
+    printf '%s\n' 'coding-system: private owner settings are invalid; none were loaded' >&2
+  fi
+  unset _csr_owner_fd _csr_owner_index _csr_owner_key _csr_owner_keys
+  unset _csr_owner_pid _csr_owner_status _csr_owner_value _csr_owner_values
+fi
+export CSR_OWNER_SETTINGS_STATUS CSR_OWNER_SETTINGS_RC
+# <<< coding-system secrets <<<
