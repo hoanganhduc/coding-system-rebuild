@@ -1,0 +1,5 @@
+# System-wide symlinks under /usr/local/bin — require sudo at install time.
+# Format: link<TAB>target ({{ HOME }} substituted at install).
+/usr/local/bin/codex	{{ HOME }}/.npm-global/bin/codex
+# compatibility alias for the ~/.local/bin launcher, which wins on every user PATH:
+/usr/local/bin/getscipapers	{{ HOME }}/.local/bin/getscipapers

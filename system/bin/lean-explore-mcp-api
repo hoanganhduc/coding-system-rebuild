@@ -1,0 +1,150 @@
+#!/usr/bin/python3 -I
+"""Launch LeanExplore's API MCP server without exposing its key in argv or the environment."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import re
+import shlex
+import stat
+import sys
+
+
+VENV_PYTHON = Path("{{ HOME }}/.codex/runtime/workspace/.venvs/lean-explore/bin/python")
+DEFAULT_SECRET_FILE = Path("{{ HOME }}/.config/ai-agents-skills/skill.env")
+# AAS_SKILL_SECRETS_FILE is the target-neutral selector; LEANEXPLORE_SECRET_FILE is
+# the older one that existing client configs still set.
+SECRET_SELECTORS = ("AAS_SKILL_SECRETS_FILE", "LEANEXPLORE_SECRET_FILE")
+EXPECTED_LEAN_EXPLORE_VERSION = "1.2.1"
+MAX_SECRET_FILE = 1024 * 1024
+
+# LeanExplore 1.2.1's CLI checks LEANEXPLORE_API_KEY, then loses it when it
+# starts lean_explore.mcp.server without --api-key.  Calling the public backend
+# and FastMCP objects directly avoids that upstream handoff bug.  The key reaches
+# the server through an inherited memory file, never argv or the environment, and
+# the runtime version is checked before LeanExplore is imported.  MCP stdin stays
+# untouched because Python reads this code from -c, not fd 0.
+SERVER_CODE = f"""
+import os
+from importlib import metadata
+descriptor = int(os.environ.pop("LEANEXPLORE_KEY_FD"))
+with os.fdopen(descriptor, "rb") as stream:
+    key = stream.read().decode("utf-8")
+try:
+    version = metadata.version("lean-explore")
+except metadata.PackageNotFoundError:
+    version = None
+if version != {EXPECTED_LEAN_EXPLORE_VERSION!r}:
+    raise SystemExit("LeanExplore runtime version differs from {EXPECTED_LEAN_EXPLORE_VERSION}")
+from lean_explore.api import ApiClient
+from lean_explore.mcp import tools as _tools
+from lean_explore.mcp.app import mcp_app
+mcp_app._lean_explore_backend_service = ApiClient(api_key=key)
+del key
+mcp_app.run(transport="stdio")
+""".strip()
+
+
+def fail(message: str) -> "NoReturn":
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def read_secret_file(path: Path) -> str:
+    if not path.is_absolute():
+        fail("LEANEXPLORE_API_KEY is unavailable: the secret file selector is not absolute")
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+    except FileNotFoundError:
+        fail("LEANEXPLORE_API_KEY is unavailable: protected secret file is missing")
+    except OSError:
+        fail("LEANEXPLORE_API_KEY is unavailable: protected secret file is unsafe")
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+            or info.st_nlink != 1
+            or info.st_size <= 0
+            or info.st_size > MAX_SECRET_FILE
+        ):
+            fail("LEANEXPLORE_API_KEY is unavailable: protected secret file is unsafe")
+        chunks: list[bytes] = []
+        remaining = info.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65536))
+            if not chunk:
+                fail("LEANEXPLORE_API_KEY is unavailable: protected secret file changed")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            fail("LEANEXPLORE_API_KEY is unavailable: protected secret file changed")
+    finally:
+        os.close(descriptor)
+    try:
+        lines = b"".join(chunks).decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        fail("LEANEXPLORE_API_KEY is unavailable: protected secret file is invalid")
+    assignment = re.compile(r"^[ \t]*(?:export[ \t]+)?LEANEXPLORE_API_KEY=(.*)$")
+    selected = ""
+    for line in lines:
+        match = assignment.fullmatch(line)
+        if match is None:
+            continue
+        try:
+            fields = shlex.split(match.group(1), comments=False, posix=True)
+        except ValueError:
+            fields = []
+        if len(fields) == 1 and fields[0]:
+            selected = fields[0]
+    if not selected:
+        fail("LEANEXPLORE_API_KEY is required for LeanExplore MCP API backend")
+    return selected
+
+
+def read_api_key() -> str:
+    for name in SECRET_SELECTORS:
+        selected = os.environ.get(name, "")
+        if selected:
+            return read_secret_file(Path(selected))
+    inherited = os.environ.get("LEANEXPLORE_API_KEY", "").strip()
+    if inherited:
+        return inherited
+    return read_secret_file(DEFAULT_SECRET_FILE)
+
+
+def require_venv_python() -> None:
+    try:
+        info = VENV_PYTHON.stat(follow_symlinks=True)
+    except OSError:
+        fail("LeanExplore MCP runtime is missing; run make restore")
+    if not stat.S_ISREG(info.st_mode) or not os.access(VENV_PYTHON, os.X_OK):
+        fail("LeanExplore MCP runtime is unsafe or not executable")
+
+
+def main() -> None:
+    require_venv_python()
+    key = read_api_key().encode("utf-8")
+    for name in ("LEANEXPLORE_API_KEY", *SECRET_SELECTORS):
+        os.environ.pop(name, None)
+    descriptor = os.memfd_create("leanexplore-key")
+    written = 0
+    while written < len(key):
+        written += os.write(descriptor, key[written:])
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    os.set_inheritable(descriptor, True)
+    environment = dict(os.environ, LEANEXPLORE_KEY_FD=str(descriptor))
+    os.execve(
+        VENV_PYTHON,
+        [str(VENV_PYTHON), "-I", "-B", "-c", SERVER_CODE],
+        environment,
+    )
+
+
+if __name__ == "__main__":
+    main()

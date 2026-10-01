@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# The workspace entrypoint owns interpreter and credential selection; this shortcut
+# never runs research_digest.py itself.
+exec "{{ HOME }}/.openclaw/workspace/skills/research-digest-wrapper/run_research_digest.sh" "$@"

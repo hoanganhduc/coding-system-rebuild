@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# A restore installs the pinned offline closure; a host without it keeps running
+# the owner's development venv.  GETSCIPAPERS_VENV overrides both.
+CLOSURE="{{ HOME }}/.local/share/coding-system/python-closure/getscipapers"
+if [[ -n "${GETSCIPAPERS_VENV:-}" ]]; then
+  VENV="$GETSCIPAPERS_VENV"
+elif [[ -x "$CLOSURE/bin/python" ]]; then
+  VENV="$CLOSURE"
+else
+  VENV="${HOME:-}/.getscipapers_venv"
+fi
+PYTHON="$VENV/bin/python"
+ENTRYPOINT="$VENV/bin/getscipapers"
+
+[[ -x "$PYTHON" && -f "$ENTRYPOINT" ]] || {
+  echo "getscipapers runtime missing: $VENV" >&2
+  exit 127
+}
+exec "$PYTHON" "$ENTRYPOINT" "$@"

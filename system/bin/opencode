@@ -1,0 +1,23 @@
+#!/usr/bin/bash -p
+# Keep OpenCode's SQLite database and transient WAL family owner-only.
+set -euo pipefail
+
+if [[ $- != *p* ]]; then
+  exec /usr/bin/bash -p "$0" "$@"
+fi
+
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+umask 077
+
+readonly RESTORE_HOME="{{ HOME }}"
+readonly OPENCODE_TARGET="$RESTORE_HOME/.npm-global/lib/node_modules/opencode-ai/bin/opencode.exe"
+
+export HOME="$RESTORE_HOME"
+export PATH="$RESTORE_HOME/.npm-global/bin:$RESTORE_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+if [[ ! -f "$OPENCODE_TARGET" || -L "$OPENCODE_TARGET" || ! -x "$OPENCODE_TARGET" ]]; then
+  printf '%s\n' 'opencode launcher: pinned OpenCode executable is unavailable or unsafe' >&2
+  exit 127
+fi
+
+exec -a opencode "$OPENCODE_TARGET" "$@"

@@ -1,0 +1,144 @@
+#!/bin/sh
+# Target-scoped GitHub Copilot launcher for the restored provider authority.
+set -eu
+
+# /bin/sh on supported Ubuntu targets is dash, so non-interactive Bash startup hooks cannot
+# execute before this launcher clears them.  Clear generic shell startup/search controls too.
+unset BASH_ENV ENV CDPATH
+
+RESTORE_HOME="{{ HOME }}"
+SECRET_LOADER="$RESTORE_HOME/.local/share/ai-agents-skills/runtime/load_secret_env.py"
+PROBE_RUNNER="$RESTORE_HOME/.local/share/ai-agents-skills/runtime/runners/credential_projection_probe.py"
+CREDENTIAL_CHECKER="$RESTORE_HOME/.local/share/ai-agents-skills/runtime/runners/credential_projection_check.py"
+NODE_LINK="$RESTORE_HOME/.npm-global/bin/node"
+COPILOT_COMPATIBILITY_LOADER="$RESTORE_HOME/.npm-global/lib/node_modules/@github/copilot/npm-loader.js"
+COPILOT_LOADER="{{ COPILOT_LOADER }}"
+SHARED_PROVIDER_AUTHORITY="$RESTORE_HOME/.config/ai-agents-skills/providers.env"
+DEFAULT_COPILOT_AUTHORITY="$RESTORE_HOME/.config/ai-agents-skills/providers/copilot.env"
+
+ALL_PROVIDER_KEYS='ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN COPILOT_GITHUB_TOKEN COPILOT_PROVIDER_API_KEY COPILOT_PROVIDER_BEARER_TOKEN DEEPSEEK_API_KEY GEMINI_API_KEY GH_TOKEN GITHUB_TOKEN GOOGLE_API_KEY GROK_API_KEY KIMI_API_KEY MOONSHOT_API_KEY OPENAI_API_KEY OPENCODE_API_KEY XAI_API_KEY'
+COPILOT_KEYS='COPILOT_GITHUB_TOKEN COPILOT_PROVIDER_API_KEY COPILOT_PROVIDER_BEARER_TOKEN GH_TOKEN GITHUB_TOKEN'
+COPILOT_SECRET_ENV_NAMES='COPILOT_GITHUB_TOKEN,COPILOT_PROVIDER_API_KEY,COPILOT_PROVIDER_BEARER_TOKEN,GH_TOKEN,GITHUB_TOKEN'
+
+die() {
+  printf 'copilot launcher: %s\n' "$*" >&2
+  exit 127
+}
+
+CREDENTIAL_PROBE_MODE=0
+if [ "${1:-}" = "--csr-credential-probe" ]; then
+  [ "$#" -eq 1 ] || {
+    printf 'copilot launcher: credential probe accepts no arguments\n' >&2
+    exit 2
+  }
+  CREDENTIAL_PROBE_MODE=1
+  shift
+fi
+
+# This launcher owns the complete secret-stripping list.  Copilot accepts repeated instances,
+# whose merge/overwrite semantics are version-sensitive, so a caller may not add a second one.
+for argument in "$@"; do
+  case "$argument" in
+    --secret-env-vars|--secret-env-vars=*)
+      printf 'copilot launcher: --secret-env-vars is managed by the restoration launcher\n' >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$(/usr/bin/uname -m)" in
+  aarch64|arm64) LOCK_ARCH=arm64 ;;
+  x86_64|amd64) LOCK_ARCH=amd64 ;;
+  *) die "unsupported architecture" ;;
+esac
+EXPECTED_NODE="$RESTORE_HOME/.npm-global/node-v22.23.2-$LOCK_ARCH/bin/node"
+NODE="$(/usr/bin/readlink -f -- "$NODE_LINK" 2>/dev/null || :)"
+[ "$NODE" = "$EXPECTED_NODE" ] && [ -x "$NODE" ] && [ ! -L "$NODE" ] \
+  || die "locked Node runtime is unavailable or unsafe"
+
+case "$COPILOT_LOADER" in
+  "$RESTORE_HOME"/.npm-global/closures/sha256-*/node_modules/@github/copilot/npm-loader.js) ;;
+  *) die "installed Copilot loader identity is outside the immutable npm closure" ;;
+esac
+[ -f "$COPILOT_LOADER" ] && [ ! -L "$COPILOT_LOADER" ] \
+  || die "installed Copilot CLI loader is unavailable or unsafe"
+CURRENT_COPILOT_LOADER="$(
+  /usr/bin/readlink -f -- "$COPILOT_COMPATIBILITY_LOADER" 2>/dev/null || :
+)"
+[ "$CURRENT_COPILOT_LOADER" = "$COPILOT_LOADER" ] \
+  || die "Copilot compatibility link differs from the installed locked closure"
+
+# Node's process-level preload/search controls must never reach a token-bearing CLI child.
+unset NODE_OPTIONS NODE_PATH
+
+run_metadata_without_auth() {
+  for key in $ALL_PROVIDER_KEYS; do
+    unset "$key"
+  done
+  unset AAS_PROVIDER_SECRETS_FILE
+  exec "$NODE" "$COPILOT_LOADER" "$@"
+}
+
+# Version/help/completion/login may follow global options.  Treat any exact metadata token as a
+# no-auth invocation; a false-negative command parse fails safely without projecting a secret.
+for argument in "$@"; do
+  case "$argument" in
+    --help|-h|--version|-v|help|version|completion|login)
+      run_metadata_without_auth "$@"
+      ;;
+  esac
+done
+
+SELECTED_PROVIDER_AUTHORITY=${AAS_PROVIDER_SECRETS_FILE:-}
+case "$SELECTED_PROVIDER_AUTHORITY" in
+  ""|"$SHARED_PROVIDER_AUTHORITY")
+    SELECTED_PROVIDER_AUTHORITY=$DEFAULT_COPILOT_AUTHORITY
+    ;;
+  "$DEFAULT_COPILOT_AUTHORITY") ;;
+  *) die "provider authority pointer is outside the managed Copilot target" ;;
+esac
+AAS_PROVIDER_SECRETS_FILE=$SELECTED_PROVIDER_AUTHORITY
+export AAS_PROVIDER_SECRETS_FILE
+
+# No inherited provider credential may outrank the restored authority, and no unrelated
+# provider key may enter the Copilot child.
+for key in $ALL_PROVIDER_KEYS; do
+  unset "$key"
+done
+
+[ -f "$SECRET_LOADER" ] && [ ! -L "$SECRET_LOADER" ] \
+  || die "managed ai-agents-skills secret loader is unavailable or unsafe"
+
+if [ "$CREDENTIAL_PROBE_MODE" -eq 1 ]; then
+  [ -f "$PROBE_RUNNER" ] && [ ! -L "$PROBE_RUNNER" ] \
+    && [ -f "$CREDENTIAL_CHECKER" ] && [ ! -L "$CREDENTIAL_CHECKER" ] \
+    || die "managed credential projection probe is unavailable or unsafe"
+  exec /usr/bin/env -i \
+    HOME="$RESTORE_HOME" LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    AAS_PROVIDER_SECRETS_FILE="$SELECTED_PROVIDER_AUTHORITY" \
+    /usr/bin/python3 -I "$PROBE_RUNNER" \
+    --lane provider --provider-profile copilot \
+    --expect-key COPILOT_GITHUB_TOKEN \
+    --expect-key COPILOT_PROVIDER_API_KEY \
+    --expect-key COPILOT_PROVIDER_BEARER_TOKEN \
+    --expect-key GH_TOKEN \
+    --expect-key GITHUB_TOKEN \
+    --checker "$CREDENTIAL_CHECKER"
+fi
+
+exec /usr/bin/python3 -I -B "$SECRET_LOADER" \
+  --pointer-env AAS_PROVIDER_SECRETS_FILE \
+  --allow-key COPILOT_GITHUB_TOKEN \
+  --allow-key COPILOT_PROVIDER_API_KEY \
+  --allow-key COPILOT_PROVIDER_BEARER_TOKEN \
+  --allow-key GH_TOKEN \
+  --allow-key GITHUB_TOKEN \
+  --export-key COPILOT_GITHUB_TOKEN \
+  --export-key COPILOT_PROVIDER_API_KEY \
+  --export-key COPILOT_PROVIDER_BEARER_TOKEN \
+  --export-key GH_TOKEN \
+  --export-key GITHUB_TOKEN \
+  -- /usr/bin/env -u AAS_PROVIDER_SECRETS_FILE \
+  "$NODE" "$COPILOT_LOADER" \
+  "--secret-env-vars=$COPILOT_SECRET_ENV_NAMES" \
+  "$@"
