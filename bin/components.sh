@@ -5,6 +5,9 @@
 # LOCAL=1 forces live checkouts for ALL components when present.
 set -euo pipefail
 umask 077
+# The caller's npm, found before PATH is narrowed, builds JavaScript components
+# when neither the locked Node closure nor /usr/bin provides one (CI runners).
+CALLER_NPM="$(command -v npm || true)"
 PATH=/usr/bin:/bin
 export PATH
 unset BASH_ENV ENV CDPATH GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR \
@@ -111,6 +114,9 @@ while IFS='=' read -r name rest; do
       || { echo "ERROR: cannot checkout fresh $name@$ref" >&2; RC=1; continue; }
     npm_bin="$HOME/.npm-global/bin/npm"
     [[ -x "$npm_bin" ]] || npm_bin=/usr/bin/npm
+    [[ -x "$npm_bin" ]] || npm_bin="$CALLER_NPM"
+    [[ -n "$npm_bin" && -x "$npm_bin" ]] \
+      || { echo "ERROR: no npm to build $name@$ref" >&2; RC=1; continue; }
     # NODE_ENV=production in the caller's environment would omit the compiler.
     ( cd "$dest" && unset NODE_ENV && export PATH="$(/usr/bin/dirname "$npm_bin"):$PATH" \
         && "$npm_bin" ci --include=dev --ignore-scripts --no-audit --no-fund \

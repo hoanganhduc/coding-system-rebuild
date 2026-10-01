@@ -12,7 +12,7 @@
     "evidence": "Captured on Ubuntu 24.04.4 LTS arm64; clean-host qualification is required before release promotion."
   },
   "manifests": [
-    {"path": "system/packages/apt.lock.txt", "sha256": "424bc1989e38517a38d9ee139b6791703e72505382db19d89e08904c30860e35"},
+    {"path": "system/packages/apt.lock.txt", "sha256": "b3fa1ae2517f37aef0b351968fe2ab7428140bf29f0ab324bcc611b19cb873cd"},
     {"path": "system/packages/apt-sources/xtradeb-ubuntu-apps-noble.sources", "sha256": "d6bffda4284df92bf4f65d07a15a185a0489613044961ced2b3d54700cc204c1"},
     {"path": "system/packages/apt-sources/caddy-stable.list", "sha256": "b27d8e3f353b8e77214793ab7dfa5111cd502978461c43b4e54e0833ba49e199"},
     {"path": "system/packages/apt-sources/caddy-stable-archive-keyring.gpg", "sha256": "c17cd5298a0bab02fda439fff278d9a55df2120cf9dac790c6ce71930db90b37"},

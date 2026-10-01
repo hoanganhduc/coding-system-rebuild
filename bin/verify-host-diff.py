@@ -36,6 +36,7 @@ BUILTIN_EXCEPTIONS = {
         "ubuntu-cloud-minimal": "cloud image",
         "open-iscsi": "cloud storage",
         "unified-monitoring-agent": "cloud agent",
+        "zstd": "installed by the restore to unpack the locked Ollama release",
     },
 }
 

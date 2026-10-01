@@ -1402,10 +1402,11 @@ BOUND_GENERATION_HELPER="$(
           test ! -L "$1" && test -d "$1" \
             && test "$(/usr/bin/stat -c %u:%g:%a -- "$1")" = 0:0:755
         }
-        for directory in /usr /usr/local /usr/local/libexec; do
+        for directory in /usr /usr/local; do
           require_root_dir "$directory" || exit 2
         done
-        for directory in /usr/local/libexec/coding-system "$root"; do
+        # A fresh Ubuntu has no /usr/local/libexec; create it like the others.
+        for directory in /usr/local/libexec /usr/local/libexec/coding-system "$root"; do
           if test ! -e "$directory" && test ! -L "$directory"; then
             /usr/bin/mkdir -m 0755 -- "$directory"
           fi

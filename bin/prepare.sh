@@ -31,8 +31,13 @@ fetch_locked() { python3 "$LOCKCTL" --arch "$LOCK_ARCH" fetch "$1" "$2" >/dev/nu
 # Every apt call retries transient mirror failures.
 APT_OPTIONS=(-o Acquire::Retries=5)
 apt_entry() {
-  local package="$1" line
-  line=$(grep -E "^${package//./\\.}(>=|=|@)" "$PKG/apt.lock.txt" || true)
+  local package="$1" line="" entry
+  # A plain prefix match: package names such as g++ are not regular expressions.
+  while IFS= read -r entry; do
+    case "$entry" in
+      "$package>="*|"$package="*|"$package@"*) line="$entry"; break ;;
+    esac
+  done < "$PKG/apt.lock.txt"
   [[ -n "$line" ]] || die "package is not locked: $package"
   printf '%s\n' "$line"
 }
