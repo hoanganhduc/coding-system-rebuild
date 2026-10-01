@@ -1,0 +1,73 @@
+# Reviewed leak-scan exceptions: one path, class and line each, with a reason
+# and the proof that the value is public.  bin/leak-scan.sh (layer 4) reads this
+# file with the public-export loader (same format and checks); it covers the
+# repository tree and captured outputs.  MANIFEST.review.json pins it, so a
+# change needs a new owner review (bin/review-manifest.py).
+exceptions:
+  - {path: agents/claude/skills/rss-news-digest/rss_news_digest.py, class: long_numeric_id, line: 25, reason: "public identifier in ai-agents-skills code", proof: "default feed URL of a public github.io blog"}
+  - {path: agents/codex/agents/gsd-user-profiler.md, class: home_path, line: 122, reason: "vendor example (get-shit-done)", proof: "home directory of a fictional example user"}
+  - {path: agents/codex/agents/gsd-user-profiler.toml, class: home_path, line: 114, reason: "vendor example (get-shit-done)", proof: "home directory of a fictional example user"}
+  - {path: agents/codex/get-shit-done/references/user-profiling.md, class: home_path, line: 459, reason: "vendor example (get-shit-done)", proof: "home directory of a fictional example user"}
+  - {path: agents/codex/get-shit-done/templates/user-setup.md, class: email, line: 294, reason: "vendor example (get-shit-done)", proof: "sample address in a setup template"}
+  - {path: agents/codex/skills/calibre/SKILL.md, class: long_numeric_id, line: 129, reason: "public identifier in ai-agents-skills docs", proof: "ISBN-13 example"}
+  - {path: agents/codex/skills/calibre/SKILL.md, class: long_numeric_id, line: 133, reason: "public identifier in ai-agents-skills docs", proof: "ISBN-13 example"}
+  - {path: agents/codex/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 265, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/codex/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 289, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/codex/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 290, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/codex/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 294, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/codex/skills/database-lookup/references/uspto.md, class: long_numeric_id, line: 69, reason: "public identifier in ai-agents-skills docs", proof: "patent and application number examples"}
+  - {path: agents/codex/skills/database-lookup/references/uspto.md, class: long_numeric_id, line: 102, reason: "public identifier in ai-agents-skills docs", proof: "patent and application number examples"}
+  - {path: agents/codex/skills/gsd-reapply-patches/SKILL.md, class: home_path, line: 245, reason: "vendor example (get-shit-done)", proof: "home directory of a fictional example user"}
+  - {path: agents/codex/skills/paper-lookup/references/arxiv.md, class: long_numeric_id, line: 86, reason: "public identifier in ai-agents-skills docs", proof: "arXiv submittedDate range in an example query"}
+  - {path: agents/codex/skills/paper-lookup/references/crossref.md, class: long_numeric_id, line: 85, reason: "public identifier in ai-agents-skills docs", proof: "Funder Registry ID of a public funder"}
+  - {path: agents/codex/skills/paper-lookup/references/openalex.md, class: long_numeric_id, line: 39, reason: "public identifier in ai-agents-skills docs", proof: "PMID in an example lookup"}
+  - {path: agents/codex/skills/paper-lookup/references/pmc.md, class: long_numeric_id, line: 23, reason: "public identifier in ai-agents-skills docs", proof: "PMC and PMID examples"}
+  - {path: agents/codex/skills/paper-lookup/references/pmc.md, class: long_numeric_id, line: 67, reason: "public identifier in ai-agents-skills docs", proof: "PMC and PMID examples"}
+  - {path: agents/codex/skills/paper-lookup/references/pmc.md, class: long_numeric_id, line: 138, reason: "public identifier in ai-agents-skills docs", proof: "PMC and PMID examples"}
+  - {path: agents/codex/skills/paper-lookup/references/pubmed.md, class: long_numeric_id, line: 53, reason: "public identifier in ai-agents-skills docs", proof: "PMID examples"}
+  - {path: agents/codex/skills/paper-lookup/references/pubmed.md, class: long_numeric_id, line: 72, reason: "public identifier in ai-agents-skills docs", proof: "PMID examples"}
+  - {path: agents/codex/skills/paper-lookup/references/pubmed.md, class: long_numeric_id, line: 92, reason: "public identifier in ai-agents-skills docs", proof: "PMID examples"}
+  - {path: agents/codex/skills/paper-lookup/references/semantic-scholar.md, class: long_numeric_id, line: 35, reason: "public identifier in ai-agents-skills docs", proof: "authorId, CorpusId and PMID examples"}
+  - {path: agents/codex/skills/paper-lookup/references/semantic-scholar.md, class: long_numeric_id, line: 38, reason: "public identifier in ai-agents-skills docs", proof: "authorId, CorpusId and PMID examples"}
+  - {path: agents/codex/skills/paper-lookup/references/semantic-scholar.md, class: long_numeric_id, line: 103, reason: "public identifier in ai-agents-skills docs", proof: "authorId, CorpusId and PMID examples"}
+  - {path: agents/gemini/antigravity-cli/builtin/skills/agy-customizations/docs/hooks.md, class: uuid, line: 146, reason: "vendor example (Antigravity built-in docs)", proof: "example conversationId"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 265, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 289, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 290, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 294, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/database-lookup/references/uspto.md, class: long_numeric_id, line: 69, reason: "public identifier in ai-agents-skills docs", proof: "patent and application number examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/database-lookup/references/uspto.md, class: long_numeric_id, line: 102, reason: "public identifier in ai-agents-skills docs", proof: "patent and application number examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/arxiv.md, class: long_numeric_id, line: 86, reason: "public identifier in ai-agents-skills docs", proof: "arXiv submittedDate range in an example query"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/crossref.md, class: long_numeric_id, line: 85, reason: "public identifier in ai-agents-skills docs", proof: "Funder Registry ID of a public funder"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/openalex.md, class: long_numeric_id, line: 39, reason: "public identifier in ai-agents-skills docs", proof: "PMID in an example lookup"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/pmc.md, class: long_numeric_id, line: 23, reason: "public identifier in ai-agents-skills docs", proof: "PMC and PMID examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/pmc.md, class: long_numeric_id, line: 67, reason: "public identifier in ai-agents-skills docs", proof: "PMC and PMID examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/pmc.md, class: long_numeric_id, line: 138, reason: "public identifier in ai-agents-skills docs", proof: "PMC and PMID examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/pubmed.md, class: long_numeric_id, line: 53, reason: "public identifier in ai-agents-skills docs", proof: "PMID examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/pubmed.md, class: long_numeric_id, line: 72, reason: "public identifier in ai-agents-skills docs", proof: "PMID examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/pubmed.md, class: long_numeric_id, line: 92, reason: "public identifier in ai-agents-skills docs", proof: "PMID examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/semantic-scholar.md, class: long_numeric_id, line: 35, reason: "public identifier in ai-agents-skills docs", proof: "authorId, CorpusId and PMID examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/semantic-scholar.md, class: long_numeric_id, line: 38, reason: "public identifier in ai-agents-skills docs", proof: "authorId, CorpusId and PMID examples"}
+  - {path: agents/gemini/config/plugins/ai-agents-skills/skills/paper-lookup/references/semantic-scholar.md, class: long_numeric_id, line: 103, reason: "public identifier in ai-agents-skills docs", proof: "authorId, CorpusId and PMID examples"}
+  - {path: agents/gemini/config/skills/calibre.md, class: long_numeric_id, line: 135, reason: "public identifier in ai-agents-skills docs", proof: "ISBN-13 example"}
+  - {path: agents/gemini/config/skills/calibre.md, class: long_numeric_id, line: 139, reason: "public identifier in ai-agents-skills docs", proof: "ISBN-13 example"}
+  - {path: agents/opencode/skills/calibre/SKILL.md, class: long_numeric_id, line: 136, reason: "public identifier in ai-agents-skills docs", proof: "ISBN-13 example"}
+  - {path: agents/opencode/skills/calibre/SKILL.md, class: long_numeric_id, line: 140, reason: "public identifier in ai-agents-skills docs", proof: "ISBN-13 example"}
+  - {path: agents/opencode/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 265, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/opencode/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 289, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/opencode/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 290, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/opencode/skills/database-lookup/references/ensembl.md, class: long_numeric_id, line: 294, reason: "public identifier in ai-agents-skills docs", proof: "genome coordinates in an example response"}
+  - {path: agents/opencode/skills/database-lookup/references/uspto.md, class: long_numeric_id, line: 69, reason: "public identifier in ai-agents-skills docs", proof: "patent and application number examples"}
+  - {path: agents/opencode/skills/database-lookup/references/uspto.md, class: long_numeric_id, line: 102, reason: "public identifier in ai-agents-skills docs", proof: "patent and application number examples"}
+  - {path: agents/opencode/skills/paper-lookup/references/arxiv.md, class: long_numeric_id, line: 86, reason: "public identifier in ai-agents-skills docs", proof: "arXiv submittedDate range in an example query"}
+  - {path: agents/opencode/skills/paper-lookup/references/crossref.md, class: long_numeric_id, line: 85, reason: "public identifier in ai-agents-skills docs", proof: "Funder Registry ID of a public funder"}
+  - {path: agents/opencode/skills/paper-lookup/references/openalex.md, class: long_numeric_id, line: 39, reason: "public identifier in ai-agents-skills docs", proof: "PMID in an example lookup"}
+  - {path: agents/opencode/skills/paper-lookup/references/pmc.md, class: long_numeric_id, line: 23, reason: "public identifier in ai-agents-skills docs", proof: "PMC and PMID examples"}
+  - {path: agents/opencode/skills/paper-lookup/references/pmc.md, class: long_numeric_id, line: 67, reason: "public identifier in ai-agents-skills docs", proof: "PMC and PMID examples"}
+  - {path: agents/opencode/skills/paper-lookup/references/pmc.md, class: long_numeric_id, line: 138, reason: "public identifier in ai-agents-skills docs", proof: "PMC and PMID examples"}
+  - {path: agents/opencode/skills/paper-lookup/references/pubmed.md, class: long_numeric_id, line: 53, reason: "public identifier in ai-agents-skills docs", proof: "PMID examples"}
+  - {path: agents/opencode/skills/paper-lookup/references/pubmed.md, class: long_numeric_id, line: 72, reason: "public identifier in ai-agents-skills docs", proof: "PMID examples"}
+  - {path: agents/opencode/skills/paper-lookup/references/pubmed.md, class: long_numeric_id, line: 92, reason: "public identifier in ai-agents-skills docs", proof: "PMID examples"}
+  - {path: agents/opencode/skills/paper-lookup/references/semantic-scholar.md, class: long_numeric_id, line: 35, reason: "public identifier in ai-agents-skills docs", proof: "authorId, CorpusId and PMID examples"}
+  - {path: agents/opencode/skills/paper-lookup/references/semantic-scholar.md, class: long_numeric_id, line: 38, reason: "public identifier in ai-agents-skills docs", proof: "authorId, CorpusId and PMID examples"}
+  - {path: agents/opencode/skills/paper-lookup/references/semantic-scholar.md, class: long_numeric_id, line: 103, reason: "public identifier in ai-agents-skills docs", proof: "authorId, CorpusId and PMID examples"}

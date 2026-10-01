@@ -1,0 +1,24 @@
+[Unit]
+Description=Persistent tmux server for the forms workspace
+Documentation=man:tmux(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Lives in system.slice, so a user@1001 teardown (exit.target) cannot reach it.
+Type=oneshot
+RemainAfterExit=yes
+User={{ USER }}
+Group={{ GROUP }}
+WorkingDirectory={{ HOME }}/forms
+Environment=HOME={{ HOME }}
+Environment=SHELL=/bin/bash
+Environment=TERM=screen-256color
+# Dedicated socket. The default socket /tmp/tmux-1001/default is already owned
+# by a user-slice tmux server; `new-session` there would create the session
+# inside THAT server, inheriting exactly the mortality this unit exists to avoid.
+ExecStart=/usr/bin/tmux -L system new-session -d -s forms -c {{ HOME }}/forms
+ExecStop=/usr/bin/tmux -L system kill-server
+
+[Install]
+WantedBy=multi-user.target

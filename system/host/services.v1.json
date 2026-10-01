@@ -1,0 +1,19 @@
+{
+  "schema": "coding-system.host-services/v1",
+  "enable": [
+    "caddy.service",
+    "earlyoom.service",
+    "monit.service",
+    "ollama.service",
+    "tmux-forms.service",
+    "tor.service"
+  ],
+  "units": {
+    "ollama.service": "system/host/systemd/ollama.service",
+    "tmux-forms.service": "system/host/systemd/tmux-forms.service"
+  },
+  "private_files": [
+    {"path": "/etc/caddy/Caddyfile", "owner": "root", "group": "root", "mode": "0644"},
+    {"path": "/etc/monit/monitrc", "owner": "root", "group": "root", "mode": "0600"}
+  ]
+}

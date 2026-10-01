@@ -1,0 +1,595 @@
+# Umbrella allowlist manifest — all NON-OpenClaw surfaces.
+# ~/.openclaw public sync is delegated to the openclaw-bot component (REBUILD-MANIFEST.json).
+# Secrets (ALL surfaces incl. OpenClaw) are owned by secrets/secrets-manifest.yaml.
+#
+# Schema: coding-system.manifest.v1
+#   roots:    scan roots (relative to $HOME). A top-level entry of a root that no entry
+#             below matches is an orphan: it is never captured and sync lists it as a
+#             warning until it is classified.
+#   global_exclude: globs that no public entry captures, in any root; a glob with '/'
+#             matches the path from any component down, any other glob any single
+#             path component (a file or directory name).
+#   entries:  id, root, match (list of globs on paths relative to root; the first
+#             segment decides which top-level paths are classified), class, dest|dest_dir (repo-relative),
+#             template (verbs), include/exclude (globs within matched trees), keys
+#             (for key-redact), note. An authoritative public-copy entry requires
+#             literal existing match paths, stages before publish, and exactly
+#             replaces dest_dir; preserve_dest lists repository-local paths kept
+#             across that replacement.
+#   classes:  public-copy | public-template | private-archive | exclude-cache |
+#             exclude-private-data | exclude-generated | delegate
+#   template verbs: home-substitute, key-redact, emit-keys, secret-env-split, strip-projects
+#
+# Sync engine invariants (enforced by bin/lib/manifest_sync.py via bin/sync.sh):
+#   - symlinks under public trees are NEVER copied: recorded; targets under
+#     ~/ai-agents-skills => "delegated" (installer recreates); others must appear in
+#     system/symlinks.tsv or sync warns.
+#   - any ELF file in a public class is a hard error (per-arch reinstall instead).
+#   - private-archive entries are existence-checked and cross-checked against
+#     secrets/secrets-manifest.yaml.
+#   - databases, histories, sessions, feedback drafts, installation IDs,
+#     owner/tunnel records and paths holding '{{' never enter a public class;
+#     neither do binary files other than images and fonts, nor anything the
+#     leak scan does not read (node_modules, files over 20 MiB).
+#   - a private denylist entry in a rendered public file is a hard error, and
+#     so is the scanner's LEAKSCAN-EXEMPT marker in captured content outside
+#     authoritative mirrors.
+#   - *.template outputs carry {{ EMAIL }} and {{ <KIND>_ID }} placeholders
+#     instead of email addresses and identifier values.
+#   - the rendered tree must pass bin/leak-scan.sh; --apply renders into a
+#     private stage and publishes nothing unless that scan passes.
+#   - --apply needs the private denylist and an owner review of every entry,
+#     the entry order, global_exclude and the scanner's exceptions
+#     (MANIFEST.review.json, bin/review-manifest.py).
+
+schema: coding-system.manifest.v1
+home_placeholder: "{{ HOME }}"
+
+global_exclude:
+  # editor and agent leftovers
+  - "*.new"
+  - "*.bak*"
+  - "*.backup*"
+  # installed dependencies and environments, restored from their manifests; the leak
+  # scan never reads node_modules
+  - "node_modules"
+  - ".venv"
+  # tikz-draw development notes that exist only on this machine (not part of the
+  # ai-agents-skills skill); they record paths from other machines
+  - "skills/tikz-draw/references/implementation/**"
+  - "skills/tikz-draw/references/integration/**"
+  - "skills/tikz-draw/references/research/**"
+  # skills synced from an account; the bucket names are account identifiers
+  - "skills/synced/**"
+  # Cloudflare skill bundle (the MIT cloudflare plugin of github.com/openai/plugins
+  # plus the Cloudflare skills installed with it): vendor content, to be restored
+  # by a pinned install step rather than re-published from this machine
+  - "skills/cloudflare/**"
+  - "skills/cloudflare-email-service/**"
+  - "skills/cloudflare-one/**"
+  - "skills/cloudflare-one-migrations/**"
+  - "skills/agents-sdk/**"
+  - "skills/durable-objects/**"
+  - "skills/sandbox-sdk/**"
+  - "skills/turnstile-spin/**"
+  - "skills/web-perf/**"
+  - "skills/workers-best-practices/**"
+  - "skills/wrangler/**"
+  # Codex system skills, rewritten by Codex at start-up (.codex-system-skills.marker)
+  - "skills/.system/**"
+
+roots:
+  - .claude
+  - .codex
+  - .copilot
+  - .config/opencode
+  - .codewhale
+  - .deepseek
+  - .gemini
+  - .grok
+  - .ai-agents-skills
+  - .config/systemd/user
+  - .local/bin
+  - .local/state/grok-proxy/iphone
+  - grok-proxy
+
+entries:
+  # ---------------------------------------------------------------- HOME extras
+  - id: home-bashrc
+    root: ""
+    match: [".bashrc"]
+    class: public-template
+    dest: system/shell/bashrc.block.sh
+    template: [secret-env-split, home-substitute]
+    note: managed markers '# >>> coding-system secrets >>>'; secrets go to ~/.secrets.env (zip)
+
+  - id: home-profile
+    root: ""
+    match: [".profile"]
+    class: public-template
+    dest: system/shell/profile.block.sh
+    template: [home-substitute]
+
+  - id: home-npmrc
+    root: ""
+    match: [".npmrc"]
+    class: public-template
+    dest: system/npmrc.template
+    template: [home-substitute]
+    note: prefix=~/.npm-global makes all npm -g installs land correctly
+
+  # ---------------------------------------------------------------- .claude
+  - id: claude-settings
+    root: .claude
+    match: ["settings.json", "settings.local.json", ".mcp.json"]
+    class: public-template
+    dest_dir: agents/claude
+    template: [home-substitute]
+
+  - id: claude-core
+    root: .claude
+    match: ["CLAUDE.md", "keybindings.json", "package.json",
+            "agents", "commands", "docs", "hooks", "instructions", "rules", "templates"]
+    class: public-copy
+    dest_dir: agents/claude
+    exclude: ["**/__pycache__/**", "**/*.pyc"]
+
+  - id: claude-plugins
+    root: .claude
+    match: ["plugins"]
+    class: public-copy
+    dest_dir: agents/claude
+    include: ["plugins/blocklist.json", "plugins/known_marketplaces.json"]
+    note: >
+      only the two manifests: marketplaces/** is upstream vendor content that Claude
+      Code re-fetches from known_marketplaces.json (and is full of upstream commit
+      SHAs / example tokens that trip the leak scanner for no benefit)
+
+  - id: claude-skill-configs
+    root: .claude
+    match: ["skills/zotero/config.json", "skills/calibre/config.json"]
+    class: public-template
+    dest_dir: agents/claude
+    template: [home-substitute, key-redact]
+    keys: [zotero_user_id, gdrive_folder_id, webdav_url, webdav_user, library_id,
+           user_id, folder_id, telegram_chat_id]
+    note: overrides the raw copy from claude-skills for these two files
+
+  - id: claude-skills
+    root: .claude
+    match: ["skills"]
+    class: public-copy
+    dest_dir: agents/claude
+    exclude: ["**/*.bak", "**/*.bak-*", "**/*.bak.*", "**/__pycache__/**", "**/*.pyc", "**/tmp/**", "**/.pytest_cache/**",
+              "skills/*/tests/tmp/**", "skills/zotero/**", "skills/calibre/**",
+              "skills/vnthuquan/**", "skills/modal-research-compute/**"]
+    note: >
+      _run.sh and non-delegated skill scripts are user-owned real files. SKILL.md
+      references are installed by ai-agents-skills. Zotero/Calibre config.json remain
+      separately key-redacted by claude-skill-configs and regenerated from their
+      authority; Zotero, Calibre, vnthuquan, and modal-research-compute runtime bytes
+      are delegated exclusively to the pinned shared runtime and reached through the
+      fail-closed _run.sh shim.
+
+  - id: claude-secrets
+    root: .claude
+    match: ["secrets.json", ".credentials.json"]
+    class: private-archive
+    template: [emit-keys]
+    dest_dir: agents/claude
+    note: emit-keys writes agents/claude/<name>.keys (sorted key names, no values)
+
+  - id: claude-personal-state
+    root: .claude
+    match: ["learnings", "projects"]
+    class: private-archive
+    include: ["learnings/**", "projects/-home-ubuntu/memory/**"]
+    note: >
+      learnings + persistent user memory ride in the zip (decision 6); the REST of
+      projects/ (sessions) is excluded by claude-exclude below — include patterns here
+      define exactly what the zip takes.
+
+  - id: claude-exclude
+    root: .claude
+    match: [".credentials.json.bak.*", ".last-cleanup", ".last-update-result.json",
+            ".local", "agent-memory", "backups", "cache", "data", "file-history",
+            "history.jsonl", "mcp-needs-auth-cache.json", "paste-cache", "plans",
+            "projects", "runs", "session-env", "sessions", "settings.json.bak", "settings.json.bak-*",
+            "shell-snapshots", "state", "stats-cache.json", "tasks", "todos",
+            "statsig", "memories", "workflows", "feedback", "telemetry",
+            "settings.local.json.bak-*", "{{ OPENCLAW_WORKSPACE }"]
+    class: exclude-generated
+    note: >
+      .local is a symlink into the OpenClaw workspace (recorded in symlinks.tsv).
+      "{{ OPENCLAW_WORKSPACE }" is a stray empty tree left by an unrendered path.
+
+  # ---------------------------------------------------------------- .codex
+  - id: codex-config
+    root: .codex
+    match: ["config.toml"]
+    class: public-template
+    dest: agents/codex/config.toml.template
+    template: [home-substitute, strip-projects]
+
+  - id: codex-core
+    root: .codex
+    match: ["AGENTS.md", "agents", "hooks", "hooks.json", "instructions",
+            "templates", "get-shit-done", "gsd-file-manifest.json", "version.json"]
+    class: public-copy
+    dest_dir: agents/codex
+    exclude: ["**/*.bak", "**/*.bak-*", "**/*.bak.*", "**/__pycache__/**", "**/*.pyc"]
+
+  - id: codex-rules
+    root: .codex
+    match: ["rules"]
+    class: private-archive
+    note: approved command rules name private machines and paths, so they ride in the encrypted recovery set
+
+  - id: codex-skills
+    root: .codex
+    match: ["skills"]
+    class: public-copy
+    dest_dir: agents/codex
+    exclude: ["**/*.bak", "**/*.bak-*", "**/*.bak.*", "**/__pycache__/**", "**/*.pyc", "**/tmp/**"]
+
+  - id: codex-plugins
+    root: .codex
+    match: ["plugins"]
+    class: public-copy
+    dest_dir: agents/codex
+    exclude: ["plugins/.remote-plugin-install-staging/**", "plugins/cache/**", "**/node_modules/**"]
+
+  - id: codex-auth
+    root: .codex
+    match: ["auth.json"]
+    class: private-archive
+    template: [emit-keys]
+    dest_dir: agents/codex
+
+  - id: codex-exclude
+    root: .codex
+    match: ["AGENTS.md.bak-*", "config.toml.bak-*", ".backup", ".personality_migration",
+            ".sandbox_migration", ".tmp", "cache", "cad_write_test", "goals_1.sqlite*",
+            "history.jsonl", "installation_id",
+            "log", "logs_2.sqlite*", "mcp-oauth-locks", "memories", "memories_1.sqlite*",
+            "models_cache.json", "runs", "runtime", "sessions", "shell_snapshots",
+            "state", "state_5.sqlite*", "tmp", "app-server-control", "app-server-daemon",
+            "packages", "projects", "queue_1.sqlite*", "session_index.jsonl",
+            "thread-writer-locks", "thread_history_1.sqlite*",
+            "tui-thread-reference-capabilities"]
+    class: exclude-generated
+
+  # ---------------------------------------------------------------- .copilot
+  - id: copilot-core
+    root: .copilot
+    match: ["settings.json", "permissions-config.json", "agents", "skills"]
+    class: public-copy
+    dest_dir: agents/copilot
+    exclude: ["**/__pycache__/**"]
+    template: [strip-projects]
+
+  - id: copilot-mcp
+    root: .copilot
+    match: ["mcp-config.json"]
+    class: private-archive
+    template: [emit-keys]
+    dest_dir: agents/copilot
+
+  - id: copilot-exclude
+    root: .copilot
+    match: ["command-history-state.json", "installed-plugins", "logs", "restart",
+            "session-state", "session-store.db", "session-store.db-shm",
+            "session-store.db-wal", "config.json", "ide", "installed-plugins.lock",
+            "servers", "sidebar-sessions-state"]
+    class: exclude-generated
+    note: >
+      config.json is state that Copilot manages itself (trusted folders, experiment
+      cache); user settings live in settings.json. ide/ holds IDE connection state,
+      which is regenerated.
+
+  # ---------------------------------------------------------------- opencode
+  - id: opencode-core
+    root: .config/opencode
+    match: [".gitignore", "AGENTS.md", "agents", "commands", "instructions",
+            "templates", "skills", "opencode.jsonc", "package.json",
+            "package-lock.json"]
+    class: public-copy
+    dest_dir: agents/opencode
+    exclude: ["**/__pycache__/**", "**/node_modules/**"]
+
+  - id: opencode-exclude
+    root: .config/opencode
+    match: ["node_modules"]
+    class: exclude-cache
+
+  # ---------------------------------------------------------------- codewhale
+  - id: codewhale-config
+    root: .codewhale
+    match: ["config.toml"]
+    class: public-template
+    dest: agents/codewhale/config.toml.template
+    template: [home-substitute, key-redact, strip-projects]
+    keys: [api_key]
+    note: plaintext DeepSeek api_key inside — redacted to {{ API_KEY }}; full copy in zip
+
+  - id: codewhale-core
+    root: .codewhale
+    match: ["settings.toml"]
+    class: public-copy
+    dest_dir: agents/codewhale
+
+  - id: codewhale-secrets
+    root: .codewhale
+    match: ["secrets"]
+    class: private-archive
+
+  - id: codewhale-exclude
+    root: .codewhale
+    match: ["audit.log", "catalog", "config.toml.bak", "config.toml.lock",
+            "settings.toml.lock", "setup_state.json", "slop_ledger", "sessions",
+            "state", "automations", "builtin-plugins", "composer_history.txt", "crashes",
+            "last-launch.json", "logs", "mcp-index.json", "tasks", "update-check.json",
+            "workflow-runs.jsonl"]
+    class: exclude-generated
+
+  # ---------------------------------------------------------------- deepseek
+  - id: deepseek-config
+    root: .deepseek
+    match: ["config.toml"]
+    class: public-template
+    dest: agents/deepseek/config.toml.template
+    template: [home-substitute, key-redact, strip-projects]
+    keys: [api_key]
+
+  - id: deepseek-core
+    root: .deepseek
+    match: ["AGENTS.md", "mcp.json", "agents", "instructions", "templates", "skills",
+            "tools", "trusted", ".onboarded"]
+    class: public-copy
+    dest_dir: agents/deepseek
+    exclude: ["**/__pycache__/**", "**/*.pyc"]
+
+  - id: deepseek-automations
+    root: .deepseek
+    match: ["automations"]
+    class: public-copy
+    dest_dir: agents/deepseek
+    exclude: ["automations/runs/**"]
+
+  - id: deepseek-private
+    root: .deepseek
+    match: ["secrets", "memory", ".learnings",
+            "codex-research-integration-implementation.md",
+            "codex-research-integration-plan.md"]
+    class: private-archive
+
+  - id: deepseek-exclude
+    root: .deepseek
+    match: [".codex", ".integration-backups", ".research", "audit.log",
+            "composer_history.txt", "crashes", "integration-evidence", "logs",
+            "sessions", "snapshots", "tasks", "tool_outputs"]
+    class: exclude-generated
+
+  # ---------------------------------------------------------------- gemini
+  - id: gemini-core
+    root: .gemini
+    match: ["GEMINI.md"]
+    class: public-copy
+    dest_dir: agents/gemini
+
+  - id: gemini-config
+    root: .gemini
+    match: ["config"]
+    class: public-copy
+    dest_dir: agents/gemini
+    exclude: ["config/projects/**", "config/.migrated"]
+
+  - id: gemini-antigravity-core
+    root: .gemini
+    match: ["antigravity-cli"]
+    class: public-copy
+    dest_dir: agents/gemini
+    include: ["antigravity-cli/settings.json", "antigravity-cli/keybindings.json",
+              "antigravity-cli/skills/**", "antigravity-cli/plugins/**",
+              "antigravity-cli/builtin/**"]
+    exclude: ["**/cache/**", "**/node_modules/**"]
+    template: [strip-projects]
+    note: >
+      antigravity-cli is a full agent home; bin/ (binaries), brain/, cache/, log/,
+      conversations/, history, knowledge/, scratch/, updater/, installation_id are
+      excluded as generated; the OAuth token is in the secrets zip. strip-projects
+      drops the home-path trustedWorkspaces of settings.json.
+
+  - id: gemini-oauth
+    root: .gemini
+    match: ["antigravity-cli/antigravity-oauth-token"]
+    class: private-archive
+
+  - id: gemini-runtime-state-exclude
+    root: .gemini
+    match: ["projects.json", "history", "tmp", "installation_id", "skills"]
+    class: exclude-generated
+    note: >
+      gemini CLI project registry + volatile per-project session history/tmp
+      (config/projects/, history/, tmp/); skills/ holds vendor-installed skills
+
+  # ---------------------------------------------------------------- .grok (xAI Grok CLI)
+  - id: grok-config
+    root: .grok
+    match: ["config.toml"]
+    class: public-template
+    dest: agents/grok/config.toml.template
+    template: [home-substitute]
+    note: CLI settings (internal installer + xAI marketplace source); no secrets
+
+  - id: grok-auth
+    root: .grok
+    match: ["auth.json"]
+    class: private-archive
+    note: >
+      OIDC session (grok login). Deliberately NO emit-keys: the single top-level
+      key is the issuer + user-uuid, a personal identifier — keep it out of the
+      public tree. Rides in the secrets zip; re-auth with `grok` if absent.
+
+  - id: grok-exclude
+    root: .grok
+    match: ["*"]
+    class: exclude-generated
+    note: >
+      catch-all LAST for the .grok root: grok-config (config.toml) and grok-auth
+      (auth.json) match first, so this sweeps everything else — x.ai-installer
+      distribution content (bin ELF, bundled/completions/docs/skills, that the
+      installer re-fetches) and churny per-run state (sessions, marketplace-cache,
+      campaigns_state.json{,.lock}, worktrees.db, installed-plugins, *.lock, ...),
+      none of it restore material. A catch-all (like the .local/bin root) avoids
+      fail-closing the backup every time grok writes a new state file. If the user
+      ever authors custom grok skills, add a specific entry BEFORE this one.
+
+  # ---------------------------------------------------------------- ai-agents-skills state home
+  - id: aas-state-exclude
+    root: .ai-agents-skills
+    match: ["agd-runs", "backups", "delegation-runs", "openclaw-target-runs",
+            "openclaw-target-state.json", "runs", "state.json", ".state.json.*.tmp",
+            "state.json.bak-*", "external-dependencies.json", "external-dependencies.lock",
+            "pending-retired-removals", "retired-quarantine"]
+    class: exclude-generated
+    note: fresh `make install` of the ai-agents-skills installer creates fresh state
+
+  # ---------------------------------------------------------------- systemd user units
+  - id: systemd-units
+    root: .config/systemd/user
+    match: ["openclaw-gateway.service.d", "xvfb-99.service",
+            "grok-remote-boot-revalidate.service",
+            "coding-system-scheduler-canary.service",
+            "coding-system-scheduler-canary.timer",
+            "chatgpt-local-coder.service", "chatgpt-local-coder.service.d",
+            "chatgpt-local-coder-tunnel.service", "chatgpt-local-coder-tunnel-health.service",
+            "chatgpt-local-coder-tunnel-health.timer", "exit-forensics.service"]
+    class: public-template
+    dest_dir: system/systemd/user
+    template: [home-substitute]
+    note: per-unit enable state lives in system/systemd/units.state (TSV)
+
+  - id: systemd-component-units
+    root: .config/systemd/user
+    match: ["openclaw-gateway.service", "send-queue-worker.service",
+            "openclaw-sage-worker.service", "openclaw-manim-worker.service",
+            "openclaw-email-worker.service", "openclaw-zulip-delivery-worker.service",
+            "openclaw-zalo-delivery-worker.service",
+            "openclaw-googlechat-delivery-worker.service",
+            "openclaw-whatsapp-delivery-worker.service",
+            "rss_news_digest_bot.service", "rss_news_digest_bot.timer",
+            "moltbook-relay.service", "moltbook-relay.timer"]
+    class: delegate
+    note: >
+      Owned by the openclaw-bot component, whose reviewed generational service
+      transaction installs them (D13); the live copies can carry private values
+      such as the owner's RSS schedule, so they are never captured.
+
+  - id: systemd-schedule-dropins
+    root: .config/systemd/user
+    match: ["rss_news_digest_bot.timer.d", "coding-system-scheduler-canary.timer.d"]
+    class: exclude-generated
+    note: >
+      Rendered by bin/reconcile-host-schedules.py from system/schedules/host.v1.json
+      and the owner settings (D3); the RSS schedule is private.
+
+  - id: systemd-exclude
+    root: .config/systemd/user
+    match: ["*.bak", "*.bak-*", "default.target.wants", "timers.target.wants",
+            "exit.target.wants", ".openclaw-service-install.lock"]
+    class: exclude-generated
+
+  - id: systemd-pending-units
+    root: .config/systemd/user
+    match: ["chatgpt-local-coder-tunnel.service.owner.json"]
+    class: exclude-private-data
+    note: >
+      The tunnel owner file is private; it rides in the encrypted recovery set
+      (secrets/secrets-manifest.yaml) while the units are public templates.
+
+  # ---------------------------------------------------------------- ~/.local/bin
+  - id: localbin-wrappers
+    root: .local/bin
+    match: ["digest-bridge", "exit-forensics.sh", "getscipapers", "gsp", "lean-explore-mcp-api",
+            "model-router", "openclaw", "opencode", "research-digest", "rss-news-digest", "sage"]
+    class: public-template
+    dest_dir: system/bin
+    template: [home-substitute]
+    note: hand-written wrappers; everything else in .local/bin is pip/pipx-generated or ELF
+
+  - id: chatgpt-local-coder-libexec
+    root: .local/libexec/chatgpt-local-coder
+    match: ["tunnel-health.sh"]
+    class: public-template
+    dest_dir: system/libexec/chatgpt-local-coder
+    template: [home-substitute]
+    note: tunnel liveness watchdog run by chatgpt-local-coder-tunnel-health.service
+
+  - id: localbin-exclude
+    root: .local/bin
+    match: ["*"]
+    class: exclude-generated
+    note: >
+      catch-all LAST for this root: pip console scripts (regenerated by phase 9),
+      pipx symlinks (aider), ELF binaries (agy, deepseek, deepseek-tui — per-arch
+      reinstall), and the zot symlink (recorded in symlinks.tsv). Entries above
+      take precedence; sync matches in manifest order.
+      NB: the `grok` symlink (-> .grok/bin/grok, ELF) is claimed here and NOT
+      recorded/copied — the x.ai installer recreates it (see prepare.sh).
+
+  # ---------------------------------------------------------------- grok-proxy toolkit
+  - id: grokproxy-scripts
+    root: grok-proxy
+    match: ["README.md", "SPEC.md", "PLAN.md", "TASKS.md", "grok-remote",
+            "grok-remote-boot-revalidate.sh", "egress.sh",
+            "socks-netns.py", "sanitize.awk", "vpngate-connect.sh", "vpn-broker",
+            "install-release.py", "bootstrap", "grok_ms", "dist", "tests"]
+    exclude: ["bootstrap/build", "bootstrap/build/**", "**/__pycache__", "**/__pycache__/**", "**/*.pyc", "**/.pytest_cache", "**/.pytest_cache/**"]
+    class: public-copy
+    dest_dir: system/grok-proxy
+    authoritative: true
+    preserve_dest: [".planning", ".learnings"]
+    source_transaction_lock: ".grok-source-restore.lock"
+    source_transaction_marker: ".grok-source-restore.json"
+    note: >
+      Exact public backup mirror of the canonical ~/grok-proxy authoring source.
+      Repository-local planning/learnings are preserved; stale public paths are
+      pruned. Sanitized documentation + SOCKS-over-Tailscale egress wrapper +
+      VPN Gate network-namespace fallback + the Windows/Arch SSH-server setup
+      scripts are reusable and topology-generic; dist embeds only a public key.
+
+  - id: grokproxy-private
+    root: grok-proxy
+    match: ["hosts.conf", "known_hosts", "id_grokproxy", "id_grokproxy.pub"]
+    class: private-archive
+    note: >
+      hosts.conf + known_hosts carry specific tailnet IPs / usernames, host keys,
+      and the personal topology; id_grokproxy is the dedicated SSH PRIVATE key.
+      All ride in the secrets zip (secrets-manifest), never the public tree.
+
+  - id: grokproxy-exclude
+    root: grok-proxy
+    match: [".tunnel.*", ".egress.state", ".egress.recovery-required", ".socks-netns.pid", ".baseline.models", ".unlocked.models", ".model.choice", ".model.seen", ".grok-remote.lock", ".grok-leader.sock", ".leader-*.sock", ".ssh-ctl*", ".grok-source-restore*", ".planning", ".learnings", "bootstrap/build", "bootstrap/build/**", "__pycache__", "**/__pycache__", "**/__pycache__/**", "**/.pytest_cache", "**/.pytest_cache/**", "**/*.pyc"]
+    class: exclude-generated
+    note: SSH control sockets + tunnel/leader runtime state + per-run egress/model cache (regenerated); local planning/learning ledgers remain outside the public mirror
+
+  - id: grokproxy-iphone-private
+    root: .local/state/grok-proxy/iphone
+    match: ["tailscaled.state", "exit-node", "devices.json"]
+    class: private-archive
+    note: >
+      Persistent identity of the isolated userspace Tailscale sidecar plus the
+      ordered iOS exit-node registry. The state contains node credentials and the
+      stable IDs expose private tailnet topology; all belong only in the encrypted
+      archive.
+
+  - id: grokproxy-iphone-exclude
+    root: .local/state/grok-proxy/iphone
+    match: ["tailscaled.sock", "tailscaled.pid", "tailscaled.log", "ready", "*"]
+    exclude: ["tailscaled.state", "exit-node", "devices.json"]
+    class: exclude-generated
+    note: >
+      LocalAPI socket, process/log state, and live-readiness marker are regenerated.
+      Registered devices survive restore through devices.json; live availability
+      is revalidated on use, without rerunning iphone-setup.
