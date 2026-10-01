@@ -30,7 +30,9 @@ class CopilotWrapperTests(unittest.TestCase):
         wrapper.parent.mkdir(parents=True)
         machine = platform.machine().lower()
         arch = "arm64" if machine in {"aarch64", "arm64"} else "amd64"
-        node = home / f".npm-global/node-v22.23.2-{arch}/bin/node"
+        node = home / (
+            f".local/share/coding-system/node-generations/sha256-{arch}-" + "e" * 64 + "/bin/node"
+        )
         node.parent.mkdir(parents=True)
         # The shared secret loader projects a minimal child environment, so the
         # report lands under HOME — one of the few names it retains — instead of
@@ -59,7 +61,7 @@ class CopilotWrapperTests(unittest.TestCase):
         cli_loader = (
             home
             / (
-                ".npm-global/closures/sha256-"
+                f".local/share/coding-system/npm-closures/sha256-{arch}-"
                 + "a" * 64
                 + "-"
                 + "b" * 64
@@ -344,10 +346,11 @@ class CopilotWrapperTests(unittest.TestCase):
             wrapper = self.render(home)
             compatibility = home / ".npm-global/lib/node_modules/@github/copilot"
             compatibility.unlink()
+            arch = "arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "amd64"
             alternate = (
                 home
                 / (
-                    ".npm-global/closures/sha256-"
+                    f".local/share/coding-system/npm-closures/sha256-{arch}-"
                     + "c" * 64
                     + "-"
                     + "d" * 64
@@ -366,6 +369,37 @@ class CopilotWrapperTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 127)
             self.assertIn("differs from the installed locked closure", completed.stderr)
+
+    def test_runtime_rejects_node_outside_the_locked_generations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            wrapper = self.render(home)
+            node_link = home / ".npm-global/bin/node"
+            locked_node = node_link.resolve(strict=True)
+            arch = "arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "amd64"
+            # The retired ~/.npm-global/node-v<version>-<arch> layout, and a
+            # generation for the other architecture, are both refused.
+            for outside in (
+                home / f".npm-global/node-v22.23.2-{arch}/bin/node",
+                home / (
+                    ".local/share/coding-system/node-generations/sha256-"
+                    + ("amd64" if arch == "arm64" else "arm64")
+                    + "-" + "e" * 64 + "/bin/node"
+                ),
+            ):
+                outside.parent.mkdir(parents=True)
+                shutil.copy2(locked_node, outside)
+                node_link.unlink()
+                node_link.symlink_to(outside)
+                completed = subprocess.run(
+                    [str(wrapper), "--version"],
+                    env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 127, outside)
+                self.assertIn("locked Node runtime is unavailable or unsafe", completed.stderr)
 
     def test_offline_credential_probe_proves_scoped_reachability(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

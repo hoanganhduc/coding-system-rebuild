@@ -130,7 +130,7 @@ NPM_CLOSURECTL="$NPM_CLOSURE/closurectl.py"
 source_hash=$(python3 "$NPM_CLOSURECTL" source-digest 2>/dev/null || true)
 current_link="$HOME/.npm-global/cli-current"
 closure_root=$(readlink "$current_link" 2>/dev/null || true)
-closure_prefix="$HOME/.npm-global/closures/sha256-${source_hash}-"
+closure_prefix="$HOME/.local/share/coding-system/npm-closures/sha256-${LOCK_ARCH}-${source_hash}-"
 expected_tree_hash=${closure_root#"$closure_prefix"}
 if [[ "$source_hash" =~ ^[0-9a-f]{64}$ \
     && -L "$current_link" \

@@ -97,8 +97,10 @@ that lock with lifecycle scripts disabled, so an integrity-checked package
 cannot fetch an additional mutable installer payload.
 
 Each install is staged and validated under
-`~/.npm-global/closures/`, then published at a content-addressed directory. The
-directory is made read-only. `~/.npm-global/cli-current`, the declared command
+`~/.local/share/coding-system/npm-closures/`, then published there at a
+content-addressed directory, `sha256-<arch>-<source digest>-<tree digest>`, next
+to the locked Node generation in `node-generations/`. Both belong to the user
+and are made read-only. `~/.npm-global/cli-current`, the declared command
 links in `~/.npm-global/bin`, and compatibility package links under
 `~/.npm-global/lib/node_modules` point only into that closure. The compatibility
 tree exists for OpenClaw service paths; it is not an `npm install -g` authority.

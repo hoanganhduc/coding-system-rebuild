@@ -1145,7 +1145,7 @@ sys.stdout.buffer.flush()
   COPILOT_SOURCE_HASH="$(
     /usr/bin/python3 -I -B "$REPO/system/software/npm-closure/closurectl.py" source-digest
   )"
-  COPILOT_CLOSURE_PREFIX="$HOME/.npm-global/closures/sha256-$COPILOT_SOURCE_HASH-"
+  COPILOT_CLOSURE_PREFIX="$HOME/.local/share/coding-system/npm-closures/sha256-$LOCK_ARCH-$COPILOT_SOURCE_HASH-"
   COPILOT_TREE_HASH="${COPILOT_CLOSURE_ROOT#"$COPILOT_CLOSURE_PREFIX"}"
   [[ "$COPILOT_SOURCE_HASH" =~ ^[0-9a-f]{64}$ \
       && "$COPILOT_CLOSURE_ROOT" == "$COPILOT_CLOSURE_PREFIX$COPILOT_TREE_HASH" \

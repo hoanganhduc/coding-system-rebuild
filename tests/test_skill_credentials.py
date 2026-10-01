@@ -402,7 +402,9 @@ class SkillCredentialVerifierTests(unittest.TestCase):
 
         machine = platform.machine().lower()
         arch = "arm64" if machine in {"aarch64", "arm64"} else "amd64"
-        node = home / f".npm-global/node-v22.23.2-{arch}/bin/node"
+        node = home / (
+            f".local/share/coding-system/node-generations/sha256-{arch}-" + "e" * 64 + "/bin/node"
+        )
         write_text(node, "#!/bin/sh\nexit 0\n", 0o755)
         node_link = home / ".npm-global/bin/node"
         node_link.parent.mkdir(parents=True, exist_ok=True)
@@ -410,7 +412,7 @@ class SkillCredentialVerifierTests(unittest.TestCase):
         copilot_loader = (
             home
             / (
-                ".npm-global/closures/sha256-"
+                f".local/share/coding-system/npm-closures/sha256-{arch}-"
                 + "a" * 64
                 + "-"
                 + "b" * 64

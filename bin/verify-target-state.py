@@ -812,7 +812,9 @@ def credential_projection_observation(
         source_info = launcher_source.lstat()
         closure_loader = closure_loader_link.resolve(strict=True)
         closure_info = closure_loader.lstat()
-        closure_relative = closure_loader.relative_to(root / ".npm-global/closures")
+        closure_relative = closure_loader.relative_to(
+            root / ".local/share/coding-system/npm-closures"
+        )
     except (OSError, ValueError):
         return {"status": "TECHNICAL_FAIL", "reason": "projection-launcher-source-invalid"}
     if (
@@ -822,7 +824,9 @@ def credential_projection_observation(
         or stat.S_ISLNK(closure_info.st_mode)
         or not stat.S_ISREG(closure_info.st_mode)
         or len(closure_relative.parts) < 2
-        or re.fullmatch(r"sha256-[0-9a-f]{64}-[0-9a-f]{64}", closure_relative.parts[0]) is None
+        or re.fullmatch(
+            r"sha256-(?:amd64|arm64)-[0-9a-f]{64}-[0-9a-f]{64}", closure_relative.parts[0]
+        ) is None
     ):
         return {"status": "TECHNICAL_FAIL", "reason": "projection-launcher-source-invalid"}
     try:

@@ -51,13 +51,21 @@ case "$(/usr/bin/uname -m)" in
   x86_64|amd64) LOCK_ARCH=amd64 ;;
   *) die "unsupported architecture" ;;
 esac
-EXPECTED_NODE="$RESTORE_HOME/.npm-global/node-v22.23.2-$LOCK_ARCH/bin/node"
+# Node and the npm closure are sealed, content-addressed generations owned by
+# the user; ~/.npm-global only links to them (bin/prepare.sh).
+CODING_ROOT="$RESTORE_HOME/.local/share/coding-system"
 NODE="$(/usr/bin/readlink -f -- "$NODE_LINK" 2>/dev/null || :)"
-[ "$NODE" = "$EXPECTED_NODE" ] && [ -x "$NODE" ] && [ ! -L "$NODE" ] \
+NODE_GENERATION="${NODE#"$CODING_ROOT/node-generations/"}"
+case "$NODE_GENERATION" in
+  */*/bin/node) die "locked Node runtime is unavailable or unsafe" ;;
+  sha256-"$LOCK_ARCH"-*/bin/node) ;;
+  *) die "locked Node runtime is unavailable or unsafe" ;;
+esac
+[ -x "$NODE" ] && [ ! -L "$NODE" ] \
   || die "locked Node runtime is unavailable or unsafe"
 
 case "$COPILOT_LOADER" in
-  "$RESTORE_HOME"/.npm-global/closures/sha256-*/node_modules/@github/copilot/npm-loader.js) ;;
+  "$CODING_ROOT"/npm-closures/sha256-"$LOCK_ARCH"-*/node_modules/@github/copilot/npm-loader.js) ;;
   *) die "installed Copilot loader identity is outside the immutable npm closure" ;;
 esac
 [ -f "$COPILOT_LOADER" ] && [ ! -L "$COPILOT_LOADER" ] \
