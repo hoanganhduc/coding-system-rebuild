@@ -487,12 +487,17 @@ for c in openclaw-bot ai-agents-skills; do
         || bad "component immutable authority not installed"
     fi
   else
-    if [[ -d "$REPO/external/$c/.git" ]]; then
-      ok "component present: external/$c"
+    # bin/components.sh installs the pinned checkout in the component store;
+    # resolve it exactly as install.sh does.
+    component_args=(--repository "$REPO" --home "$HOME" --require)
+    [[ "$DEGRADED" == "1" ]] && component_args+=(--source-fallback)
+    if /usr/bin/python3 -I -B "$REPO/bin/lib/component_paths.py" \
+        "${component_args[@]}" "$c" >/dev/null 2>&1; then
+      ok "component present at its locked commit: $c"
     elif [[ "$DEGRADED" == "1" ]]; then
-      skp "component absent: external/$c (ci)"
+      skp "component absent: $c (ci)"
     else
-      bad "component absent: external/$c"
+      bad "component absent or not at its locked commit: $c"
     fi
   fi
 done
