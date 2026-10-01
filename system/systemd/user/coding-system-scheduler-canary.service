@@ -1,0 +1,14 @@
+[Unit]
+Description=Record provider-free systemd scheduler canary evidence
+
+[Service]
+Type=oneshot
+UMask=0077
+StateDirectory=coding-system/scheduler-canaries
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 {{ HOME }}/.local/share/coding-system/repository/bin/scheduler-canary.py record --scheduler systemd --state-dir %S/coding-system/scheduler-canaries
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX

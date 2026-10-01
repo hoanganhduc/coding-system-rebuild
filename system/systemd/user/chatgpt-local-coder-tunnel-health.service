@@ -1,0 +1,8 @@
+[Unit]
+Description=chatgpt-local-coder tunnel liveness watchdog
+Documentation=file:{{ HOME }}/.local/libexec/chatgpt-local-coder/tunnel-health.sh
+After=chatgpt-local-coder-tunnel.service
+
+[Service]
+Type=oneshot
+ExecStart={{ HOME }}/.local/libexec/chatgpt-local-coder/tunnel-health.sh

@@ -1,0 +1,19 @@
+[Unit]
+Description=chatgpt-local-coder MCP host
+# No After=network-online.target: that target does not exist in the user
+# manager, so ordering against it would be a no-op dressed up as a guarantee.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node {{ HOME }}/chatgpt-local-coder/dist/cli/main.js up --no-tunnel
+WorkingDirectory={{ HOME }}/Research
+Environment="CLC_CONFIG_DIR={{ HOME }}/.config/chatgpt-local-coder"
+Environment="NODE_ENV=production"
+Environment="CLC_SERVICE_MODE=1"
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:{{ HOME }}/.local/state/chatgpt-local-coder/server.log
+StandardError=append:{{ HOME }}/.local/state/chatgpt-local-coder/server.log
+
+[Install]
+WantedBy=default.target

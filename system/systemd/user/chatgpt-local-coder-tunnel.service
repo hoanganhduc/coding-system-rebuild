@@ -1,0 +1,25 @@
+[Unit]
+Description=chatgpt-local-coder tunnel runtime
+# The host owns the MCP server; this unit only publishes it. Wants= rather than
+# Requires= so restarting the host does not tear the tunnel down with it.
+After=chatgpt-local-coder.service
+Wants=chatgpt-local-coder.service
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/node {{ HOME }}/chatgpt-local-coder/dist/cli/main.js tunnel connect --alias chatgpt-local-coder --wait-for-server
+ExecStop=-/usr/bin/node {{ HOME }}/chatgpt-local-coder/dist/cli/main.js tunnel stop --alias chatgpt-local-coder
+WorkingDirectory={{ HOME }}/Research
+Environment="CLC_CONFIG_DIR={{ HOME }}/.config/chatgpt-local-coder"
+Environment="NODE_ENV=production"
+Environment="CLC_SERVICE_MODE=1"
+Restart=on-failure
+RestartSec=15
+StandardOutput=append:{{ HOME }}/.local/state/chatgpt-local-coder/tunnel.log
+StandardError=append:{{ HOME }}/.local/state/chatgpt-local-coder/tunnel.log
+
+[Install]
+WantedBy=default.target

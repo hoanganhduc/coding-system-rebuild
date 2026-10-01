@@ -1,0 +1,18 @@
+[Unit]
+Description=Record process state when the user manager is told to exit
+Documentation=man:systemd.special(7)
+# Shutdown-time unit: must not inherit the ordering that would stop it first.
+DefaultDependencies=no
+Before=systemd-exit.service
+ConditionPathExists={{ HOME }}/.local/bin/exit-forensics.sh
+
+[Service]
+Type=oneshot
+ExecStart={{ HOME }}/.local/bin/exit-forensics.sh
+# The manager blocks on this unit, so cap it hard.
+TimeoutStartSec=25
+# A failed tripwire must never wedge the shutdown.
+SuccessExitStatus=0 1 2
+
+[Install]
+WantedBy=exit.target

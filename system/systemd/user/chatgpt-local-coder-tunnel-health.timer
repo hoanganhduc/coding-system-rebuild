@@ -1,0 +1,13 @@
+[Unit]
+Description=Probe the chatgpt-local-coder tunnel every 5 minutes
+
+[Timer]
+# Three consecutive failures at this period is the ~15 minutes of sustained
+# death required before the watchdog will restart anything.
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=chatgpt-local-coder-tunnel-health.service
+
+[Install]
+WantedBy=timers.target

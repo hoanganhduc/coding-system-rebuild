@@ -1,0 +1,40 @@
+# coding-system crontab template ({{ HOME }} substituted at install)
+# Edit this file to introduce tasks to be run by cron.
+# 
+# Each task to run has to be defined through a single line
+# indicating with different fields when the task will be run
+# and what command to run for the task
+# 
+# To define the time you can provide concrete values for
+# minute (m), hour (h), day of month (dom), month (mon),
+# and day of week (dow) or use '*' in these fields (for 'any').
+# 
+# Notice that tasks will be started based on the cron's system
+# daemon's notion of time and timezones.
+# 
+# Output of the crontab jobs (including errors) is sent through
+# email to the user the crontab file belongs to (unless redirected).
+# 
+# For example, you can run a backup of all your user accounts
+# at 5 a.m every week with:
+# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/
+# 
+# For more information see the manual pages of crontab(5) and cron(8)
+# 
+# m h  dom mon dow   command
+# keep-alive: only fires when the box is genuinely idle, so it can never
+# trip the research loop's loadavg<=3 gate (see recovery.md load guard)
+# Moltbook → Sanitizer relay (every 5 min)
+
+# >>> coding-system schedules v1 >>>
+# Generated from system/schedules/host.v1.json; do not edit.
+# schedule-id: host.keep-alive; missed-run=skip
+CRON_TZ=Etc/UTC
+*/20 * * * * /usr/bin/awk '{exit !($1<1.0)}' /proc/loadavg && /usr/bin/nice -n 19 /usr/bin/stress --cpu 1 --timeout 240 >/dev/null 2>&1 || true
+# schedule-id: host.workspace-sanitizer-pattern-update; missed-run=skip
+CRON_TZ=Etc/UTC
+17 2 * * 0 /usr/bin/python3 {{ HOME }}/.openclaw/workspace-sanitizer/scripts/update_patterns.py >> {{ HOME }}/.openclaw/workspace-sanitizer/scripts/update.log 2>&1
+# schedule-id: host.scheduler-canary-cron; missed-run=skip
+CRON_TZ=Etc/UTC
+* * * * * /usr/bin/python3 {{ HOME }}/coding-system-rebuild/bin/scheduler-canary.py record --scheduler cron --state-dir {{ HOME }}/.local/state/coding-system/scheduler-canaries >/dev/null 2>&1
+# <<< coding-system schedules v1 <<<

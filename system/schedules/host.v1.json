@@ -1,0 +1,65 @@
+{
+  "schema": "coding-system.schedules/v1",
+  "jobs": [
+    {
+      "id": "host.keep-alive",
+      "backend": "cron",
+      "schedule": "*/20 * * * *",
+      "timezone": "Etc/UTC",
+      "missedRunPolicy": "skip",
+      "command": "/usr/bin/awk '{exit !($1<1.0)}' /proc/loadavg && /usr/bin/nice -n 19 /usr/bin/stress --cpu 1 --timeout 240 >/dev/null 2>&1 || true",
+      "legacyCronLines": [
+        "*/20 * * * * awk '{exit !($1<1.0)}' /proc/loadavg && nice -n 19 /usr/bin/stress --cpu 1 --timeout 240 >/dev/null 2>&1 || true"
+      ]
+    },
+    {
+      "id": "host.workspace-sanitizer-pattern-update",
+      "backend": "cron",
+      "schedule": "17 2 * * 0",
+      "timezone": "Etc/UTC",
+      "missedRunPolicy": "skip",
+      "command": "/usr/bin/python3 {{ HOME }}/.openclaw/workspace-sanitizer/scripts/update_patterns.py >> {{ HOME }}/.openclaw/workspace-sanitizer/scripts/update.log 2>&1",
+      "legacyCronLines": [
+        "17 2 * * 0 python3 {{ HOME }}/.openclaw/workspace-sanitizer/scripts/update_patterns.py >> {{ HOME }}/.openclaw/workspace-sanitizer/scripts/update.log 2>&1"
+      ]
+    },
+    {
+      "id": "host.scheduler-canary-cron",
+      "backend": "cron",
+      "schedule": "* * * * *",
+      "timezone": "Etc/UTC",
+      "missedRunPolicy": "skip",
+      "command": "/usr/bin/python3 {{ HOME }}/.local/share/coding-system/repository/bin/scheduler-canary.py record --scheduler cron --state-dir {{ HOME }}/.local/state/coding-system/scheduler-canaries >/dev/null 2>&1",
+      "legacyCronLines": [
+        "* * * * * /usr/bin/python3 {{ HOME }}/coding-system-rebuild/bin/scheduler-canary.py record --scheduler cron --state-dir {{ HOME }}/.local/state/coding-system/scheduler-canaries >/dev/null 2>&1"
+      ]
+    },
+    {
+      "id": "host.hetzner-reaper",
+      "backend": "cron",
+      "schedule": "*/2 * * * *",
+      "timezone": "Etc/UTC",
+      "missedRunPolicy": "skip",
+      "command": "L=\"$HOME/.local/share/ai-agents-skills/runtime/run_skill.sh\"; W=\"$HOME/.local/share/ai-agents-skills/research-compute\"; S=\"$HOME/.local/state/ai-agents-skills\"; (umask 077; mkdir -p \"$S\"); [ -f \"$S/hetzner-reaper.log\" ] && [ \"$(wc -c <\"$S/hetzner-reaper.log\")\" -gt 1048576 ] && { tail -c 524288 \"$S/hetzner-reaper.log\" | tail -n +2 >\"$S/hetzner-reaper.log.trim\" && cat \"$S/hetzner-reaper.log.trim\" >\"$S/hetzner-reaper.log\"; rm -f \"$S/hetzner-reaper.log.trim\"; }; AAS_AUTOLOOP_COMPUTE_WORKSPACE=\"$W\" AAS_COMPUTE_SECRETS_FILE=\"$HOME/.config/ai-agents-skills/compute.env\" \"$L\" skills/hetzner-research-compute/run_hetzner_reaper.sh --config \"$W/config/research-compute.toml\" reap >>\"$S/hetzner-reaper.log\" 2>&1 && AAS_AUTOLOOP_COMPUTE_WORKSPACE=\"$W\" \"$L\" skills/hetzner-research-compute/run_hetzner_reaper.sh --config \"$W/config/research-compute.toml\" attest --scheduler-kind cron --scheduler-id \"cron:user:$(id -un)\" >>\"$S/hetzner-reaper.log\" 2>&1",
+      "legacyCronLines": [
+        "*/2 * * * * L=\"$HOME/.local/share/ai-agents-skills/runtime/run_skill.sh\"; W=\"$HOME/.local/share/ai-agents-skills/research-compute\"; S=\"$HOME/.local/state/ai-agents-skills\"; (umask 077; mkdir -p \"$S\"); [ -f \"$S/hetzner-reaper.log\" ] && [ \"$(wc -c <\"$S/hetzner-reaper.log\")\" -gt 1048576 ] && { tail -c 524288 \"$S/hetzner-reaper.log\" | tail -n +2 >\"$S/hetzner-reaper.log.trim\" && cat \"$S/hetzner-reaper.log.trim\" >\"$S/hetzner-reaper.log\"; rm -f \"$S/hetzner-reaper.log.trim\"; }; AAS_AUTOLOOP_COMPUTE_WORKSPACE=\"$W\" AAS_COMPUTE_SECRETS_FILE=\"$HOME/.config/ai-agents-skills/compute.env\" \"$L\" skills/hetzner-research-compute/run_hetzner_reaper.sh --config \"$W/config/research-compute.toml\" reap >>\"$S/hetzner-reaper.log\" 2>&1 && AAS_AUTOLOOP_COMPUTE_WORKSPACE=\"$W\" \"$L\" skills/hetzner-research-compute/run_hetzner_reaper.sh --config \"$W/config/research-compute.toml\" attest --scheduler-kind cron --scheduler-id \"cron:user:$(id -un)\" >>\"$S/hetzner-reaper.log\" 2>&1"
+      ]
+    },
+    {
+      "id": "host.rss-news-digest-bot",
+      "backend": "systemd",
+      "timerUnit": "rss_news_digest_bot.timer",
+      "schedule": "${CSR_RSS_DIGEST_ONCALENDAR}",
+      "timezone": "${CSR_OWNER_TIMEZONE}",
+      "missedRunPolicy": "catch-up-once"
+    },
+    {
+      "id": "host.scheduler-canary",
+      "backend": "systemd",
+      "timerUnit": "coding-system-scheduler-canary.timer",
+      "schedule": "*-*-* *:*:00 UTC",
+      "timezone": "Etc/UTC",
+      "missedRunPolicy": "catch-up-once"
+    }
+  ]
+}

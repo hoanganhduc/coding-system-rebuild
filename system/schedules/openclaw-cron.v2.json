@@ -1,0 +1,39 @@
+{
+  "schema": "coding-system.openclaw-cron/v2",
+  "managedDeclarationPrefix": "coding-system.restore.",
+  "jobs": [
+    {
+      "declarationKey": "coding-system.restore.scheduler-canary",
+      "displayName": "Scheduler canary",
+      "name": "coding-system scheduler canary",
+      "description": "Provider-free proof that the OpenClaw scheduler executed a command job.",
+      "enabled": true,
+      "schedule": {
+        "kind": "cron",
+        "expr": "* * * * *",
+        "tz": "Etc/UTC",
+        "staggerMs": 0
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "/usr/bin/python3",
+          "{{ HOME }}/.local/share/coding-system/repository/bin/scheduler-canary.py",
+          "record",
+          "--scheduler",
+          "openclaw",
+          "--state-dir",
+          "{{ HOME }}/.local/state/coding-system/scheduler-canaries"
+        ],
+        "timeoutSeconds": 30,
+        "noOutputTimeoutSeconds": 15,
+        "outputMaxBytes": 4096
+      },
+      "delivery": {
+        "mode": "none"
+      }
+    }
+  ]
+}

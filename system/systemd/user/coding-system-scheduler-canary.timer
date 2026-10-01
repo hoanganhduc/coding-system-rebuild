@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the provider-free scheduler canary every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00 UTC
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=true
+Unit=coding-system-scheduler-canary.service
+
+[Install]
+WantedBy=timers.target
