@@ -1,0 +1,126 @@
+name: openclaw-sandbox
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/openclaw-sandbox.yml'
+      - 'system/docker/openclaw-sandbox/**'
+      - 'system/docker/python-wheelhouse/**'
+      - 'system/packages/requirements/**'
+  workflow_dispatch:
+
+# Image publication is never cancelled half way; a later run queues.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # The shorter package name predates this repository and does not grant this
+  # repository's GITHUB_TOKEN write access. This repository-owned package is
+  # created and published only by the native qualification workflow below.
+  IMAGE: ghcr.io/hoanganhduc/coding-system-rebuild-openclaw-sandbox
+
+jobs:
+  build:
+    # Package versions and attestations cannot be deleted. A manual dispatch is
+    # the owner's approval; a push publishes only after the owner opts in.
+    if: github.event_name == 'workflow_dispatch' || vars.OPENCLAW_SANDBOX_AUTO_PUBLISH == 'true'
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            suffix: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: { persist-credentials: false }
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - name: Build and publish native candidate
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          file: system/docker/openclaw-sandbox/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: ${{ env.IMAGE }}:candidate-${{ github.sha }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=openclaw-sandbox-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=openclaw-sandbox-${{ matrix.suffix }}
+      - name: Verify candidate as non-root
+        run: |
+          docker run --rm \
+            --read-only \
+            --network none \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 512 \
+            --memory 4g \
+            --memory-swap 4g \
+            --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=512m \
+            --tmpfs /var/tmp:rw,nosuid,nodev,noexec,size=64m \
+            --tmpfs /run:rw,nosuid,nodev,noexec,size=64m \
+            --tmpfs /workspace:rw,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=0700 \
+            "${IMAGE}:candidate-${GITHUB_SHA}-${{ matrix.suffix }}" \
+            verify-openclaw-sandbox
+
+  publish-index:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - name: Publish tested multi-architecture index
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE}:sha-${GITHUB_SHA}" \
+            "${IMAGE}:candidate-${GITHUB_SHA}-amd64" \
+            "${IMAGE}:candidate-${GITHUB_SHA}-arm64"
+          docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}" \
+            --format '{{json .Manifest}}' > manifest.json
+          digest="$(docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}" \
+            --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "OPENCLAW_SANDBOX_DIGEST=$digest" >> "$GITHUB_ENV"
+          echo "Published ${IMAGE}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Move latest to the published main index
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}@${OPENCLAW_SANDBOX_DIGEST}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: openclaw-sandbox-manifest
+          path: manifest.json

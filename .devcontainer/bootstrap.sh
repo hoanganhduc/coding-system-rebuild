@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Codespaces create-time setup: build a DEGRADED (no-secrets) interactive replica.
+# Same surface as the GitHub Actions `install-degraded` job. Complete secret recovery
+# is intentionally unavailable in Codespaces because it cannot satisfy the bare-host
+# signed recovery-set, escrow, systemd, and host-service contract.
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
+
+echo "=================================================================="
+echo " coding-system-rebuild — Codespaces degraded build (no secrets)"
+echo "=================================================================="
+
+# install.sh's phase-1 doctor hard-fails (exit 1) without these, aborting the whole
+# build before apt even runs. The CI 'install-degraded' job installs them first
+# (.github/workflows/rehearsal.yml); the devcontainers base image + node/python/gh
+# features ship none of them, so the Codespace bootstrap must match CI to reach parity.
+sudo apt-get update -qq
+sudo apt-get install -y -qq make 7zip python3-yaml
+# The python devcontainer feature makes `python3` resolve to /usr/local/python, but
+# apt's python3-yaml installs into the SYSTEM python (/usr/bin/python3). doctor.sh and
+# the repo's bin/lib scripts run the feature python3, so PyYAML must be installed there
+# too — otherwise `python3 -c 'import yaml'` fails and phase-1 doctor aborts the build.
+python3 -m pip install --quiet pyyaml 2>/dev/null \
+  || python3 -m pip install --quiet --break-system-packages pyyaml 2>/dev/null \
+  || python3 -m pip install --quiet --user pyyaml 2>/dev/null \
+  || echo "WARN: could not install PyYAML into the active python — doctor may fail"
+
+# Degraded install: software + components (public) + render + python + systemd-render +
+# verify. Keep create FAST and resilient: besides texlive (5.5GB) and the multi-GB docker
+# images, also defer the heavy / network-fragile installers an interactive degraded replica
+# does not need at create time — chromium + calibre (xtradeb PPA), tailscale, rust, bun,
+# elan/Lean. prepare.sh runs under `set -e`, so any one of these failing would otherwise
+# abort the whole build. Install them later if a skill needs them, e.g.:
+#   SKIP_APT=1 SKIP_NODE=1 SKIP_NPM_GLOBALS=1 SKIP_PIPX=1 SKIP_MODAL=1 SKIP_DOCKER=1 \
+#   SKIP_DOCKER_IMAGES=1 bash bin/prepare.sh        # (unset the SKIP_* you want)
+SKIP_LATEX=1 SKIP_DOCKER_IMAGES=1 \
+  SKIP_CHROMIUM=1 SKIP_CALIBRE=1 SKIP_TAILSCALE=1 SKIP_RUST=1 SKIP_BUN=1 SKIP_LEAN=1 \
+  bash bin/install.sh || true
+
+cat <<'EOF'
+
+==================================================================
+ Degraded replica is ready — you can test live right now, e.g.:
+   make verify              # health checks (degraded)
+   make test                # roundtrip + scanners
+   bash ~/.claude/skills/_run.sh skills/zotero/run_zot.sh doctor
+ Complete recovery is not offered inside Codespaces. Use the trusted
+ restore-ubuntu.sh flow on a supported Ubuntu 24.04 amd64/arm64 host.
+==================================================================
+EOF

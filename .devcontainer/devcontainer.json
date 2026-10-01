@@ -1,0 +1,39 @@
+// GitHub Codespaces / Dev Container for a LIVE, interactive replica of the system.
+//
+// At create time it builds the same DEGRADED (no-secrets) replica the GitHub Actions
+// `install-degraded` job builds — but interactive, so you can test skills/configs live.
+// It is intentionally degraded-only. Complete signed recovery requires the supported
+// bare-host Stage-0 flow; a web upload must not bypass recovery signatures or escrow.
+//
+// NOTE: Codespaces are amd64. This is a functional replica (configs/skills/settings/
+// software + multi-arch images), not bit-identical to the arm64 source. SageMath uses
+// the official amd64 image here (arch-aware); openclaw-sandbox is multi-arch.
+{
+  "name": "coding-system-rebuild (live replica)",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" },
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.12" },
+    // sshd so `gh codespace ssh|logs|cp` and VS Code Remote-SSH work — without it
+    // those all fail with "SSH server not installed", blocking remote diagnosis.
+    "ghcr.io/devcontainers/features/sshd:1": {}
+  },
+
+  // Minimum for the DEGRADED replica (texlive + multi-GB images are deferred): the
+  // standard 4-core / 16GB / 32GB machine. 64GB storage would force a premium 8-core,
+  // which the degraded development intent does not need.
+  "hostRequirements": { "cpus": 4, "memory": "16gb", "storage": "32gb" },
+
+  "forwardPorts": [18789],
+  "portsAttributes": {
+    "18789": { "label": "OpenClaw gateway", "onAutoForward": "silent" }
+  },
+
+  // create-time: build the degraded replica (software + components + render + verify)
+  "onCreateCommand": "bash .devcontainer/bootstrap.sh",
+
+  "remoteUser": "vscode"
+}
