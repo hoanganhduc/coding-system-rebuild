@@ -62,6 +62,18 @@
         "linux/amd64": "sha256:6f565f25ad29f509a1184777426edb21a6291a4030243581a23dbeb55f1d28a4"
       },
       "evidence": "registry manifest resolved from the owner-built Translation Server image"
+    },
+    {
+      "id": "python-wheelhouse",
+      "roles": ["python-wheelhouse"],
+      "repository": "ghcr.io/hoanganhduc/coding-system-rebuild-python-wheelhouse",
+      "reference": "ghcr.io/hoanganhduc/coding-system-rebuild-python-wheelhouse@sha256:9d0b23afa7fdc3f61da4e53863873eb01b088b71488dd2decbbce88b9edf8bd2",
+      "index_digest": "sha256:9d0b23afa7fdc3f61da4e53863873eb01b088b71488dd2decbbce88b9edf8bd2",
+      "platforms": {
+        "linux/amd64": "sha256:1a7e4e80589600797a29d3e0dbf91cb1c5519019cbaf88db073d5b1a862bde66",
+        "linux/arm64": "sha256:0c84f9d5b2438a4d4f45b4945c5d8ade1c206f467d4be430dcd3f0e9028b17b0"
+      },
+      "evidence": "built and offline-verified (install --no-index, pip check and import probes for every environment) on clean GitHub runners for linux/amd64 and linux/arm64 by the python-wheelhouse workflow_dispatch run of 2026-10-01 on main dfed76d"
     }
   ]
 }

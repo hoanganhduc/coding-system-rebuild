@@ -191,7 +191,7 @@ class PythonClosureContractTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(executable.stat().st_mode), 0o555)
             self.assertEqual(stat.S_IMODE(generation.stat().st_mode), 0o755)
 
-    def test_both_platform_fixtures_and_pending_production_locks_validate(self) -> None:
+    def test_both_platform_fixtures_and_production_locks_validate(self) -> None:
         for architecture in ("amd64", "arm64"):
             normalized = MODULE.validate_lock(fixture(architecture))
             self.assertEqual(normalized["platform"], f"ubuntu-24.04-{architecture}")
@@ -208,16 +208,24 @@ class PythonClosureContractTests(unittest.TestCase):
                     "course-management",
                 },
             )
+            # The production locks carry the promoted CI wheelhouse: every
+            # environment names its exact wheels under one root manifest digest.
             production, _ = MODULE.load_lock(
                 ROOT / f"system/python-closure/ubuntu-24.04-{architecture}.lock.json"
             )
-            self.assertEqual(production["qualification"]["state"], "pending-artifacts")
+            self.assertEqual(production["qualification"]["state"], "qualified")
+            self.assertRegex(production["wheelhouseManifestSha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(
                 all(
-                    environment["qualification"]["state"] != "qualified"
+                    environment["qualification"]["state"] == "qualified"
+                    and environment["artifacts"]
                     for environment in production["environments"].values()
                 )
             )
+            image = RUNTIME.load_locked_image(
+                ROOT / "system/software/images.lock.json", architecture
+            )
+            self.assertEqual(image["platform"], f"linux/{architecture}")
 
     def test_rejects_unhashed_duplicate_sdist_and_legacy_url_authority(self) -> None:
         cases = []
@@ -587,15 +595,36 @@ class PythonClosureContractTests(unittest.TestCase):
 
 
 class PythonClosureInstallTests(unittest.TestCase):
-    def test_install_all_rejects_pending_production_lock_before_any_install(self) -> None:
+    def test_install_all_rejects_a_pending_lock_before_any_install(self) -> None:
         architecture = MODULE._machine_architecture(platform.machine())
-        result = subprocess.run(
+        pending = json.loads(
+            (ROOT / f"system/python-closure/ubuntu-24.04-{architecture}.lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        pending["qualification"] = {"state": "pending-artifacts", "blockers": ["fixture"]}
+        pending["wheelhouseManifestSha256"] = None
+        for environment in pending["environments"].values():
+            environment.update(
+                qualification={"state": "pending-artifacts", "blockers": ["fixture"]},
+                manifestSha256=None,
+                artifacts=[],
+            )
+        with tempfile.TemporaryDirectory() as temporary:
+            lock = Path(temporary) / f"ubuntu-24.04-{architecture}.lock.json"
+            lock.write_text(json.dumps(pending), encoding="utf-8")
+            result = self.run_pending_install(lock)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not qualified", result.stderr)
+
+    def run_pending_install(self, lock: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [
                 sys.executable,
                 str(SCRIPT),
                 "install-all",
                 "--lock",
-                str(ROOT / f"system/python-closure/ubuntu-24.04-{architecture}.lock.json"),
+                str(lock),
                 "--images-lock",
                 str(ROOT / "system/software/images.lock.json"),
                 "--wheelhouse",
@@ -609,8 +638,6 @@ class PythonClosureInstallTests(unittest.TestCase):
             text=True,
             check=False,
         )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("not qualified", result.stderr)
 
     def test_offline_install_verify_inventory_and_idempotence(self) -> None:
         architecture = MODULE._machine_architecture(platform.machine())
