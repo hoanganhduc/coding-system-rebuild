@@ -61,7 +61,9 @@ installs no Grok release and must report that it skipped the Grok gates.
 The job first moves the runner image's own Node out of `/usr/local/bin`: a fresh
 Ubuntu has none, and it would shadow the locked Node in `~/.npm-global/bin`. If the
 installer fails, the job resumes it once after each failing phase, so the same run
-also reports later failures; those probe logs are diagnostics only.
+also reports later failures; those probe logs are diagnostics only. While
+`install.log` stops growing, the job records the running processes every ten
+minutes in `stall-report.log`, and it uploads the verifiers' reports with the log.
 
 It does **not** verify the live OpenClaw gateway starting, channel round-trips, or full
 secret restore — those need the complete encrypted archive and production-like host and

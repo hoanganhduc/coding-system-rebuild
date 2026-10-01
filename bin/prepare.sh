@@ -124,8 +124,10 @@ if ! skip SKIP_APT; then
       printf '%s\n' "$package"
     done < "$PKG/apt.lock.txt"
   )
-  sudo apt-get "${APT_OPTIONS[@]}" update -qq
-  sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTIONS[@]}" install -y -qq "${base_packages[@]}"
+  # One -q still prints a line per source and fetched package, so a stalled
+  # mirror shows in the log instead of a silent wait.
+  sudo apt-get "${APT_OPTIONS[@]}" update -q
+  sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTIONS[@]}" install -y -q "${base_packages[@]}"
   require_locked_versions "${base_packages[@]}"
 fi
 

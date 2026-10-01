@@ -331,6 +331,14 @@ jobs:
             sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           fi
           df -h / | tail -1
+      - name: Let background package jobs finish
+        run: |
+          # A fresh VM may still be running apt-daily or unattended-upgrades,
+          # which hold the package locks the installer needs.
+          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service 2>/dev/null || true
+          sudo systemd-run --quiet --wait \
+            --property=After=apt-daily.service --property=After=apt-daily-upgrade.service \
+            /bin/true || true
       - name: Bootstrap deps
         run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml build-essential dbus-user-session libssl-dev openssl pkg-config
       - name: Hide the runner's own Node, as on a fresh Ubuntu
@@ -657,6 +665,24 @@ jobs:
           uid="$(id -u)"
           gid="$(id -g)"
           [[ "$uid" =~ ^[1-9][0-9]*$ && "$gid" =~ ^[1-9][0-9]*$ ]]
+          # A hang would otherwise end silently at the 45-minute cap: while
+          # install.log stays unchanged, record every ten minutes what runs.
+          (
+            set +e
+            quiet=0
+            last=-1
+            while sleep 60; do
+              size="$(stat -c %s install.log 2>/dev/null || echo 0)"
+              if [ "$size" = "$last" ]; then quiet=$((quiet + 1)); else quiet=0; last="$size"; fi
+              if [ "$quiet" -gt 0 ] && [ $((quiet % 10)) -eq 0 ]; then
+                {
+                  echo "=== $(date -u +%FT%TZ): install.log unchanged for $quiet minutes"
+                  ps -eo pid,ppid,etimes,stat,args --forest | cut -c1-240
+                } >> stall-report.log 2>&1
+              fi
+            done
+          ) &
+          stall_watch=$!
           set +e
           # The fixed capture writes at most 4 MiB to both destinations and
           # detects even a one-byte overflow before failing the pipeline.
@@ -690,6 +716,7 @@ jobs:
               --prefix bootstrap-preflight.log \
               --output install.log --limit 4194304
           pipeline_status=("${PIPESTATUS[@]}")
+          kill "$stall_watch" 2>/dev/null
           set -e
           installer_rc="${pipeline_status[0]:-125}"
           capture_rc="${pipeline_status[1]:-125}"
@@ -712,8 +739,9 @@ jobs:
           # one problem per run.  Resume after each failing phase, so the same
           # run also reports later failures that do not depend on it.  These
           # logs are diagnostics only: the job is already failing, and nothing
-          # below reads them as evidence.
-          set -uo pipefail
+          # below reads them as evidence.  GitHub runs steps with bash -e; a
+          # failing probe must not end the loop.
+          set +e -uo pipefail
           [ -f install.exit ] && [ "$(cat install.exit)" != 0 ] || exit 0
           last_phase() {
             grep -oE '^#+ PHASE [0-9]+' "$1" | tail -n 1 | grep -oE '[0-9]+$' || true
@@ -733,7 +761,7 @@ jobs:
               /usr/bin/timeout --signal=TERM --kill-after=30s 15m \
               /usr/bin/bash bin/install.sh </dev/null 2>&1 \
               | /usr/bin/python3 -I -B bin/lib/ci_bounded_tee.py \
-                  --output "$log" --limit 4194304 >/dev/null
+                  --output "$log" --limit 16777216 >/dev/null
             rc="${PIPESTATUS[0]}"
             if [ "$rc" = 0 ]; then
               echo "probe from phase $start: completed"
@@ -763,6 +791,12 @@ jobs:
               | while IFS= read -r line; do echo "::error title=install.log::${line:0:300}"; done
             echo "::group::last 80 lines of install.log"
             tail -n 80 install.log
+            echo "::endgroup::"
+          fi
+          if [ -s stall-report.log ]; then
+            echo "::error title=installer stalled::install.log stopped growing; see stall-report.log"
+            echo "::group::stall-report.log"
+            tail -n 200 stall-report.log
             echo "::endgroup::"
           fi
       - name: Assert key phases succeeded
@@ -816,9 +850,17 @@ jobs:
               "install.delegated-cgroup.preflight",
               "install.phase8.aas-pin",
               "install.phase8.aas-install",
+              "install.phase8.shared-runtime",
+              "install.phase8.copilot-wrapper",
               "install.phase8.codex-runtime",
               "install.phase8.aas-verify",
+              "install.phase8.openclaw-skill-closure-v2-gate",
           }
+          # target-state passes only when every native agent session is configured,
+          # which an install without secrets cannot have.
+          optional = {"install.phase8.target-state"}
+          # A degraded install validates the Python closure without extracting it.
+          expected_skipped = {"install.phase9.python-closure": "degraded-no-runtime-artifacts"}
           if not skip_grok:
               expected |= {
                   "install.phase6.grok-bootstrap-status",
@@ -827,16 +869,24 @@ jobs:
               }
           elif "(Grok bootstrap, release and gates skipped via SKIP_GROK)" not in text:
               errors.append("phase 6 did not report that SKIP_GROK skipped Grok")
-          missing = sorted(expected - set(records))
-          extra = sorted(set(records) - expected)
+          missing = sorted((expected | set(expected_skipped)) - set(records))
+          extra = sorted(set(records) - expected - optional - set(expected_skipped))
           if missing:
               errors.append("missing structured gates: " + ", ".join(missing))
           if extra:
               errors.append("unexpected structured gates: " + ", ".join(extra))
-          for case_id in sorted(expected & set(records)):
+          for case_id in sorted((expected | optional) & set(records)):
               value = records[case_id]
               if value.get("schema_version") != 1 or value.get("status") != "passed":
                   errors.append(f"structured gate did not pass: {case_id}")
+          for case_id, reason in sorted(expected_skipped.items()):
+              value = records.get(case_id)
+              if value is not None and (
+                  value.get("schema_version") != 1
+                  or value.get("status") != "skipped"
+                  or value.get("reason") != reason
+              ):
+                  errors.append(f"structured gate was not skipped as expected: {case_id}")
 
           if not skip_grok:
               install = records.get("install.phase6.grok-install", {})
@@ -1058,8 +1108,8 @@ jobs:
           reports="$HOME/.local/state/coding-system/restore"
           mkdir -p restore-reports
           if [ -d "$reports" ]; then
-            find "$reports" -maxdepth 1 -type f -name '*.json' -size -4M \
-              -exec cp -- {} restore-reports/ \;
+            find "$reports" -maxdepth 1 -type f \( -name '*.json' -o -name 'aas-*.log' \) \
+              -size -32M -exec cp -- {} restore-reports/ \;
           fi
           ls -la restore-reports
       - name: Summary
@@ -1075,4 +1125,5 @@ jobs:
             install.exit
             bootstrap-preflight.log
             probe-from-phase-*.log
+            stall-report.log
             restore-reports/
