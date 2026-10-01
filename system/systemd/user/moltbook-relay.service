@@ -1,0 +1,6 @@
+[Unit]
+Description=Relay moltbook staging files to sanitizer input
+
+[Service]
+Type=oneshot
+ExecStart={{ HOME }}/.openclaw/workspace/scripts/moltbook-relay.sh

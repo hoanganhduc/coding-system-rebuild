@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="{{ HOME }}/.openclaw/workspace/skills/getscipapers_requester"
+export GETSCIPAPERS_SKILL_CONFIG="${GETSCIPAPERS_SKILL_CONFIG:-{{ HOME }}/.openclaw/workspace/data/research/getscipapers_bot/state/config.json}"
+exec python3 "$SCRIPT_DIR/gsp_openclaw_helper.py" "$@"

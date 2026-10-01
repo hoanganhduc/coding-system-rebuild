@@ -1,0 +1,48 @@
+# Pinned component clones (never committed here)
+external/
+# Sync dry-run staging output
+.staging/
+# Doc-claim verification output — records the absolute paths it probed
+/.planning/tmp/
+# Secrets artifacts must never enter the repo
+*.zip
+secrets-out/
+.secrets.env
+leak-denylist.txt
+# Temp / caches
+*.tmp
+*.log
+__pycache__/
+.pytest_cache/
+.DS_Store
+
+# Repository-local Grok diagnostics are preserved across authoritative capture
+# but are never public backup inputs.
+/system/grok-proxy/.planning/
+/system/grok-proxy/.learnings/
+
+# Private material that must never be committed (restore plan, step 0.4).
+*.gpg
+# public apt repository keyrings, digest-bound in the platform locks
+!/system/packages/apt-sources/*.gpg
+*.age
+*.pem
+*.key
+.env
+*.bak-*
+*.new
+secrets-restore-inbox/
+escrow/
+csr-*/
+system/packages/observed/
+*.bundle
+*.tar
+*.tar.*
+recovery-set*.json
+*.sig
+owner-data*
+drill-output/
+restore-report*
+target-state*
+# Schemas are code, not private material.
+!secrets/*.schema.json

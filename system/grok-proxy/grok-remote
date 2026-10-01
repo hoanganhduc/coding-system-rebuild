@@ -1,0 +1,850 @@
+#!/bin/bash -p
+# grok-remote — run the grok CLI through an egress that actually offers the model you want.
+#
+# grok.com can vary models by requesting region. grok-remote selects the first
+# healthy configured route that can serve the request, launches grok on the
+# model you chose, and holds the egress up for as long as grok runs, failing
+# over underneath the session when one dies:
+#
+#     home PC over Tailscale  >  registered iPhone/iPad nodes  >  VPN Gate ... [direct fallback]
+#
+#   grok-remote [grok-args...]   pick an egress, launch grok through it, supervise it
+#   grok-remote status           active rung, the IP grok.com sees, and the remembered model
+#   grok-remote ip               print that egress IP and exit
+#   grok-remote stop             tear the egress down
+#   grok-remote iphone-setup [NODE] [--label KEY] register one iOS exit node
+#   grok-remote iphone-list      list registered iOS devices in priority order
+#   grok-remote iphone-remove KEY / iphone-reorder KEY... manage that order
+#   grok-remote --host LABEL     force one home PC from hosts.conf
+#   grok-remote --iphone         use registered iOS devices in priority order
+#   grok-remote --ios KEY        force one exact registered iOS device
+#   grok-remote --vpn            skip the home PCs; start on VPN Gate
+#   grok-remote --direct         use the committed direct backend only (feature-on)
+#   grok-remote --no-direct      never fall back to the direct connection
+#   GROK_MULTI_SESSION=0 grok-remote --pick-model  compatibility model menu
+#   grok-remote doctor --json    report managed multi-session readiness without egress
+#   grok-remote profile-create --json snapshot a private managed-profile candidate
+#   GROK_MULTI_SESSION=0 grok-remote ... force the compatibility lane
+#
+# Managed profiles freeze one model; changing it requires a new candidate and
+# activation. In compatibility mode, automatic selection accepts the first healthy
+# configured route with a usable model catalog, even when direct offers the
+# same catalog. Explicit --host/--ios selection binds one exact route, while
+# --iphone selects the ordered iOS family. Your model choice is remembered, and you are only
+# asked again when the egress starts offering something new. The ladder,
+# probes, and watchdog live in
+# egress.sh; socks-netns.py lets VPN bind the same local SOCKS port used by SSH routes.
+set -uo pipefail
+
+SELF="$(/usr/bin/readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+DIR="$(cd "$(/usr/bin/dirname "$SELF")" && pwd -P)"
+
+# Pure compatibility classifier shared by the live lane and the installer-owned
+# hermetic matrix below.  It performs no file, process, route, or network work.
+compatibility_classify(){
+  local -a args=("$@")
+  case "${args[0]:-}" in
+    -h|--help|help) printf usage; return 0 ;;
+    inspect|--version|version|completions|worktree|leader) printf bare; return 0 ;;
+    status) [[ ${#args[@]} == 1 ]] || return 2; printf status; return 0 ;;
+    iphone-list) [[ ${#args[@]} == 1 ]] || return 2; printf control; return 0 ;;
+    ip) [[ ${#args[@]} == 1 ]] || return 2; printf ip; return 0 ;;
+    stop) [[ ${#args[@]} == 1 ]] || return 2; printf maintenance; return 0 ;;
+    iphone-setup|iphone-remove|iphone-reorder) printf maintenance; return 0 ;;
+  esac
+  local index=0 forced=0 force_direct=0 deny_direct=0
+  while (( index < ${#args[@]} )); do
+    case "${args[$index]}" in
+      --host)
+        (( index + 1 < ${#args[@]} )) && [[ -n "${args[$((index + 1))]}" ]] || return 2
+        forced=$((forced + 1)); index=$((index + 2)) ;;
+      --iphone|--vpn)
+        forced=$((forced + 1)); index=$((index + 1)) ;;
+      --ios)
+        (( index + 1 < ${#args[@]} )) && [[ -n "${args[$((index + 1))]}" ]] || return 2
+        forced=$((forced + 1)); index=$((index + 2)) ;;
+      --direct)
+        force_direct=1
+        forced=$((forced + 1))
+        index=$((index + 1)) ;;
+      --no-direct)
+        deny_direct=1
+        index=$((index + 1)) ;;
+      --pick-model)
+        index=$((index + 1)) ;;
+      --) index=$((index + 1)); break ;;
+      *) break ;;
+    esac
+  done
+  (( forced <= 1 )) || return 2
+  (( force_direct == 0 || deny_direct == 0 )) || return 2
+  case "${args[$index]:-}" in
+    completions|worktree|leader) printf bare; return 0 ;;
+  esac
+  printf gated
+}
+
+RELEASE_ADMITTED=0
+self_admit_release(){
+  (( RELEASE_ADMITTED == 0 )) || return 0
+  local control=/var/lib/grok-proxy/release-control rc=0
+  if [[ "${GROK_TESTING:-0}" == 1 && -n "${GROK_TEST_ROOT_RELEASE_CONTROL:-}" ]]; then
+    control="$GROK_TEST_ROOT_RELEASE_CONTROL"
+  fi
+  exec {GROK_SELF_RELEASE_LOCK_FD}<"$control/install.lock" \
+    || return 78
+  local -a admission=(
+    /usr/bin/python3 -I "$DIR/grok_ms/release_admission.py"
+    "$DIR" "$SELF" "$GROK_SELF_RELEASE_LOCK_FD"
+  )
+  if (( RELEASE_CANARY == 1 )); then
+    admission+=("$GROK_RELEASE_CANARY_FD")
+  elif (( $# == 2 )) && [[ "$1" == doctor && "$2" == --json ]]; then
+    admission+=(--managed-doctor)
+  elif (( $# == 1 )) && [[ "$1" == recover ]] \
+       && [[ "${GROK_MULTI_SESSION+x}" != x \
+            || "${GROK_MULTI_SESSION-}" == 0 \
+            || "${GROK_MULTI_SESSION-}" == 1 ]]; then
+    admission+=(--public-recovery)
+  fi
+  "${admission[@]}" || rc=$?
+  if (( rc == 79 )) && (( $# == 2 )) \
+     && [[ "$1" == doctor && "$2" == --json ]]; then
+    export GROK_MANAGED_DOCTOR_GATE_BLOCKED=1
+  elif (( rc != 0 )); then
+    exec {GROK_SELF_RELEASE_LOCK_FD}<&-
+    return 78
+  fi
+  RELEASE_ADMITTED=1
+  if [[ "${GROK_RELEASE_LOCK_FD:-}" =~ ^[0-9]+$ ]]; then
+    exec {GROK_RELEASE_LOCK_FD}<&-
+  fi
+  unset GROK_RELEASE_LOCK_FD
+}
+
+# The release installer alone may run this bounded, non-networked feature-off
+# smoke.  Its generated gate first binds the inherited descriptor to the fixed
+# root-owned authorization inode; the wrapper independently requires a root
+# 0600 descriptor before providing a safe release version that never invokes
+# Grok's stateful `inspect`/`--version` path.
+RELEASE_CANARY=0
+if [[ "${GROK_RELEASE_CANARY_MODE:-0}" == 1 ]]; then
+  [[ "${GROK_RELEASE_CANARY_FD:-}" =~ ^[0-9]+$ ]] \
+    || { printf '[egress] invalid release canary descriptor\n' >&2; exit 78; }
+  /usr/bin/python3 -I - "${GROK_RELEASE_CANARY_FD}" "${GROK_TESTING:-0}" <<'PY' \
+    || { printf '[egress] unauthorized release canary\n' >&2; exit 78; }
+import os
+import stat
+import sys
+
+descriptor = int(sys.argv[1])
+expected_uid = os.getuid() if sys.argv[2] == "1" else 0
+value = os.fstat(descriptor)
+if (
+    not stat.S_ISREG(value.st_mode)
+    or value.st_uid != expected_uid
+    or stat.S_IMODE(value.st_mode) != 0o600
+):
+    raise SystemExit(1)
+PY
+  case "$#:${1:-}" in
+    1:--help|1:--version|1:status|1:--release-compatibility-smoke) ;;
+    *) [[ "${GROK_RELEASE_RUNG_CANARY:-0}" == 1 ]] \
+         || { printf '[egress] unsupported release canary command\n' >&2; exit 78; } ;;
+  esac
+  RELEASE_CANARY=1
+  RELEASE_CANARY_ID="${GROK_RELEASE_CANARY_RELEASE_ID:-}"
+  [[ "$RELEASE_CANARY_ID" =~ ^[0-9a-f]{64}$ ]] \
+    || { printf '[egress] invalid release canary identity\n' >&2; exit 78; }
+  self_admit_release "$@" \
+    || { printf '[egress] unauthorized release canary\n' >&2; exit 78; }
+  if [[ "${GROK_RELEASE_RUNG_CANARY:-0}" == 1 ]]; then
+    # Keep the exact inherited capability and binding for a live, unqualified
+    # rung canary.  The Python client revalidates all of it before constructing
+    # the one-rung contract; ordinary callers cannot manufacture this FD.
+    [[ "${GROK_RELEASE_CANARY_NONCE:-}" =~ ^[0-9a-f]{64}$ ]] \
+      || { printf '[egress] invalid rung canary nonce\n' >&2; exit 78; }
+    canary_classification="$(compatibility_classify "$@")" \
+      || { printf '[egress] invalid rung canary command\n' >&2; exit 78; }
+    case "$canary_classification" in
+      usage|bare|maintenance)
+        printf '[egress] forbidden rung canary command class\n' >&2
+        exit 78
+        ;;
+    esac
+  else
+    exec {GROK_RELEASE_CANARY_FD}<&-
+    unset GROK_RELEASE_CANARY_MODE GROK_RELEASE_CANARY_FD \
+      GROK_RELEASE_CANARY_RELEASE_ID
+  fi
+  if [[ "${1:-}" == --release-compatibility-smoke ]]; then
+    tmp="$(/usr/bin/mktemp -d)" || exit 1
+    trap '/bin/rm -rf -- "$tmp"' EXIT
+    (
+      set -euo pipefail
+      export HOME="$tmp/home" GROK_TESTING=1
+      export GROK_TEST_CONTROL_DIR="$tmp/control"
+      /bin/mkdir -p "$HOME/grok-proxy" "$GROK_TEST_CONTROL_DIR"
+      /bin/chmod 700 "$GROK_TEST_CONTROL_DIR"
+      # This is the selected release's real compatibility provider.  All
+      # transport entry points are replaced only after it has been sourced.
+      . "$DIR/egress.sh"
+      local_up(){ : > "$tmp/local"; set_active "local:$1" "fixture@$1" 22; }
+      local_alive(){ [[ -f "$tmp/local" ]]; }
+      local_down(){ /bin/rm -f "$tmp/local"; }
+      ios_select_context(){ IOS_SELECTED_KEY="$1"; IOS_SELECTED_NODE_ID=n-fixture; }
+      iphone_up(){
+        : > "$tmp/iphone"
+        if [[ "${1:-iphone}" == ios:* ]]; then
+          ios_select_context "${1#ios:}"
+          set_active "$1" "$IOS_SELECTED_NODE_ID"
+        else
+          set_active iphone
+        fi
+      }
+      iphone_alive(){ [[ -f "$tmp/iphone" ]]; }
+      iphone_down(){ /bin/rm -f "$tmp/iphone"; }
+      vpn_up(){ : > "$tmp/vpn"; set_active vpn; }
+      vpn_alive(){ [[ -f "$tmp/vpn" ]]; }
+      vpn_down(){ /bin/rm -f "$tmp/vpn"; }
+      [[ "$(compatibility_classify --help)" == usage ]]
+      [[ "$(compatibility_classify status)" == status ]]
+      [[ "$(compatibility_classify stop)" == maintenance ]]
+      [[ "$(compatibility_classify iphone-setup fixture)" == maintenance ]]
+      [[ "$(compatibility_classify --host fixture -m model)" == gated ]]
+      [[ "$(compatibility_classify --iphone -m model)" == gated ]]
+      [[ "$(compatibility_classify --ios fixture -m model)" == gated ]]
+      [[ "$(compatibility_classify --vpn -m model)" == gated ]]
+      ! compatibility_classify --host fixture --vpn >/dev/null
+      for rung in direct local:fixture iphone ios:fixture vpn; do
+        rung_up "$rung"
+        [[ "$(active_rung)" == "$rung" ]]
+        rung_alive "$rung"
+        teardown_all
+        [[ ! -e "$STATE" && ! -e "$tmp/local" && ! -e "$tmp/iphone" && ! -e "$tmp/vpn" ]]
+      done
+      printf '%s\n' 'compatibility-matrix-v1:pass'
+    )
+    rc=$?
+    /bin/rm -rf -- "$tmp"
+    trap - EXIT
+    exit "$rc"
+  fi
+  if [[ "${GROK_RELEASE_RUNG_CANARY:-0}" == 1 ]]; then
+    : # continue into the real opt-in client below
+  else
+    if [[ "${1:-}" == --version ]]; then
+      printf 'grok-remote release %s\n' "$RELEASE_CANARY_ID"
+      exit 0
+    fi
+    if [[ "${1:-}" == --help ]]; then
+      /usr/bin/sed -n '2,26p' "$SELF" | /usr/bin/sed 's/^# \{0,1\}//'
+      exit 0
+    fi
+    if [[ "${1:-}" == status ]]; then
+      printf '[egress] no active egress (release canary)\n' >&2
+      exit 0
+    fi
+  fi
+elif [[ -n "${GROK_RELEASE_CANARY_MODE:-}${GROK_RELEASE_CANARY_FD:-}${GROK_RELEASE_CANARY_RELEASE_ID:-}${GROK_RELEASE_RUNG_CANARY:-}${GROK_RELEASE_CANARY_RUNG:-}${GROK_RELEASE_CANARY_ROUTE_PROFILE:-}${GROK_RELEASE_CANARY_CONTRACT:-}${GROK_RELEASE_CANARY_GROK_RELEASE:-}${GROK_RELEASE_CANARY_KIND:-}${GROK_RELEASE_CANARY_MODEL:-}${GROK_RELEASE_CANARY_NONCE:-}${GROK_RELEASE_CANARY_PROFILE_SHA256:-}" ]]; then
+  printf '[egress] incomplete release canary authorization\n' >&2
+  exit 78
+fi
+
+require_installed_release(){
+  self_admit_release "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]] && ! require_installed_release "$@"; then
+  printf '[egress] editable source tree is not executable; use ~/.local/bin/grok-remote\n' >&2
+  exit 78
+fi
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+  unset PYTHONPATH PYTHONHOME BASH_ENV ENV
+  while IFS= read -r variable; do unset "$variable"; done < <(compgen -A variable LD_)
+fi
+
+# Dispatch an installer-attested managed profile by default, while retaining
+# the reviewed feature-on value for qualification and an exact compatibility
+# escape (`GROK_MULTI_SESSION=0`).  Profile inspection/creation is always
+# handled before sourcing compatibility code and never touches provider state.
+if [[ "${BASH_SOURCE[0]}" == "${0}" \
+   && ( "${1:-}" == doctor \
+        || "${1:-}" == profile-create \
+        || "${RELEASE_CANARY:-0}" == 1 \
+        || "${GROK_MULTI_SESSION+x}" != x \
+        || "${GROK_MULTI_SESSION-}" == 1 \
+        || ( $# == 1 && "${1:-}" == recover \
+             && "${GROK_MULTI_SESSION-}" == 0 ) ) ]]; then
+  export GROK_FRONTEND_RELEASE_LOCK_FD="$GROK_SELF_RELEASE_LOCK_FD"
+  exec /usr/bin/python3 -E -s -P -c \
+    'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("grok_ms.client",run_name="__main__",alter_sys=True)' \
+    "$DIR" --release-dir "$DIR" -- "$@"
+fi
+unset GROK_MANAGED_PROFILE_AVAILABLE
+# shellcheck source=egress.sh
+if ! . "$DIR/egress.sh"; then
+  exit 1
+fi
+
+PRIVATE_DIR="$HOME/grok-proxy"
+[[ -e "$DIR/hosts.conf" || -e "$DIR/.model.choice" ]] && PRIVATE_DIR="$DIR"
+LEADER="$PRIVATE_DIR/.grok-leader.sock"   # compatibility lane's dedicated leader
+CHOICE="$PRIVATE_DIR/.model.choice"       # remembered model (private mutable state)
+SEEN="$PRIVATE_DIR/.model.seen"           # last offered set (private mutable state)
+FORCE_PICK=0
+FORCE_EXACT_ROUTE=""                    # internal watchdog policy; never inherited from callers
+
+usage(){ sed -n '2,29p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+acquire_session_lock(){
+  acquire_stable_mutation_lock
+}
+
+no_egress_help(){ cat >&2 <<EOF
+${c_red}[egress]${c_rst} No configured route can currently serve this request.
+  - Wake a home PC, confirm 'tailscale status' shows it online, and make sure its
+    ssh_user is filled in in $CONF
+  - Or register/inspect iOS devices:  grok-remote iphone-setup / iphone-list
+  - Or force the VPN Gate fallback:   grok-remote --vpn
+  - Or accept the direct connection:  drop --no-direct
+EOF
+}
+
+proxy_for(){ [[ "$1" == direct ]] && printf '' || printf '%s' "$PROXY"; }
+
+cmd_status(){
+  local r unlocked_ok=1 choice_ok=1; r="$(active_rung)"
+  sanitize_model_state_file "$UNLOCKED" || unlocked_ok=0
+  sanitize_model_state_file "$CHOICE" || choice_ok=0
+  [[ -z "$r" ]] && { eg_log "no egress selected"; return 0; }
+  if rung_alive "$r"; then
+    eg_ok "active rung: $r"
+    eg_log "grok.com sees: $(egress_ip "$(proxy_for "$r")")"
+    (( unlocked_ok )) && [[ -s "$UNLOCKED" && "$r" != direct ]] \
+      && eg_log "unlocked: $(paste -sd, "$UNLOCKED")"
+    (( choice_ok )) && [[ -s "$CHOICE" ]] \
+      && eg_log "remembered model: $(cat "$CHOICE")   (--pick-model to change)"
+  else
+    eg_warn "active rung: $r (DOWN — the next grok-remote run will rebuild it)"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------- model selection
+
+grok_subcommands(){ "$GROK_BIN" --help 2>/dev/null | awk '/^Commands:/{f=1;next} f&&/^  [a-z]/{print $1}'; }
+is_subcommand(){ [[ -n "${1:-}" ]] && grok_subcommands | grep -qx -- "$1"; }
+
+caller_picked_model(){
+  local a
+  for a in "$@"; do
+    case "$a" in -m|--model|--model=*|-m?*) return 0 ;; esac
+  done
+  return 1
+}
+
+caller_model(){
+  local a prev=""
+  for a in "$@"; do
+    case "$prev" in -m|--model) printf '%s' "$a"; return 0 ;; esac
+    case "$a" in
+      --model=*) printf '%s' "${a#--model=}"; return 0 ;;
+      -m?*)      printf '%s' "${a#-m}"; return 0 ;;
+    esac
+    prev="$a"
+  done
+}
+
+# Only ever block on a human when there is a human there. Headless runs must not hang on a prompt.
+interactive(){
+  [[ "${GROK_MODEL_PROMPT:-1}" == 1 ]] || return 1
+  [[ -t 0 ]] || return 1
+  local a
+  for a in "$@"; do
+    case "$a" in -p|-p?*|--single|--single=*|--prompt-file|--prompt-file=*|--prompt-json|--prompt-json=*) return 1 ;; esac
+  done
+  return 0
+}
+
+# The menu. Your current choice is the default, so Enter keeps it.
+pick_model(){
+  local -a opts=("$@")
+  local cur i def=1 ans
+  discard_invalid_model_state_file "$CHOICE"
+  cur="$(cat "$CHOICE" 2>/dev/null)"
+  for i in "${!opts[@]}"; do [[ "${opts[$i]}" == "$cur" ]] && def=$((i+1)); done
+  {
+    printf '\n%s[egress]%s models available through this egress:\n' "$c_cyan" "$c_rst"
+    for i in "${!opts[@]}"; do
+      printf '   %d) %s%s\n' "$((i+1))" "${opts[$i]}" "$([[ "${opts[$i]}" == "$cur" ]] && printf ' (current)')"
+    done
+    printf '   0) let grok decide (%s)\n' "$(grok_default_model)"
+    printf ' pick [%d]: ' "$def"
+  } >&2
+  read -r ans || ans=""
+  [[ -z "$ans" ]] && ans="$def"
+  if [[ "$ans" == 0 ]]; then : > "$CHOICE"; return 0; fi
+  if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= ${#opts[@]} )); then
+    printf '%s\n' "${opts[$((ans-1))]}" > "$CHOICE"; return 0
+  fi
+  eg_warn "not a valid choice — leaving the model to grok"
+  : > "$CHOICE"
+}
+
+grok_default_model(){
+  local value
+  value="$(sed -n 's/^default *= *"\(.*\)"/\1/p' "$HOME/.grok/config.toml" 2>/dev/null | head -1)"
+  model_id_valid "$value" && printf '%s' "$value"
+}
+
+# Resolve only a forced-route admission target; model_args() remains the sole
+# writer of compatibility choice state.  An explicit CLI model outranks an
+# environment pin, which outranks a valid nonempty remembered choice.  Missing
+# and intentionally empty choices both preserve "let grok decide".  Without an
+# environment pin, --pick-model and routed subcommands need the full catalog.
+forced_probe_model(){
+  local model=""
+  if caller_picked_model "$@"; then
+    model="$(caller_model "$@")"
+  elif [[ -n "$REQUIRE_MODEL" ]]; then
+    model="$REQUIRE_MODEL"
+  elif (( FORCE_PICK )) || is_subcommand "${1:-}"; then
+    return 0
+  else
+    discard_invalid_model_state_file "$CHOICE"
+    model="$(cat "$CHOICE" 2>/dev/null)"
+  fi
+  if [[ -n "$model" ]]; then
+    model_id_valid "$model" || return 1
+    printf '%s' "$model"
+  fi
+}
+
+# Automatic discovery keeps the full route catalog available to model_args()
+# so it can notice new models and preserve the existing picker behavior. Only
+# an explicit CLI model or environment pin constrains initial admission.
+automatic_probe_model(){
+  local model=""
+  if caller_picked_model "$@"; then
+    model="$(caller_model "$@")"
+  elif [[ -n "$REQUIRE_MODEL" ]]; then
+    model="$REQUIRE_MODEL"
+  fi
+  if [[ -n "$model" ]]; then
+    model_id_valid "$model" || return 1
+    printf '%s' "$model"
+  fi
+}
+
+# grok keeps using its own default even when a rung has unlocked a better model, so hand it the one
+# you want explicitly. The choice is remembered: you are asked again only when this egress starts
+# offering something it has never offered before (or you ask for the menu with --pick-model).
+# Ranking the models for you is not an option -- any numeric sort would crown grok-420-computer-v0.
+model_args(){
+  local rung="$1"; shift
+  local -a unlocked=() new=()
+  local choice m
+
+  discard_invalid_model_state_file "$UNLOCKED"
+  discard_invalid_model_state_file "$CHOICE"
+  discard_invalid_model_state_file "$SEEN"
+  [[ "$rung" == direct ]] && return 0
+  [[ -s "$UNLOCKED" ]] || return 0
+  mapfile -t unlocked < "$UNLOCKED"
+
+  # An explicit -m wins, and is remembered: `grok-remote -m X` is also how you change your mind.
+  if caller_picked_model "$@"; then
+    m="$(caller_model "$@")"
+    if [[ -n "$m" ]]; then
+      if ! model_id_valid "$m"; then
+        eg_warn "invalid model id"
+        return 1
+      fi
+      printf '%s\n' "$m" > "$CHOICE"
+      # Record what this egress currently offers as already seen, so a later interactive run does not
+      # re-open the menu just because you named a model on the command line this time.
+      printf '%s\n' "${unlocked[@]}" | sort -u > "$SEEN"
+      eg_log "model: $m (yours — remembered for next time)" >&2
+    else
+      # A bare -m with no id: nothing to pin or remember — let grok fall back to its own default.
+      eg_warn "-m without a model id — letting grok choose" >&2
+    fi
+    return 0
+  fi
+  is_subcommand "${1:-}" && return 0
+
+  choice="$(cat "$CHOICE" 2>/dev/null)"
+  # A remembered choice only counts while this egress still offers it.
+  if [[ -n "$choice" ]] && ! printf '%s\n' "${unlocked[@]}" | grep -qxF -- "$choice"; then
+    eg_warn "the model you chose ($choice) is not offered here — asking again"
+    choice=""; rm -f "$SEEN"
+  fi
+
+  mapfile -t new < <(comm -23 <(printf '%s\n' "${unlocked[@]}" | sort -u) <(sort -u "$SEEN" 2>/dev/null))
+
+  if (( ${#new[@]} > 0 || FORCE_PICK )); then
+    if (( ${#unlocked[@]} == 1 )); then
+      choice="${unlocked[0]}"                       # unambiguous: nothing to ask
+      printf '%s\n' "$choice" > "$CHOICE"
+      printf '%s\n' "${unlocked[@]}" | sort -u > "$SEEN"
+    elif interactive "$@"; then
+      (( ${#new[@]} > 0 && ${#new[@]} < ${#unlocked[@]} )) \
+        && eg_ok "new since last time: $(printf '%s,' "${new[@]}" | sed 's/,$//')"
+      pick_model "${unlocked[@]}"
+      printf '%s\n' "${unlocked[@]}" | sort -u > "$SEEN"
+      choice="$(cat "$CHOICE" 2>/dev/null)"
+    else
+      # Headless: never block on a prompt. Keep the model you already chose if this egress still
+      # offers it -- a new model appearing must not silently drop you back to grok's default. Do
+      # not record these as seen either: the next interactive run still owes you the menu.
+      if [[ -z "$choice" ]]; then
+        eg_ok "available: $(paste -sd, "$UNLOCKED")   (run interactively to choose, or pass -m)"
+        return 0
+      fi
+      eg_log "new on offer: $(printf '%s,' "${new[@]}" | sed 's/,$//') — keeping $choice for now" >&2
+    fi
+  fi
+
+  if [[ -n "$choice" ]]; then
+    printf '%s\n%s\n' "-m" "$choice"
+    if (( ${#unlocked[@]} > 1 )); then
+      eg_ok "model: $choice (remembered — --pick-model to change)" >&2
+    else
+      eg_ok "model: $choice — available through this egress" >&2
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------- launch
+
+# Global, not local to launch(): the EXIT trap fires after launch() has returned, so a local would
+# be out of scope by then and `set -u` would blow up inside the trap.
+WATCHDOG_PID=""
+GROK_PID=""
+stop_watchdog(){ [[ -n "$WATCHDOG_PID" ]] && kill "$WATCHDOG_PID" 2>/dev/null; WATCHDOG_PID=""; }
+# grok runs backgrounded so `wait` stays interruptible by traps; forward an external TERM to it.
+forward_term(){ [[ -n "$GROK_PID" ]] && kill -TERM "$GROK_PID" 2>/dev/null; }
+
+# Deliberately not `exec`: the watchdog has to outlive the selection and keep repairing the egress
+# for as long as grok is alive. grok tolerates the port vanishing for a few seconds -- it fails
+# closed, retries, and resumes -- so a rung swap never reaches the session.
+launch(){
+  local rung; rung="$(active_rung)"
+  eg_ok "egress: $rung  (grok.com will see $(egress_ip "$(proxy_for "$rung")"))"
+  [[ "$rung" == direct ]] && eg_warn "no tunnel in use — only the models this region is given"
+
+  local -a marg=()
+  mapfile -t marg < <(model_args "$rung" "$@")
+
+  # The session is pinned to one model, so the failover must be too: demoting to a rung that does
+  # not offer it would break the running session with "unknown model id".
+  if (( ${#marg[@]} == 2 )); then
+    REQUIRE_MODEL="${marg[1]}"
+    model_id_valid "$REQUIRE_MODEL" || { eg_err "invalid remembered model id"; return 2; }
+    eg_log "failover will only accept a rung that still offers $REQUIRE_MODEL"
+  elif caller_picked_model "$@"; then
+    # model_args returns early on the caller's own -m, so marg never carries it; pin from the caller's
+    # argv directly, or the watchdog could fail over to a rung that no longer offers that model.
+    local cm; cm="$(caller_model "$@")"
+    if [[ -n "$cm" ]]; then
+      model_id_valid "$cm" || { eg_err "invalid caller model id"; return 2; }
+      REQUIRE_MODEL="$cm"
+      eg_log "failover will only accept a rung that still offers $REQUIRE_MODEL"
+    fi
+  fi
+
+  ( exec 9>&-; watch_egress ) &
+  WATCHDOG_PID=$!
+  # Run grok backgrounded and wait on it, so an external `kill -TERM` on this wrapper is forwarded to
+  # grok at once. A foreground external command would defer the trap until grok exits on its own,
+  # leaving it orphaned. Ctrl-C is deliberately left to the terminal: the whole process group gets
+  # SIGINT, so grok cancels its turn while this wrapper ignores it and the session survives.
+  trap stop_watchdog EXIT
+  trap forward_term TERM
+  trap ':' INT
+
+  # `<&0` keeps grok on the real stdin/tty -- an async command's stdin otherwise defaults to
+  # /dev/null. With job control off grok stays in this shell's process group, the terminal's
+  # foreground group, so it reads input and paints the TUI without SIGTTIN/SIGTTOU. Resetting
+  # INT/QUIT in the subshell hands grok clean default handlers to install its own over.
+  local rc=0
+  # models_via() rewrites grok's model cache on every probe, and the last probe before launch was
+  # learn_baseline's DIRECT fetch -- so the cache now holds the blocked region's list, not what this
+  # egress serves. Drop it so grok refetches /v1/models through the session's own connection; otherwise
+  # it validates -m against the stale list and rejects the model ("unknown model id" / silent demote).
+  # Grok recreates this shared cache itself.  Force a private creation mask so
+  # an operator's cooperative shell umask cannot make the cache group-writable
+  # and therefore unsafe for later multi-session qualification.
+  umask 077
+  rm -f "$GROK_MODELS_CACHE"
+  if [[ "$rung" == direct ]]; then
+    ( trap - INT QUIT; exec 9>&-
+      exec "${CLEAN_PROXY_ENV[@]}" "$GROK_BIN" --leader-socket "$LEADER" "${marg[@]}" "$@" ) <&0 &
+  else
+    ( trap - INT QUIT; exec 9>&-
+      exec "${CLEAN_PROXY_ENV[@]}" ALL_PROXY="$PROXY" NO_PROXY="$NOPROXY" no_proxy="$NOPROXY" \
+        "$GROK_BIN" --leader-socket "$LEADER" "${marg[@]}" "$@" ) <&0 &
+  fi
+  GROK_PID=$!
+
+  # A trap firing while grok is still up makes `wait` return 128+signo; resume waiting until grok
+  # itself exits, so we return its real status (headless -p keeps propagating grok's exit code).
+  wait "$GROK_PID"; rc=$?
+  while (( rc > 128 )) && kill -0 "$GROK_PID" 2>/dev/null; do
+    wait "$GROK_PID"; rc=$?
+  done
+  GROK_PID=""
+
+  stop_watchdog
+  return "$rc"
+}
+
+discard_failed_exact_route(){
+  local rung="$1"
+  begin_recovery_transition || return 1
+  if ! rung_down "$rung"; then
+    eg_err "cannot discard failed forced route $rung because exact teardown failed"
+    return 1
+  fi
+  clear_active || return 1
+  end_recovery_transition || return 1
+}
+
+main(){
+  local classification
+  classification="$(compatibility_classify "$@")" \
+    || { eg_err "invalid or conflicting compatibility command"; exit 2; }
+  case "${1:-}" in
+    -h|--help|help) usage; exit 0 ;;
+    inspect|--version|version)
+      # region-independent, local-only grok subcommands: run bare grok, pick no egress
+      exec "$GROK_BIN" "$@" ;;
+    status) cmd_status; exit 0 ;;
+    iphone-list) iphone_list; exit $? ;;
+    ip)     acquire_session_lock || exit 1
+            ensure_selected_egress >/dev/null || { no_egress_help; exit 1; }
+            egress_ip "$(proxy_for "$(active_rung)")"; echo; exit 0 ;;
+    stop)   acquire_session_lock || exit 1
+            stop_egress; exit $? ;;
+    iphone-setup)
+            acquire_session_lock || exit 1
+            shift
+            setup_node=""; setup_label=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --label) [[ $# -ge 2 && -n "$2" ]] \
+                           || { eg_err "--label requires a key"; exit 2; }
+                         [[ -z "$setup_label" ]] \
+                           || { eg_err "--label may be supplied only once"; exit 2; }
+                         setup_label="$2"; shift 2 ;;
+                --*) eg_err "unknown iphone-setup option: $1"; exit 2 ;;
+                *) [[ -z "$setup_node" ]] \
+                     || { eg_err "iphone-setup accepts one selector"; exit 2; }
+                   setup_node="$1"; shift ;;
+              esac
+            done
+            iphone_setup "$setup_node" "$setup_label"; exit $? ;;
+    iphone-remove)
+            acquire_session_lock || exit 1
+            shift; [[ $# == 1 ]] \
+              || { eg_err "usage: grok-remote iphone-remove KEY"; exit 2; }
+            iphone_remove "$1"; exit $? ;;
+    iphone-reorder)
+            acquire_session_lock || exit 1
+            shift
+            iphone_reorder "$@"; exit $? ;;
+  esac
+
+  local force_host="" force_vpn=0 force_iphone=0 force_ios_key=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host)       [[ $# -ge 2 && -n "$2" ]] || { eg_err "--host requires a label"; exit 2; }
+                    home_label_valid "$2" || { eg_err "invalid host label"; exit 2; }
+                    force_host="$2"; shift 2 ;;
+      --iphone)     force_iphone=1; shift ;;
+      --ios)        [[ $# -ge 2 && -n "$2" ]] || { eg_err "--ios requires a key"; exit 2; }
+                    ios_key_valid "$2" || { eg_err "invalid iOS device key"; exit 2; }
+                    force_ios_key="$2"; shift 2 ;;
+      --vpn)        force_vpn=1; shift ;;
+      --direct)     eg_err "--direct requires an active managed multi-session profile"; exit 2 ;;
+      --no-direct)  ALLOW_DIRECT=0; shift ;;
+      --pick-model) FORCE_PICK=1; shift ;;
+      --)           shift; break ;;
+      *)            break ;;                      # the rest belongs to grok
+    esac
+  done
+
+  # Region-independent, local-only grok subcommands need no egress, so run bare grok. This is an
+  # ALLOWLIST: agent, models, dashboard, sessions, mcp, memory, ... all reach the model API and must
+  # route through the egress like any session, so only names verified against `grok --help` as purely
+  # local are exempt here (the earlier case already handles inspect/version).
+  case "${1:-}" in
+    completions|help|worktree|leader) exec "$GROK_BIN" "$@" ;;
+  esac
+
+  if caller_picked_model "$@"; then
+    local requested_model
+    requested_model="$(caller_model "$@")"
+    if [[ -n "$requested_model" ]] && ! model_id_valid "$requested_model"; then
+      eg_err "invalid model id"
+      exit 2
+    fi
+  fi
+
+  local forced=0
+  [[ -n "$force_host" ]] && forced=$((forced + 1))
+  (( force_iphone )) && forced=$((forced + 1))
+  [[ -n "$force_ios_key" ]] && forced=$((forced + 1))
+  (( force_vpn )) && forced=$((forced + 1))
+  (( forced <= 1 )) || { eg_err "choose only one of --host, --iphone, --ios, or --vpn"; exit 2; }
+  local forced_model="" automatic_model=""
+  if (( forced )); then
+    forced_model="$(forced_probe_model "$@")" \
+      || { eg_err "cannot resolve a safe forced-route model"; exit 2; }
+  else
+    automatic_model="$(automatic_probe_model "$@")" \
+      || { eg_err "cannot resolve a safe automatic-route model"; exit 2; }
+  fi
+  acquire_session_lock || exit 1
+
+  # The rung the caller explicitly demanded, if any. A forced rung must NOT be satisfied by reusing a
+  # different egress that merely happens to be up (e.g. `--host windows` reusing a leftover vpn rung).
+  local want=""
+  [[ -n "$force_host" ]] && want="local:$force_host"
+  [[ -n "$force_ios_key" ]] && want="ios:$force_ios_key"
+  (( force_vpn )) && want="vpn"
+  if [[ -n "$force_host" || -n "$force_ios_key" ]]; then
+    FORCE_EXACT_ROUTE="$want"
+  fi
+  if (( force_iphone )); then IOS_ONLY=1; fi
+  if [[ -n "$force_ios_key" ]]; then IOS_EXACT_KEY="$force_ios_key"; fi
+
+  local cur reusable=0; cur="$(active_rung 2>/dev/null || true)"
+  # Marker/file presence is ownership even when the record is malformed.  A
+  # forced route may not bypass recovery merely because active_rung rejects it.
+  if recovery_transition_pending \
+     || { [[ -e "$STATE" || -L "$STATE" ]] && [[ -z "$cur" ]]; }; then
+    eg_warn "recovering incomplete or invalid egress ownership before routing"
+    if ! teardown_all; then
+      eg_err "cannot route while prior ownership recovery is incomplete"
+      exit 1
+    fi
+    cur=""
+  fi
+  if [[ -n "$cur" && "$cur" != direct ]] && rung_alive "$cur" \
+     && { [[ -z "$want" ]] || [[ "$cur" == "$want" ]]; } \
+     && { (( force_iphone == 0 )) || [[ "$cur" == ios:* ]]; }; then
+    reusable=1
+    if [[ "$cur" == iphone || "$cur" == ios:* || "$cur" == vpn || -n "$automatic_model" \
+       || ( -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ) ]]; then
+      local route_qualified=0
+      if [[ -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ]]; then
+        rung_probe_forced "$cur" "$forced_model" && route_qualified=1
+      else
+        rung_probe_available "$cur" "${forced_model:-$automatic_model}" && route_qualified=1
+      fi
+      if (( ! route_qualified )); then
+        eg_warn "the existing $cur route is live but its current egress no longer qualifies"
+        if [[ -n "$FORCE_EXACT_ROUTE" && "$cur" == "$FORCE_EXACT_ROUTE" ]]; then
+          discard_failed_exact_route "$cur" || exit 1
+        else
+          discard_failed_exact_route "$cur" || exit 1
+        fi
+        cur=""
+        reusable=0
+      fi
+    fi
+  fi
+  # A persisted rung can be unhealthy while its old process still owns the shared
+  # SOCKS port. Tear it down before walking from the top, or the stale listener
+  # makes every preferred home-PC bind fail and incorrectly pushes selection down.
+  if (( ! reusable )) && [[ -n "$cur" ]]; then
+    if [[ "$cur" == direct && -z "$want" ]]; then
+      eg_log "rechecking preferred remote routes instead of reusing direct"
+    else
+      eg_warn "discarding stale or non-requested egress: $cur"
+    fi
+    if ! teardown_all; then
+      eg_err "cannot replace stale egress because exact teardown failed"
+      exit 1
+    fi
+    cur=""
+  fi
+  if (( reusable )); then
+    # Reusing a live egress keeps its cached baseline (egress.sh ages it out on GROK_BASELINE_TTL);
+    # only a fresh selection re-measures, so the rm below lives in the non-reuse branches. Re-measuring
+    # is what lets a model that becomes available everywhere join the baseline instead of looking like
+    # something a tunnel unlocked.
+    eg_log "reusing the egress already up: $cur"
+  elif [[ -n "$force_host" ]]; then
+    rm -f "$BASELINE"
+    if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then
+      eg_err "cannot switch providers because exact teardown failed"
+      exit 1
+    fi
+    learn_baseline
+    begin_clean_route_transition \
+      || { eg_err "cannot publish forced-host recovery intent"; exit 1; }
+    if ! rung_up "local:$force_host" \
+       || ! rung_probe_forced "local:$force_host" "$forced_model" \
+       || ! end_recovery_transition; then
+      eg_err "forced host '$force_host' is unavailable or does not offer an acceptable model"
+      discard_failed_exact_route "local:$force_host" || exit 1
+      exit 1
+    fi
+  elif (( force_iphone )); then
+    rm -f "$BASELINE"
+    if [[ -n "$cur" && "$cur" != ios:* ]] && ! teardown_all; then
+      eg_err "cannot switch providers because exact teardown failed"
+      exit 1
+    fi
+    learn_baseline
+    if ! select_egress 0 0 "$forced_model"; then
+      eg_err "no registered iOS device is available with an acceptable model"
+      exit 1
+    fi
+  elif [[ -n "$force_ios_key" ]]; then
+    rm -f "$BASELINE"
+    if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then
+      eg_err "cannot switch providers because exact teardown failed"
+      exit 1
+    fi
+    learn_baseline
+    begin_clean_route_transition \
+      || { eg_err "cannot publish exact-iOS recovery intent"; exit 1; }
+    ios_attempt_begin \
+      || { eg_err "cannot begin the exact-iOS selection envelope"; exit 1; }
+    if ! rung_up "$want" || ! rung_probe_forced "$want" "$forced_model" \
+       || ! end_recovery_transition; then
+      ios_attempt_end
+      eg_err "iOS device '$force_ios_key' is unavailable or does not offer an acceptable model"
+      discard_failed_exact_route "$want" || exit 1
+      exit 1
+    fi
+    ios_attempt_end
+  elif (( force_vpn )); then
+    rm -f "$BASELINE"
+    if [[ -n "$cur" && "$cur" != "$want" ]] && ! teardown_all; then
+      eg_err "cannot switch providers because exact teardown failed"
+      exit 1
+    fi
+    learn_baseline
+    begin_clean_route_transition \
+      || { eg_err "cannot publish forced-VPN recovery intent"; exit 1; }
+    if ! try_vpn_sequence "$forced_model" || ! end_recovery_transition; then
+      discard_failed_exact_route vpn || exit 1
+      no_egress_help
+      exit 1
+    fi
+  else
+    rm -f "$BASELINE"
+    select_egress 0 1 "$automatic_model" || { no_egress_help; exit 1; }
+  fi
+
+  launch "$@"
+}
+
+# Guarded so the tests can source this file and exercise the model logic directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then main "$@"; fi

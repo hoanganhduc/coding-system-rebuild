@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+BASE_DIR="{{ HOME }}/.openclaw/workspace/skills/smart-model-router"
+exec python3 "$BASE_DIR/model_router.py" --base-dir "$BASE_DIR" "$@"
