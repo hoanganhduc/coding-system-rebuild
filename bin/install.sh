@@ -1072,6 +1072,24 @@ sys.stdout.buffer.flush()
       || { echo "FAIL: unsafe ai-agents-skills target home: $AAS_TARGET_HOME"; exit 2; }
     install -d -m 0700 "$AAS_TARGET_HOME"
   done
+  # The installer prints its whole plan and result, several MiB for a full
+  # restore.  Each run's report stays on disk; its end is shown on failure.
+  AAS_REPORT_DIR="$HOME/.local/state/coding-system/restore"
+  [[ ! -L "$AAS_REPORT_DIR" && ( ! -e "$AAS_REPORT_DIR" || -d "$AAS_REPORT_DIR" ) ]] \
+    || { echo "FAIL: unsafe ai-agents-skills report directory" >&2; exit 2; }
+  install -d -m 0700 "$AAS_REPORT_DIR"
+  aas_report() {
+    local report="$AAS_REPORT_DIR/aas-$1.log"
+    [[ ! -L "$report" ]] || { echo "FAIL: unsafe ai-agents-skills report: $report" >&2; exit 2; }
+    install -m 0600 /dev/null "$report"
+    printf '%s\n' "$report"
+  }
+  aas_failed() {
+    echo "FAIL: ai-agents-skills $1 failed (rc=$2); end of ${3/#$HOME/\~}:" >&2
+    /usr/bin/tail -n 60 -- "$3" >&2
+    exit 2
+  }
+  AAS_REPORT="$(aas_report install)"
   (
     cd "$AAS_IMMUTABLE"
     /usr/bin/env -i "${AAS_CLOSED_ENV[@]}" AAS_INSTALL_CONFIRM="$AAS_PHRASE" \
@@ -1084,7 +1102,8 @@ sys.stdout.buffer.flush()
         --require-complete-install \
         --apply --real-system --backup-replace \
         --post-install-smoke verify
-  )
+  ) > "$AAS_REPORT" 2>&1 || aas_failed install "$?" "$AAS_REPORT"
+  echo "  ai-agents-skills install: done (report: ${AAS_REPORT/#$HOME/\~})"
   echo 'CSR_GATE_JSON {"case_id":"install.phase8.aas-install","schema_version":1,"status":"passed"}'
   AAS_SHARED_RUNTIME="$HOME/.local/share/ai-agents-skills/runtime"
   AAS_RUNTIME_DIGEST_PAIRS=(
@@ -1189,6 +1208,7 @@ PY
   # Codex remains self-contained: install the same pinned runtime under
   # ~/.codex so its skills never depend on another agent's home or on the
   # multi-agent shared runtime root.
+  AAS_REPORT="$(aas_report codex-runtime)"
   (
     cd "$AAS_IMMUTABLE"
     /usr/bin/env -i "${AAS_CLOSED_ENV[@]}" AAS_INSTALL_CONFIRM="$AAS_PHRASE" \
@@ -1199,7 +1219,7 @@ PY
         --require-all-requested-agents \
         --require-complete-install \
         --apply --real-system --backup-replace
-  )
+  ) > "$AAS_REPORT" 2>&1 || aas_failed "Codex runtime install" "$?" "$AAS_REPORT"
   [[ -x "$HOME/.codex/runtime/run_skill.sh" ]] \
     || { echo "FAIL: Codex self-contained runtime runner was not installed"; exit 2; }
   [[ -f "$HOME/.codex/runtime/load_secret_env.py" \
@@ -1224,12 +1244,13 @@ if configured.get("AAS_COMPUTE_SECRETS_FILE") != sys.argv[4]:
     raise SystemExit("Codex config does not select its restored compute authority")
 PY
   echo 'CSR_GATE_JSON {"case_id":"install.phase8.codex-runtime","schema_version":1,"status":"passed"}'
+  AAS_REPORT="$(aas_report verify)"
   (
     cd "$AAS_IMMUTABLE"
     /usr/bin/env -i "${AAS_CLOSED_ENV[@]}" \
       /bin/sh "$AAS_IMMUTABLE/installer/bootstrap.sh" \
         --root "$HOME" --agents "$AAS_RESTORE_AGENTS" verify
-  )
+  ) > "$AAS_REPORT" 2>&1 || aas_failed verify "$?" "$AAS_REPORT"
   echo 'CSR_GATE_JSON {"case_id":"install.phase8.aas-verify","schema_version":1,"status":"passed"}'
 
   # Pinned third-party skills that ai-agents-skills does not ship
