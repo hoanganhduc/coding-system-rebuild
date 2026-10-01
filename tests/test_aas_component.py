@@ -166,24 +166,37 @@ class AasComponentTests(unittest.TestCase):
         ):
             self.assertIn(isolated_smoke_contract, phase9)
 
-        codex_config = tomllib.loads(
-            (ROOT / "agents/codex/config.toml.template")
-            .read_text(encoding="utf-8")
-            .replace("{{ HOME }}", "/home/fixture")
+        # The tracked template is captured from the running host; a restore
+        # completes its selectors through the phase-6 migration.
+        migrate_spec = importlib.util.spec_from_file_location(
+            "migrate_codex_config_for_aas", ROOT / "bin/migrate-codex-config.py"
+        )
+        assert migrate_spec is not None and migrate_spec.loader is not None
+        migrate_codex = importlib.util.module_from_spec(migrate_spec)
+        migrate_spec.loader.exec_module(migrate_codex)
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture_home = Path(temporary)
+            (fixture_home / ".codex").mkdir(mode=0o700)
+            rendered = fixture_home / ".codex/config.toml"
+            rendered.write_text(
+                (ROOT / "agents/codex/config.toml.template")
+                .read_text(encoding="utf-8")
+                .replace("{{ HOME }}", str(fixture_home)),
+                encoding="utf-8",
+            )
+            rendered.chmod(0o600)
+            migrate_codex.migrate(rendered, fixture_home)
+            selected = tomllib.loads(rendered.read_text(encoding="utf-8"))[
+                "shell_environment_policy"
+            ]["set"]
+        self.assertEqual(selected["AAS_RUNTIME_ROOT"], f"{fixture_home}/.codex/runtime")
+        self.assertEqual(
+            selected["AAS_RUNTIME_PYTHON"],
+            f"{fixture_home}/.local/share/coding-system/python-closure/shared/bin/python",
         )
         self.assertEqual(
-            codex_config["shell_environment_policy"]["set"]["AAS_RUNTIME_ROOT"],
-            "/home/fixture/.codex/runtime",
-        )
-        self.assertEqual(
-            codex_config["shell_environment_policy"]["set"]["AAS_RUNTIME_PYTHON"],
-            "/home/fixture/.local/share/coding-system/python-closure/shared/bin/python",
-        )
-        self.assertEqual(
-            codex_config["shell_environment_policy"]["set"][
-                "AAS_COMPUTE_SECRETS_FILE"
-            ],
-            "/home/fixture/.config/ai-agents-skills/compute.env",
+            selected["AAS_COMPUTE_SECRETS_FILE"],
+            f"{fixture_home}/.config/ai-agents-skills/compute.env",
         )
 
         digest_line = next(

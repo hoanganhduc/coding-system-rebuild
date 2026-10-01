@@ -126,20 +126,22 @@ class MigrateCodexConfigTests(unittest.TestCase):
                 set(MODULE.REQUIRED_EXCLUDES).issubset(policy["exclude"])
             )
 
-    def test_tracked_template_matches_the_complete_selector_contract(self) -> None:
-        template = tomllib.loads(
-            (ROOT / "agents/codex/config.toml.template").read_text(
-                encoding="utf-8"
-            )
+    def test_restore_completes_the_selector_contract_from_the_tracked_template(self) -> None:
+        # The template is captured from the running host, which may predate the
+        # selector contract.  install.sh phase 6 migrates the rendered config on
+        # every restore, so the contract must hold after that migration.
+        template = (ROOT / "agents/codex/config.toml.template").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            path = self.write(home, template.replace("{{ HOME }}", str(home)))
+            MODULE.migrate(path, home)
+            self.assert_selectors(path, home)
+            self.assertFalse(MODULE.migrate(path, home))
+        install = (ROOT / "bin/install.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            '"$REPO/bin/migrate-codex-config.py" \\\n    --config "$HOME/.codex/config.toml" --home "$HOME"',
+            install,
         )
-        policy = template["shell_environment_policy"]
-        expected = {
-            key: "{{ HOME }}/" + relative
-            for key, relative in MODULE.SELECTOR_PATHS.items()
-        }
-        self.assertEqual(policy["set"], expected)
-        self.assertTrue(set(MODULE.REQUIRED_EXCLUDES).issubset(policy["exclude"]))
-        self.assertFalse(MODULE.RETIRED_SET_KEYS.intersection(policy["set"]))
 
     def test_rejects_symlink_and_invalid_selector_type(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

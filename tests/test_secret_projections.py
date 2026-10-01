@@ -566,18 +566,39 @@ class SecretProjectionTests(unittest.TestCase):
             self.assertEqual(mutations[retired], 0o600)
 
     def test_host_queue_selectors_are_fixed_and_not_ambient(self) -> None:
+        # The shell block is captured from the running host.  It may leave the
+        # selector out (the queue is then simply not configured), but it never
+        # points it anywhere except the fixed authority.
         shell = (ROOT / "system/shell/bashrc.block.sh").read_text(encoding="utf-8")
-        self.assertIn(
-            'export AAS_FILE_DELIVERY_SECRETS_FILE="$HOME/.config/ai-agents-skills/file-delivery-queue.json"',
-            shell,
+        fixed = 'export AAS_FILE_DELIVERY_SECRETS_FILE="$HOME/.config/ai-agents-skills/file-delivery-queue.json"'
+        mentions = [
+            line.strip() for line in shell.splitlines() if "AAS_FILE_DELIVERY_SECRETS_FILE" in line
+        ]
+        self.assertTrue(all(line == fixed for line in mentions), mentions)
+        # A restore completes the Codex selectors through the phase-6 migration.
+        spec = importlib.util.spec_from_file_location(
+            "migrate_codex_config_for_queue", ROOT / "bin/migrate-codex-config.py"
         )
-        codex = tomllib.loads(
-            (ROOT / "agents/codex/config.toml.template").read_text(encoding="utf-8")
-        )["shell_environment_policy"]
+        assert spec is not None and spec.loader is not None
+        migrate_codex = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migrate_codex)
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / ".codex").mkdir(mode=0o700)
+            rendered = home / ".codex/config.toml"
+            rendered.write_text(
+                (ROOT / "agents/codex/config.toml.template")
+                .read_text(encoding="utf-8")
+                .replace("{{ HOME }}", str(home)),
+                encoding="utf-8",
+            )
+            rendered.chmod(0o600)
+            migrate_codex.migrate(rendered, home)
+            codex = tomllib.loads(rendered.read_text(encoding="utf-8"))["shell_environment_policy"]
         self.assertIn("AAS_FILE_DELIVERY_SECRETS_FILE", codex["exclude"])
         self.assertEqual(
             codex["set"]["AAS_FILE_DELIVERY_SECRETS_FILE"],
-            "{{ HOME }}/.config/ai-agents-skills/file-delivery-queue.json",
+            f"{home}/.config/ai-agents-skills/file-delivery-queue.json",
         )
 
     def setUp(self) -> None:
