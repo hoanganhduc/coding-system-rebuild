@@ -201,8 +201,8 @@ def validate_declarations(repository: Path, architecture: str) -> list[str]:
             raise VerificationError("OpenClaw GitHub CLI projection authority is undeclared")
     checks.append("configuration-authority")
     install_text = (repository / "bin/install.sh").read_text(encoding="utf-8")
-    if 'AAS_RESTORE_AGENTS="codex,claude,deepseek,copilot,opencode,antigravity,grok,kimi"' not in install_text:
-        raise VerificationError("normal AAS restore targets must be the exact eight non-OpenClaw agents")
+    if 'AAS_RESTORE_AGENTS="codex,claude,deepseek,copilot,opencode,antigravity,grok,kimi,chatgpt-local-coder"' not in install_text:
+        raise VerificationError("normal AAS restore targets must be the exact nine non-OpenClaw agents")
     gate_commands = (
         "openclaw-target-probe",
         "openclaw-target-dry-run-manifest",

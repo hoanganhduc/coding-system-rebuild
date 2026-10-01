@@ -571,6 +571,49 @@ class InstallClosureTests(unittest.TestCase):
         self.assertIn("ci --include=dev --ignore-scripts", branch)
         self.assertIn("run build", branch)
 
+    def test_chatgpt_local_coder_cli_is_linked_like_npm_link(self) -> None:
+        components = (ROOT / "bin/components.sh").read_text(encoding="utf-8")
+        start = components.index("link_local_coder_cli() {")
+        function = components[start: components.index("\n}\n", start) + 3]
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / ".npm-global/lib/node_modules").mkdir(parents=True)
+            (home / ".npm-global/bin").mkdir()
+            checkout = home / "chatgpt-local-coder"
+            (checkout / "dist/cli").mkdir(parents=True)
+            (checkout / "package.json").write_text(json.dumps({"bin": {
+                "chatgpt-local-coder": "dist/cli/main.js", "clc": "dist/cli/main.js",
+                "codex-mcp-server": "dist/index.js"}}), encoding="utf-8")
+            for name in ("dist/cli/main.js", "dist/index.js"):
+                (checkout / name).write_text("#!/usr/bin/env node\n", encoding="utf-8")
+                (checkout / name).chmod(0o644)
+            run = lambda: subprocess.run(
+                ["/usr/bin/bash", "-c", function + f'\nlink_local_coder_cli "{checkout}"'],
+                env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                text=True, capture_output=True, check=False,
+            )
+            for attempt in (1, 2):  # a rerun converges to the same links
+                completed = run()
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                os.readlink(home / ".npm-global/lib/node_modules/chatgpt-local-coder"),
+                "../../../chatgpt-local-coder",
+            )
+            for name, target in (("chatgpt-local-coder", "dist/cli/main.js"),
+                                 ("clc", "dist/cli/main.js"),
+                                 ("codex-mcp-server", "dist/index.js")):
+                link = home / ".npm-global/bin" / name
+                self.assertEqual(os.readlink(link),
+                                 f"../lib/node_modules/chatgpt-local-coder/{target}")
+                self.assertEqual(link.resolve(), (checkout / target).resolve())
+                self.assertTrue(os.access(checkout / target, os.X_OK))
+            # A real file where a link belongs is left alone and reported.
+            (home / ".npm-global/bin/clc").unlink()
+            (home / ".npm-global/bin/clc").write_text("owner file\n", encoding="utf-8")
+            completed = run()
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual((home / ".npm-global/bin/clc").read_text(encoding="utf-8"), "owner file\n")
+
     def test_compatibility_is_gated_before_services(self) -> None:
         source = (ROOT / "bin/install.sh").read_text(encoding="utf-8")
         compatibility = source.index("verify-openclaw-compat.py")

@@ -25,7 +25,7 @@ MATERIALIZER = ROOT / "bin/materialize-secret-projections.py"
 
 
 class CopilotWrapperTests(unittest.TestCase):
-    def render(self, home: Path) -> Path:
+    def render(self, home: Path, source: str = "a" * 64) -> Path:
         wrapper = home / ".local/bin/copilot"
         wrapper.parent.mkdir(parents=True)
         machine = platform.machine().lower()
@@ -62,7 +62,7 @@ class CopilotWrapperTests(unittest.TestCase):
             home
             / (
                 f".local/share/coding-system/npm-closures/sha256-{arch}-"
-                + "a" * 64
+                + source
                 + "-"
                 + "b" * 64
                 + "/node_modules/@github/copilot/npm-loader.js"

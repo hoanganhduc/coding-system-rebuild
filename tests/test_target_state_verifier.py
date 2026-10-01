@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
@@ -710,6 +711,71 @@ class TargetStateVerifierTests(unittest.TestCase):
             projected = report["targets"]["copilot"]["credential_authorities"][1]
             self.assertEqual(projected["matched_keys"], ["GH_TOKEN"])
 
+    def test_copilot_templated_closure_loader_binds_the_locked_source(self) -> None:
+        # ai-agents-skills names where the locked closure lives as a template and
+        # the compatibility link as the way to find it.
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "closurectl_for_test", ROOT / "system/software/npm-closure/closurectl.py"
+        )
+        assert spec is not None and spec.loader is not None
+        closurectl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(closurectl)
+        locked_source = closurectl.source_digest()
+        for source, expected in ((locked_source, "PASS"), ("c" * 64, "TECHNICAL_FAIL")):
+            with self.subTest(source=source[:8]), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                home, bindir = root / "home", root / "bin"
+                bindir.mkdir()
+                self.add_common_runtimes(bindir)
+                helper = CopilotWrapperTests()
+                helper.render(home, source=source)
+                helper.add_secret_loader(home)
+                self.add_skill(home, ".copilot")
+                manifest = json.loads(self.fixture(root).read_text(encoding="utf-8"))
+                manifest["targets"].pop("codex")
+                keys = ["COPILOT_GITHUB_TOKEN", "COPILOT_PROVIDER_API_KEY",
+                        "COPILOT_PROVIDER_BEARER_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+                manifest["targets"]["copilot"]["credential_authorities"].append({
+                    "kind": "strict-env-file",
+                    "path": ".config/ai-agents-skills/providers/copilot.env",
+                    "allowed_keys": keys, "keys": keys,
+                    "restore_policy": "target-scoped-projection",
+                })
+                manifest["targets"]["copilot"]["readiness"].append("credential-projection")
+                manifest["targets"]["copilot"]["credential_projection"] = {
+                    "launcher": ".local/bin/copilot",
+                    "launcher_source": "system/bin/copilot",
+                    "closure_loader": (
+                        ".local/share/coding-system/npm-closures/"
+                        "sha256-{arch}-{source_sha256}-{tree_sha256}"
+                        "/node_modules/@github/copilot/npm-loader.js"
+                    ),
+                    "compatibility_loader": ".npm-global/lib/node_modules/@github/copilot/npm-loader.js",
+                    "authority": ".config/ai-agents-skills/providers/copilot.env",
+                    "pointer_env": "AAS_PROVIDER_SECRETS_FILE",
+                    "argv": ["--csr-credential-probe"],
+                }
+                manifest_path = root / "copilot.json"
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                provider = home / ".config/ai-agents-skills/providers/copilot.env"
+                provider.parent.mkdir(parents=True)
+                provider.write_text("GH_TOKEN=templated-secret\n", encoding="utf-8")
+                provider.chmod(0o600)
+                completed = self.run_verifier(
+                    home, manifest_path, bindir,
+                    path_value=os.pathsep.join(
+                        (str(home / ".npm-global/bin"), str(bindir), str(home / ".local/bin"))
+                    ),
+                )
+                report = json.loads(completed.stdout)
+                projection = next(item for item in report["targets"]["copilot"]["readiness"]
+                                  if item["check"] == "credential-projection")
+                self.assertEqual(projection["status"], expected, completed.stdout)
+                if expected != "PASS":
+                    self.assertEqual(projection["reason"], "projection-launcher-source-invalid")
+
     def test_copilot_strict_provider_authority_fails_closed_on_unsafe_input(self) -> None:
         for body, mode in (
             ("GH_TOKEN=must-not-leak\n", 0o644),
@@ -877,6 +943,113 @@ class TargetStateVerifierTests(unittest.TestCase):
             report = json.loads(completed.stdout)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(report["targets"]["copilot"]["status"], "NOT_APPLICABLE")
+
+    def test_declared_skips_are_reported_with_their_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home, bindir = root / "home", root / "bin"
+            bindir.mkdir()
+            self.add_common_runtimes(bindir)
+            self.fake_cli(bindir, "codex")
+            self.add_skill(home, ".codex")
+            self.add_skill(home, ".copilot")
+            auth = home / ".codex/auth.json"
+            auth.write_text(json.dumps({"token": "fixture"}), encoding="utf-8")
+            auth.chmod(0o600)
+            # Copilot's CLI is absent: a declared skip records why instead of failing.
+            completed = self.run_verifier(
+                home, self.fixture(root), bindir,
+                "--skip", "copilot:cli=the lock names another tool",
+                "--skip", "codex:runtime:node-runtime=no Node on this host",
+            )
+            report = json.loads(completed.stdout)
+            self.assertNotEqual(completed.returncode, 2, completed.stderr)
+            copilot = report["targets"]["copilot"]
+            self.assertEqual(copilot["cli"], {"status": "SKIPPED", "reason": "the lock names another tool"})
+            self.assertIn(
+                {"check": "cli-version", "status": "SKIPPED", "reason": "the lock names another tool"},
+                copilot["readiness"],
+            )
+            node = next(item for item in report["targets"]["codex"]["runtime_requirements"]
+                        if item["requirement"] == "node-runtime")
+            self.assertEqual(node, {"requirement": "node-runtime", "status": "SKIPPED",
+                                    "reason": "no Node on this host"})
+            # A whole target can be skipped too, and skips never hide a real failure.
+            completed = self.run_verifier(
+                home, self.fixture(root), bindir, "--skip", "copilot=degraded restore"
+            )
+            report = json.loads(completed.stdout)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(report["targets"]["copilot"],
+                             {"status": "SKIPPED", "reason": "degraded restore"})
+            completed = self.run_verifier(home, self.fixture(root), bindir)
+            self.assertEqual(completed.returncode, 2)
+
+    def test_skip_selectors_must_name_declared_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home, bindir = root / "home", root / "bin"
+            bindir.mkdir()
+            self.add_common_runtimes(bindir)
+            for selector in (
+                "unknown-target=reason",
+                "codex:runtime:sagemath=reason",
+                "codex:everything=reason",
+                "codex:cli",
+                "codex:cli=",
+            ):
+                with self.subTest(selector=selector):
+                    completed = self.run_verifier(
+                        home, self.fixture(root), bindir, "--skip", selector
+                    )
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertIn("skip", completed.stderr)
+
+    def test_codewhale_skills_follow_its_configured_skills_dir(self) -> None:
+        manifest = {
+            "schema": "ai-agents-skills.target-state.v3",
+            "schema_version": 3,
+            "runtime_credential_authorities": runtime_credential_authorities(),
+            "targets": {
+                name: {
+                    "home": home_dir,
+                    "cli_candidates": [name],
+                    "version_argv": ["--version"],
+                    "runtime_requirements": ["python-runtime", "git-cli"],
+                    "credential_authorities": [],
+                    "readiness": ["cli-version", "managed-skill-visibility"],
+                }
+                for name, home_dir in (("deepseek", ".deepseek"), ("codewhale", ".codewhale"))
+            },
+        }
+        for configured in (True, False):
+            with self.subTest(configured=configured), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                home, bindir = root / "home", root / "bin"
+                bindir.mkdir()
+                self.add_common_runtimes(bindir)
+                self.fake_cli(bindir, "deepseek")
+                self.fake_cli(bindir, "codewhale")
+                self.add_skill(home, ".deepseek")
+                (home / ".codewhale").mkdir(mode=0o700)
+                config = home / ".codewhale/config.toml"
+                config.write_text(
+                    'skills_dir = "~/.deepseek/skills"\n' if configured else "\n",
+                    encoding="utf-8",
+                )
+                config.chmod(0o600)
+                path = root / "target-state.json"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+                completed = self.run_verifier(home, path, bindir)
+                report = json.loads(completed.stdout)
+                visibility = next(item for item in report["targets"]["codewhale"]["readiness"]
+                                  if item["check"] == "managed-skill-visibility")
+                if configured:
+                    self.assertEqual(visibility["status"], "PASS", completed.stdout)
+                    self.assertEqual(visibility["skills_from"], "deepseek")
+                else:
+                    self.assertEqual(visibility["status"], "TECHNICAL_FAIL")
+                    self.assertNotIn("skills_from", visibility)
 
     def test_arbitrary_visible_skill_without_installer_receipt_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1698,6 +1871,29 @@ class TargetStateVerifierTests(unittest.TestCase):
             )
             self.assertEqual(failed_check["status"], "TECHNICAL_FAIL")
             self.assertEqual(failed_check["unknown_coverage_count"], 1)
+
+
+
+class TargetCliPathTests(unittest.TestCase):
+    """The target-state check searches the directories the managed shell uses."""
+
+    def test_every_shell_cli_directory_is_on_the_target_check_path(self) -> None:
+        block = (ROOT / "system/shell/bashrc.block.sh").read_text(encoding="utf-8")
+        wanted = set()
+        for match in re.finditer(r'export PATH="?([^"\n]*)"?', block):
+            for part in match.group(1).split(":"):
+                part = part.replace("{{ HOME }}", "$HOME").replace("$BUN_INSTALL", "$HOME/.bun")
+                if part.startswith("$HOME/"):
+                    wanted.add(part)
+        if '. "$HOME/.cargo/env"' in block:
+            wanted.add("$HOME/.cargo/bin")
+        self.assertIn("$HOME/.kimi-code/bin", wanted)
+        for script in ("bin/install.sh", "bin/verify.sh"):
+            source = (ROOT / script).read_text(encoding="utf-8")
+            found = re.search(r'TARGET_CLI_PATH="([^"]+)"', source)
+            self.assertIsNotNone(found, script)
+            self.assertEqual(wanted - set(found.group(1).split(":")), set(), script)
+            self.assertIn('--path "$TARGET_CLI_PATH:$PATH"', source, script)
 
 
 if __name__ == "__main__":

@@ -10,14 +10,29 @@ unset BASH_ENV ENV CDPATH GLOBIGNORE
 umask 077
 
 readonly RESTORE_HOME="{{ HOME }}"
-readonly OPENCODE_TARGET="$RESTORE_HOME/.npm-global/lib/node_modules/opencode-ai/bin/opencode.exe"
+# The npm closure is installed without lifecycle scripts, so opencode-ai's own
+# bin/opencode.exe stays the placeholder its postinstall would replace.  The
+# closure instead links ~/.npm-global/bin/opencode to the locked platform binary.
+readonly OPENCODE_LINK="$RESTORE_HOME/.npm-global/bin/opencode"
+readonly CODING_ROOT="$RESTORE_HOME/.local/share/coding-system"
 
 export HOME="$RESTORE_HOME"
 export PATH="$RESTORE_HOME/.npm-global/bin:$RESTORE_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-if [[ ! -f "$OPENCODE_TARGET" || -L "$OPENCODE_TARGET" || ! -x "$OPENCODE_TARGET" ]]; then
+unavailable() {
   printf '%s\n' 'opencode launcher: pinned OpenCode executable is unavailable or unsafe' >&2
   exit 127
+}
+case "$(/usr/bin/uname -m)" in
+  aarch64|arm64) LOCK_ARCH=arm64 ;;
+  x86_64|amd64) LOCK_ARCH=amd64 ;;
+  *) unavailable ;;
+esac
+OPENCODE_TARGET="$(/usr/bin/readlink -f -- "$OPENCODE_LINK" 2>/dev/null || :)"
+[[ "$OPENCODE_TARGET" =~ ^"$CODING_ROOT"/npm-closures/sha256-"$LOCK_ARCH"-[0-9a-f]{64}-[0-9a-f]{64}/node_modules/opencode-linux-[a-z0-9-]+/bin/opencode$ ]] \
+  || unavailable
+if [[ ! -f "$OPENCODE_TARGET" || -L "$OPENCODE_TARGET" || ! -x "$OPENCODE_TARGET" ]]; then
+  unavailable
 fi
 
 exec -a opencode "$OPENCODE_TARGET" "$@"

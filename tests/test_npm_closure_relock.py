@@ -91,5 +91,23 @@ class NpmClosureRelockTests(unittest.TestCase):
         )
 
 
+class ClosureTreeDigestTests(unittest.TestCase):
+    """A published closure keeps the content address its directory is named after."""
+
+    def test_publication_files_at_the_root_do_not_change_the_digest(self) -> None:
+        closurectl = load("csr_closurectl_digest", CLOSURE / "closurectl.py")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "node_modules/example").mkdir(parents=True)
+            (root / "node_modules/example/index.js").write_text("x\n", encoding="utf-8")
+            built = closurectl.tree_digest(root)
+            (root / ".csr-tree-manifest.json").write_text("{}\n", encoding="utf-8")
+            (root / ".csr-tree-complete").write_text("{}\n", encoding="utf-8")
+            self.assertEqual(closurectl.tree_digest(root), built)
+            # The same names below the root are npm content and still count.
+            (root / "node_modules/example/.csr-tree-complete").write_text("{}\n", encoding="utf-8")
+            self.assertNotEqual(closurectl.tree_digest(root), built)
+
+
 if __name__ == "__main__":
     unittest.main()

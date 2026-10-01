@@ -1066,17 +1066,32 @@ jobs:
                           and claude_skill.resolve(strict=True).is_relative_to(materialized)
                       ):
                           errors.append("Claude skill is not bound to immutable AAS source")
-                      if (
-                          codex_skill.is_symlink()
-                          or not codex_skill.is_file()
-                          or str(materialized) not in codex_skill.read_text(encoding="utf-8")
-                      ):
-                          errors.append("Codex skill is not bound to immutable AAS source")
                       state = json.loads(
                           (Path.home() / ".ai-agents-skills/state.json").read_text(
                               encoding="utf-8"
                           )
                       )
+                      # Codex skills are managed copies: the installer records their source
+                      # and the hash it wrote.
+                      codex_records = [
+                          item for item in state.get("artifacts", [])
+                          if isinstance(item, dict) and item.get("artifact") == str(codex_skill)
+                      ]
+                      codex_signature = (
+                          codex_records[0].get("installed_signature") if len(codex_records) == 1 else None
+                      )
+                      if (
+                          codex_skill.is_symlink()
+                          or not codex_skill.is_file()
+                          or len(codex_records) != 1
+                          or codex_records[0].get("managed") is not True
+                          or not isinstance(codex_records[0].get("source_path"), str)
+                          or not Path(codex_records[0]["source_path"]).is_relative_to(materialized)
+                          or not isinstance(codex_signature, dict)
+                          or codex_signature.get("hash")
+                          != "sha256:" + hashlib.sha256(codex_skill.read_bytes()).hexdigest()
+                      ):
+                          errors.append("Codex skill is not bound to immutable AAS source")
                       mutable_source = str(Path.home() / "ai-agents-skills")
                       if any(
                           isinstance(item, dict)
@@ -1110,6 +1125,13 @@ jobs:
           if [ -d "$reports" ]; then
             find "$reports" -maxdepth 1 -type f \( -name '*.json' -o -name 'aas-*.log' \) \
               -size -32M -exec cp -- {} restore-reports/ \;
+            # The OpenClaw target gate keeps its JSON answers in a hidden stage
+            # directory, which upload-artifact skips; copy them under plain names.
+            for answer in "$reports"/.openclaw-skills.*/*/*.json; do
+              [ -f "$answer" ] || continue
+              skill="$(basename "$(dirname "$answer")")"
+              cp -- "$answer" "restore-reports/openclaw-gate-$skill-$(basename "$answer")"
+            done
           fi
           ls -la restore-reports
       - name: Summary

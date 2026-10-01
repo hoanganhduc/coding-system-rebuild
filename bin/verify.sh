@@ -15,7 +15,7 @@ fi
 case "$PROFILE" in full|ci|smoke) ;; *) echo "usage: $0 [--smoke|--profile full|ci]" >&2; exit 2;; esac
 SMOKE_ONLY=0; [[ "$PROFILE" == "smoke" ]] && SMOKE_ONLY=1
 DEGRADED=0; [[ "$PROFILE" == "ci" ]] && DEGRADED=1
-AAS_RESTORE_AGENTS="codex,claude,deepseek,copilot,opencode,antigravity,grok,kimi"
+AAS_RESTORE_AGENTS="codex,claude,deepseek,copilot,opencode,antigravity,grok,kimi,chatgpt-local-coder"
 VERIFY_STARTED_AT_UNIX="$(date +%s)"
 if [[ -z "${CODING_SYSTEM_RESTORE_RUN_ID:-}" ]]; then
   CODING_SYSTEM_RESTORE_RUN_ID="$(/usr/bin/python3 -I -B -c 'import secrets; print(secrets.token_hex(32))')"
@@ -611,10 +611,21 @@ if [[ ! -f "$TARGET_MANIFEST" ]]; then
   [[ "$DEGRADED" == "1" ]] && skp "target-state manifest unavailable in CI" \
     || bad "target-state manifest unavailable"
 else
+  # Agent CLIs live where the managed shell blocks put them on PATH
+  # (system/shell/bashrc.block.sh); the target-state check looks there too.
+  TARGET_CLI_PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.kimi-code/bin:$HOME/.grok/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/.elan/bin:$HOME/OpenGauss/venv/bin"
   target_args=(
     --manifest "$TARGET_MANIFEST" --root "$HOME"
-    --path "$HOME/.local/bin:$PATH"
+    --path "$TARGET_CLI_PATH:$PATH"
   )
+  # Checks that cannot apply to this restore, each with its reason.
+  target_args+=(--skip "deepseek:cli=the software lock names CodeWhale as the DeepSeek CLI (deepseek-cli is not-applicable)")
+  [[ "$DEGRADED" == "1" ]] \
+    && target_args+=(--skip "aider=a degraded restore installs no Python closure")
+  [[ "${SKIP_GROK:-0}" == "1" ]] \
+    && target_args+=(--skip "grok:cli=SKIP_GROK=1 installs no Grok CLI")
+  [[ "${SKIP_DOCKER_IMAGES:-0}" == "1" ]] \
+    && target_args+=(--skip "openclaw:runtime:sagemath=SKIP_DOCKER_IMAGES=1 pulls no SageMath image")
   if [[ "$DEGRADED" == "1" ]]; then
     target_args+=(--readiness-phase pre-runtime)
   else

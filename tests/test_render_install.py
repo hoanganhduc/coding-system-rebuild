@@ -137,6 +137,24 @@ class RenderInstallTests(unittest.TestCase):
             self.assertTrue((home / ".claude/skills/zotero/config.json").is_file())
             self.assertTrue((home / ".claude/skills/calibre/config.json").is_file())
 
+    def test_credential_templates_render_with_their_declared_mode(self) -> None:
+        # The recovery manifest declares 0600 for these configs (an api_key goes
+        # inside); a render without secrets must not leave them wider.
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            completed = subprocess.run(
+                ["python3", str(MODULE_PATH), "--repo", str(ROOT), "--home", str(home),
+                 "--render-only"],
+                check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            for relative in (".codewhale/config.toml", ".deepseek/config.toml"):
+                self.assertEqual((home / relative).stat().st_mode & 0o777, 0o600, relative)
+            # A template declared 0644 keeps that mode.
+            zotero = home / ".claude/skills/zotero/config.json"
+            self.assertNotEqual(zotero.stat().st_mode & 0o777, 0o600)
+
     def test_render_sanitizes_shell_rollbacks_without_duplicating_npm_token(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

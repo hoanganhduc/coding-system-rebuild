@@ -262,7 +262,7 @@ def write_conflict_preview(dst, data, binary, mode, report):
 
 
 def install_file(src, dst, home, report, skip_if_exists=False,
-                 overwrite_existing=False):
+                 overwrite_existing=False, mode_override=None):
     if src.endswith(".keys"):
         return
     if skip_if_exists and os.path.exists(dst):
@@ -309,14 +309,49 @@ def install_file(src, dst, home, report, skip_if_exists=False,
                 return
             write_conflict_preview(dst, rendered, False, stat.S_IMODE(mode), report)
             return
-        with open(dst, "w", errors="surrogateescape") as fh:
-            fh.write(rendered)
+        if mode_override is None:
+            with open(dst, "w", errors="surrogateescape") as fh:
+                fh.write(rendered)
+        else:
+            # A credential file is created with its declared mode, never wider.
+            descriptor = os.open(
+                dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                mode_override,
+            )
+            with os.fdopen(descriptor, "w", errors="surrogateescape") as fh:
+                os.fchmod(fh.fileno(), mode_override)
+                fh.write(rendered)
         if not src.endswith(".template") and PLACEHOLDER_RE.search(rendered):
             report["placeholders"].append(dst)
         if os.access(src, os.X_OK):
             os.chmod(dst, os.stat(dst).st_mode | stat.S_IXUSR
                      | stat.S_IXGRP | stat.S_IXOTH)
     report["installed"] += 1
+
+
+def declared_secret_modes(repo):
+    """Map each single-file path of the recovery manifest to its declared mode.
+
+    A template for such a file holds a credential once filled in, so a render
+    creates it with the mode a restore would give it.
+    """
+    path = os.path.join(repo, "secrets", "secrets-manifest.yaml")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            document = yaml.safe_load(fh)
+    except FileNotFoundError:
+        return {}
+    modes = {}
+    for item in (document or {}).get("entries") or []:
+        if not isinstance(item, dict):
+            continue
+        relative, mode = item.get("path"), item.get("mode")
+        if (
+            isinstance(relative, str) and not relative.endswith("/")
+            and isinstance(mode, str) and re.fullmatch(r"0[0-7]{3}", mode)
+        ):
+            modes[relative] = int(mode, 8)
+    return modes
 
 
 def entry_excludes_path(entry, rel):
@@ -1443,6 +1478,7 @@ def main():
 
     # --- manifest-driven agent/system trees ---------------------------------
     handled_dests = set(shell_map)
+    secret_modes = declared_secret_modes(repo)
     for entry in manifest["entries"]:
         root = entry.get("root", "")
         cls = entry["class"]
@@ -1459,8 +1495,10 @@ def main():
                 continue
             name = entry["match"][0]
             dst = os.path.join(home, root, name) if root else os.path.join(home, name)
-            install_file(src, dst, home, report,
-                         skip_if_exists=entry["dest"].endswith(".template"))
+            template = entry["dest"].endswith(".template")
+            install_file(src, dst, home, report, skip_if_exists=template,
+                         mode_override=secret_modes.get(os.path.relpath(dst, home))
+                         if template else None)
             handled_dests.add(entry["dest"])
         elif entry.get("dest_dir"):
             dd = os.path.join(repo, entry["dest_dir"])

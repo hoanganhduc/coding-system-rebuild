@@ -28,6 +28,50 @@ safe_git() {
       -c protocol.ext.allow=never -c protocol.file.allow=never \
       -c credential.helper= -c core.sshCommand=/bin/false "$@"
 }
+# The live host reaches the chatgpt-local-coder CLI the way `npm link` sets it
+# up: ~/.npm-global/lib/node_modules/chatgpt-local-coder points at the checkout
+# and each bin that package.json declares is linked in ~/.npm-global/bin.
+link_local_coder_cli() {
+  local dest="$1" modules="$HOME/.npm-global/lib/node_modules"
+  local bins="$HOME/.npm-global/bin" bin_map bin_name bin_path linked=0
+  [[ "$dest" == "$HOME/chatgpt-local-coder" ]] || return 1
+  [[ -d "$modules" && ! -L "$modules" && -d "$bins" && ! -L "$bins" ]] || {
+    echo "ERROR: no npm global root to link the chatgpt-local-coder CLI into" >&2
+    return 1
+  }
+  bin_map="$(/usr/bin/python3 -I -B -c '
+import json, re, sys
+from pathlib import PurePosixPath
+bins = json.load(open(sys.argv[1], encoding="utf-8")).get("bin")
+if not isinstance(bins, dict) or not bins:
+    raise SystemExit("chatgpt-local-coder declares no bin map")
+for name, value in sorted(bins.items()):
+    path = PurePosixPath(value) if isinstance(value, str) else None
+    if (path is None or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) is None
+            or path.is_absolute() or ".." in path.parts or path.parts[:1] != ("dist",)):
+        raise SystemExit("chatgpt-local-coder bin map is unsafe")
+    print(f"{name}\t{path.as_posix()}")
+' "$dest/package.json")" || return 1
+  [[ -L "$modules/chatgpt-local-coder" || ! -e "$modules/chatgpt-local-coder" ]] || {
+    echo "ERROR: $modules/chatgpt-local-coder exists and is not a link" >&2
+    return 1
+  }
+  /usr/bin/ln -sfn ../../../chatgpt-local-coder "$modules/chatgpt-local-coder"
+  while IFS=$'\t' read -r bin_name bin_path; do
+    [[ -f "$dest/$bin_path" && ! -L "$dest/$bin_path" ]] || {
+      echo "ERROR: chatgpt-local-coder bin target is missing: $bin_path" >&2
+      return 1
+    }
+    [[ -x "$dest/$bin_path" ]] || /usr/bin/chmod 0755 "$dest/$bin_path"
+    [[ -L "$bins/$bin_name" || ! -e "$bins/$bin_name" ]] || {
+      echo "ERROR: $bins/$bin_name exists and is not a link" >&2
+      return 1
+    }
+    /usr/bin/ln -sfn "../lib/node_modules/chatgpt-local-coder/$bin_path" "$bins/$bin_name"
+    linked=$((linked + 1))
+  done <<< "$bin_map"
+  (( linked > 0 ))
+}
 RC=0
 while IFS='=' read -r name rest; do
   [[ -z "$name" || "$name" == \#* ]] && continue
@@ -106,6 +150,8 @@ while IFS='=' read -r name rest; do
     fi
     if [[ -d "$dest/.git" ]]; then
       echo "component $name: existing checkout preserved"
+      link_local_coder_cli "$dest" \
+        || { echo "ERROR: cannot link the $name CLI" >&2; RC=1; }
       continue
     fi
     safe_git clone -q "$url" "$dest" \
@@ -122,7 +168,9 @@ while IFS='=' read -r name rest; do
         && "$npm_bin" ci --include=dev --ignore-scripts --no-audit --no-fund \
         && "$npm_bin" run build ) \
       || { echo "ERROR: cannot build $name@$ref" >&2; RC=1; continue; }
-    echo "component $name @ ${ref:0:12} (cloned and built)"
+    link_local_coder_cli "$dest" \
+      || { echo "ERROR: cannot link the $name CLI" >&2; RC=1; continue; }
+    echo "component $name @ ${ref:0:12} (cloned, built and linked)"
     continue
   fi
   if [[ "$name" == "ai-agents-skills" && "$ref" =~ ^[0-9a-f]{40}$ ]]; then

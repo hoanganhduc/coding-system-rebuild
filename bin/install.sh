@@ -81,7 +81,7 @@ if [[ $DEGRADED_MODE -eq 0 && $DESCRIPTOR_BOUND_INSTALL -ne 1 ]]; then
   echo "ERROR: authenticated restore requires the sealed installer handoff" >&2
   exit 2
 fi
-AAS_RESTORE_AGENTS="codex,claude,deepseek,copilot,opencode,antigravity,grok,kimi"
+AAS_RESTORE_AGENTS="codex,claude,deepseek,copilot,opencode,antigravity,grok,kimi,chatgpt-local-coder"
 case "$(/usr/bin/uname -m)" in
   aarch64|arm64) LOCK_ARCH=arm64 ;;
   x86_64|amd64) LOCK_ARCH=amd64 ;;
@@ -1065,6 +1065,7 @@ sys.stdout.buffer.flush()
     "$HOME/.gemini/antigravity-cli"
     "$HOME/.grok"
     "$HOME/.kimi-code"
+    "$HOME/.chatgpt-local-coder"
   )
   for AAS_TARGET_HOME in "${AAS_TARGET_HOMES[@]}"; do
     [[ ! -L "$AAS_TARGET_HOME" \
@@ -1273,6 +1274,14 @@ PY
   OPENCLAW_GATE_STAGE="$(mktemp -d "$OPENCLAW_GATE_PARENT/.openclaw-skills.XXXXXXXX")"
   chmod 0700 "$OPENCLAW_GATE_STAGE"
   OPENCLAW_PATH="$HOME/.npm-global/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  # Each gate step answers in JSON on stdout, which goes to a stage file; show
+  # the end of that answer when a step fails, so the reason reaches the log.
+  openclaw_gate_failed() {
+    echo "FAIL: OpenClaw target gate step $1 failed for $OPENCLAW_SKILL (rc=$2); end of its JSON answer:" >&2
+    /usr/bin/tail -c 4000 -- "$3" >&2 || true
+    echo >&2
+    exit 2
+  }
   mapfile -t OPENCLAW_SKILL_FILES < <(
     /usr/bin/python3 -I -B "$REPO/bin/openclaw-skill-inventory.py" \
       --aas-root "$AAS_IMMUTABLE" --format lines
@@ -1306,7 +1315,7 @@ PY
           --openclaw-bin "$HOME/.npm-global/bin/openclaw" \
           --skill "$OPENCLAW_PROBE_SKILL" "${OPENCLAW_PROBE_EXTRA[@]}" \
           >"$OPENCLAW_PROBE"
-    )
+    ) || openclaw_gate_failed probe "$?" "$OPENCLAW_PROBE"
     chmod 0600 "$OPENCLAW_PROBE"
     mapfile -t OPENCLAW_EVIDENCE_PATHS < <(
       /usr/bin/python3 -I -B - "$OPENCLAW_PROBE" "$OPENCLAW_SKILL_STAGE" <<'PY'
@@ -1342,18 +1351,24 @@ PY
           --root "$HOME" --json openclaw-target-dry-run-manifest \
           --skill "$OPENCLAW_SKILL" --action-class "$OPENCLAW_ACTION_CLASS" \
           "${OPENCLAW_EVIDENCE_ARGS[@]}" >"$OPENCLAW_MANIFEST"
+    ) || openclaw_gate_failed dry-run "$?" "$OPENCLAW_MANIFEST"
+    (
+      cd "$AAS_IMMUTABLE"
       /usr/bin/env -i "${AAS_CLOSED_ENV[@]}" PATH="$OPENCLAW_PATH" \
         /bin/sh "$AAS_IMMUTABLE/installer/bootstrap.sh" \
           --root "$HOME" --json openclaw-target-approve-manifest \
           --manifest "$OPENCLAW_MANIFEST" \
           --reviewer coding-system-rebuild >"$OPENCLAW_APPROVED"
+    ) || openclaw_gate_failed approve "$?" "$OPENCLAW_APPROVED"
+    (
+      cd "$AAS_IMMUTABLE"
       /usr/bin/env -i "${AAS_CLOSED_ENV[@]}" PATH="$OPENCLAW_PATH" \
         /bin/sh "$AAS_IMMUTABLE/installer/bootstrap.sh" \
           --root "$HOME" --json openclaw-target-apply-manifest \
           --manifest "$OPENCLAW_APPROVED" --apply --real-system \
           --confirm-openclaw-real-write \
           "I understand OpenClaw real-system skill-file writes" >"$OPENCLAW_APPLIED"
-    )
+    ) || openclaw_gate_failed apply "$?" "$OPENCLAW_APPLIED"
     chmod 0600 "$OPENCLAW_MANIFEST" "$OPENCLAW_APPROVED" "$OPENCLAW_APPLIED"
     [[ -f "$HOME/.openclaw/skills/$OPENCLAW_SKILL/SKILL.md" \
         && ! -L "$HOME/.openclaw/skills/$OPENCLAW_SKILL/SKILL.md" ]] \
@@ -1368,11 +1383,22 @@ PY
 
   TARGET_STATE_REPORT="$HOME/.local/state/coding-system/restore/target-state.json"
   install -d -m 0700 "$(dirname "$TARGET_STATE_REPORT")"
+  # Agent CLIs live where the managed shell blocks put them on PATH
+  # (system/shell/bashrc.block.sh); the target-state check looks there too.
+  TARGET_CLI_PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.kimi-code/bin:$HOME/.grok/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/.elan/bin:$HOME/OpenGauss/venv/bin"
+  # Checks that cannot apply at this point of this restore, each with its reason.
+  TARGET_SKIPS=(
+    --skip "aider=the Python closure that provides aider is installed in phase 9"
+    --skip "deepseek:cli=the software lock names CodeWhale as the DeepSeek CLI (deepseek-cli is not-applicable)"
+  )
+  skip_enabled SKIP_GROK && TARGET_SKIPS+=(--skip "grok:cli=SKIP_GROK=1 installs no Grok CLI")
+  skip_enabled SKIP_DOCKER_IMAGES \
+    && TARGET_SKIPS+=(--skip "openclaw:runtime:sagemath=SKIP_DOCKER_IMAGES=1 pulls no SageMath image")
   set +e
   python3 "$REPO/bin/verify-target-state.py" \
     --manifest "$AAS_IMMUTABLE/manifest/target-state.yaml" \
-    --root "$HOME" --path "$HOME/.local/bin:$PATH" --readiness-phase pre-runtime \
-    --output "$TARGET_STATE_REPORT"
+    --root "$HOME" --path "$TARGET_CLI_PATH:$PATH" --readiness-phase pre-runtime \
+    "${TARGET_SKIPS[@]}" --output "$TARGET_STATE_REPORT"
   TARGET_STATE_RC=$?
   set -e
   case "$TARGET_STATE_RC" in

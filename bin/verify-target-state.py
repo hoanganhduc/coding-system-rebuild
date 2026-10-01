@@ -28,6 +28,7 @@ AAS_RUNTIME_SMOKE_SCHEMA = "ai-agents-skills.installed-runtime-smoke.v1"
 STATUS_PRIORITY = {
     "PASS": 0,
     "NOT_APPLICABLE": 0,
+    "SKIPPED": 0,
     "NOT_CONFIGURED": 1,
     "CREDIT_BLOCKED": 1,
     "REAUTH_REQUIRED": 2,
@@ -763,6 +764,46 @@ def command_probe(candidates: list[str], version_argv: list[str], path: str) -> 
     }
 
 
+def _host_arch() -> str:
+    machine = os.uname().machine.lower()
+    return "arm64" if machine in {"aarch64", "arm64"} else "amd64"
+
+
+def _npm_closure_source_digest() -> str:
+    """The locked npm closure's source digest, from closurectl itself."""
+    import importlib.util
+
+    path = REPO_ROOT / "system/software/npm-closure/closurectl.py"
+    spec = importlib.util.spec_from_file_location("csr_closurectl_for_target_state", path)
+    if spec is None or spec.loader is None:
+        raise ContractError("npm closure tool is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return str(module.source_digest())
+
+
+def closure_loader_pattern(template: str, root: Path) -> re.Pattern[str]:
+    """Turn the manifest's closure_loader template into an exact path pattern.
+
+    {arch} is this host's architecture, {source_sha256} the locked closure
+    source, {tree_sha256} any tree digest (verify.sh binds the tree itself).
+    """
+    values = {
+        "{arch}": re.escape(_host_arch()),
+        "{source_sha256}": re.escape(_npm_closure_source_digest()),
+        "{tree_sha256}": "[0-9a-f]{64}",
+    }
+    parts = []
+    for piece in re.split(r"(\{[a-z0-9_]+\})", template):
+        if piece.startswith("{") and piece.endswith("}"):
+            if piece not in values:
+                raise ContractError(f"unknown closure_loader placeholder: {piece}")
+            parts.append(values[piece])
+        else:
+            parts.append(re.escape(piece))
+    return re.compile(re.escape(str(root) + "/") + "".join(parts))
+
+
 def credential_projection_observation(
     command: str | None,
     root: Path,
@@ -793,7 +834,15 @@ def credential_projection_observation(
         return {"status": "TECHNICAL_FAIL", "reason": "projection-contract-invalid"}
     launcher = root / Path(*safe_relative(launcher_raw).parts)
     authority = root / Path(*safe_relative(authority_raw).parts)
-    closure_loader_link = root / Path(*safe_relative(closure_loader_raw).parts)
+    # A templated closure_loader names where the locked closure must live; the
+    # compatibility loader is the link that is followed to find it.
+    compatibility_raw = contract.get("compatibility_loader")
+    templated = "{" in closure_loader_raw
+    if templated and not isinstance(compatibility_raw, str):
+        return {"status": "TECHNICAL_FAIL", "reason": "projection-contract-invalid"}
+    closure_loader_link = root / Path(
+        *safe_relative(compatibility_raw if templated else closure_loader_raw).parts
+    )
     launcher_source = REPO_ROOT / Path(*safe_relative(launcher_source_raw).parts)
     try:
         info = launcher.lstat()
@@ -827,6 +876,11 @@ def credential_projection_observation(
         or re.fullmatch(
             r"sha256-(?:amd64|arm64)-[0-9a-f]{64}-[0-9a-f]{64}", closure_relative.parts[0]
         ) is None
+        or (
+            templated
+            and closure_loader_pattern(closure_loader_raw, root).fullmatch(str(closure_loader))
+            is None
+        )
     ):
         return {"status": "TECHNICAL_FAIL", "reason": "projection-launcher-source-invalid"}
     try:
@@ -899,11 +953,18 @@ def credential_projection_observation(
     }
 
 
-def runtime_observations(requirements: list[str], path: str) -> tuple[str, list[dict[str, Any]]]:
+def runtime_observations(
+    requirements: list[str], path: str, skipped: dict[str, str] | None = None
+) -> tuple[str, list[dict[str, Any]]]:
     observations = []
     for requirement in requirements:
         if requirement not in RUNTIME_PROBES:
             raise ContractError(f"unsupported runtime requirement: {requirement!r}")
+        if skipped and requirement in skipped:
+            observations.append(
+                {"requirement": requirement, "status": "SKIPPED", "reason": skipped[requirement]}
+            )
+            continue
         candidates, argv = RUNTIME_PROBES[requirement]
         probe = command_probe(candidates, argv, path)
         observations.append({"requirement": requirement, **probe})
@@ -2304,6 +2365,72 @@ def validate_integration_contract(
     return candidates, version_argv, authorities
 
 
+def parse_skips(values: list[str], manifest: dict[str, Any]) -> dict[str, Any]:
+    """Parse --skip SELECTOR=REASON: TARGET, TARGET:cli or TARGET:runtime:REQUIREMENT.
+
+    A skip records why a check cannot apply to this restore (a degraded install,
+    an operator SKIP_* switch, a lock that names another tool).  It never hides a
+    target or requirement the manifest does not declare.
+    """
+    skips: dict[str, Any] = {"targets": {}, "cli": {}, "runtime": {}}
+    targets = manifest["targets"]
+    for value in values:
+        selector, separator, reason = value.partition("=")
+        reason = reason.strip()
+        parts = selector.split(":")
+        if not separator or not reason or not parts[0]:
+            raise ContractError(f"a skip needs SELECTOR=REASON: {value!r}")
+        name = parts[0]
+        if name not in targets:
+            raise ContractError(f"a skip names an unknown target: {name!r}")
+        if len(parts) == 1:
+            skips["targets"][name] = reason
+        elif parts[1:] == ["cli"]:
+            skips["cli"][name] = reason
+        elif len(parts) == 3 and parts[1] == "runtime":
+            requirements = targets[name].get("runtime_requirements") or []
+            if parts[2] not in requirements:
+                raise ContractError(
+                    f"a skip names a requirement {name} does not declare: {parts[2]!r}"
+                )
+            skips["runtime"].setdefault(name, {})[parts[2]] = reason
+        else:
+            raise ContractError(f"unsupported skip selector: {selector!r}")
+    return skips
+
+
+# CodeWhale reads its skills from the directory its own config names; the live
+# host points it at the DeepSeek skills that ai-agents-skills installs.
+CONFIGURED_SKILL_DIRS = {"codewhale": ("config.toml", "skills_dir")}
+
+
+def configured_skills_target(root: Path, manifest: dict[str, Any], name: str) -> str:
+    """Name the target whose managed skills NAME actually reads, if its config says."""
+
+    if name not in CONFIGURED_SKILL_DIRS:
+        return name
+    config_name, key = CONFIGURED_SKILL_DIRS[name]
+    home = root / Path(*safe_relative(str(manifest["targets"][name]["home"])).parts)
+    config = home / config_name
+    try:
+        info = config.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+            return name
+        value = tomllib.loads(config.read_text(encoding="utf-8")).get(key)
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return name
+    if not isinstance(value, str) or not value:
+        return name
+    if value == "~" or value.startswith("~/"):
+        value = str(root) + value[1:]
+    configured = Path(os.path.normpath(value))
+    for other, target in manifest["targets"].items():
+        other_home = root / Path(*safe_relative(str(target["home"])).parts)
+        if Path(os.path.normpath(other_home / "skills")) == configured:
+            return other
+    return name
+
+
 def verify(
     manifest: dict[str, Any],
     root: Path,
@@ -2316,7 +2443,9 @@ def verify(
     openclaw_runtime_report: Path | None,
     openclaw_runtime_passed: bool,
     scheduler_canary_passed: bool,
+    skips: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    skips = skips or {"targets": {}, "cli": {}, "runtime": {}}
     results: dict[str, Any] = {}
     overall = "PASS"
     mcp_evidence = load_mcp_evidence(mcp_report, root) if readiness_phase == "full" else None
@@ -2329,8 +2458,13 @@ def verify(
         if name in allow_missing:
             results[name] = {"status": "NOT_APPLICABLE", "reason": "explicitly-unsupported"}
             continue
+        if name in skips["targets"]:
+            results[name] = {"status": "SKIPPED", "reason": skips["targets"][name]}
+            continue
         runtimes, readiness = validate_target_contract(name, target)
-        runtime_status, runtime_results = runtime_observations(runtimes, path)
+        runtime_status, runtime_results = runtime_observations(
+            runtimes, path, skips["runtime"].get(name)
+        )
         declared_surfaces = target.get("surfaces")
         surfaces = declared_surfaces if isinstance(declared_surfaces, list) else [target]
         if not surfaces:
@@ -2359,7 +2493,10 @@ def verify(
                 candidates = [
                     str(root / Path(*safe_relative(projection["launcher"]).parts))
                 ]
-            cli = command_probe(candidates, version_argv, path)
+            if name in skips["cli"]:
+                cli = {"status": "SKIPPED", "reason": skips["cli"][name]}
+            else:
+                cli = command_probe(candidates, version_argv, path)
             auth_status, authorities = credential_observations(root, authorities_raw)
             surface_status = worst_status([cli["status"], auth_status])
             surface_results.append(
@@ -2376,18 +2513,27 @@ def verify(
         aggregate_auth = worst_status([item["auth_status"] for item in surface_results])
         readiness_results: list[dict[str, Any]] = []
         for declaration in readiness:
-            if declaration == "cli-version":
+            if declaration == "cli-version" and name in skips["cli"]:
+                observation = {
+                    "check": declaration,
+                    "status": "SKIPPED",
+                    "reason": skips["cli"][name],
+                }
+            elif declaration == "cli-version":
                 observation = {"check": declaration, "status": aggregate_cli}
             elif declaration == "managed-skill-visibility":
+                skills_target = configured_skills_target(root, manifest, name)
                 observation = {
                     "check": declaration,
                     **managed_skill_observation(
                         root,
                         aas_source_root,
-                        name,
-                        target["home"],
+                        skills_target,
+                        manifest["targets"][skills_target]["home"],
                     ),
                 }
+                if skills_target != name:
+                    observation["skills_from"] = skills_target
             elif declaration == "runtime-smoke" and readiness_phase == "pre-runtime":
                 observation = {
                     "check": declaration,
@@ -2537,6 +2683,13 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path.home())
     parser.add_argument("--path", default=os.environ.get("PATH", ""))
     parser.add_argument("--allow-missing-target", action="append", default=[])
+    parser.add_argument(
+        "--skip",
+        action="append",
+        default=[],
+        metavar="SELECTOR=REASON",
+        help="record a check that cannot apply here: TARGET, TARGET:cli or TARGET:runtime:REQUIREMENT",
+    )
     parser.add_argument("--readiness-phase", choices=("pre-runtime", "full"), default="full")
     parser.add_argument("--mcp-report", type=Path)
     parser.add_argument("--runtime-smoke-report", type=Path)
@@ -2568,6 +2721,7 @@ def main() -> int:
             args.openclaw_runtime_report,
             args.openclaw_runtime_passed,
             args.scheduler_canary_passed,
+            parse_skips(args.skip, manifest),
         )
     except ContractError as exc:
         print(f"verify-target-state: {exc}", file=sys.stderr)

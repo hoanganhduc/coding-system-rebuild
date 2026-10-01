@@ -278,10 +278,10 @@ class Classroom50RestoreTests(unittest.TestCase):
             any("CLASSROOM50_SERVICE_TOKEN" in entry["path"] for entry in manifest["entries"])
         )
 
-    def test_classroom50_skill_is_routed_to_all_nine_agents(self) -> None:
+    def test_classroom50_skill_is_routed_to_all_ten_agents(self) -> None:
         install = (ROOT / "bin/install.sh").read_text()
         self.assertIn(
-            'AAS_RESTORE_AGENTS="codex,claude,deepseek,copilot,opencode,antigravity,grok,kimi"',
+            'AAS_RESTORE_AGENTS="codex,claude,deepseek,copilot,opencode,antigravity,grok,kimi,chatgpt-local-coder"',
             install,
         )
         ordered_gate = [

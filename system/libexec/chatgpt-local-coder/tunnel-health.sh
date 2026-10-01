@@ -29,6 +29,8 @@ set -uo pipefail
 
 ALIAS=chatgpt-local-coder
 NODE=/usr/bin/node
+# A restored host has the locked Node under ~/.npm-global instead.
+[[ -x "$NODE" ]] || NODE={{ HOME }}/.npm-global/bin/node
 ENTRY={{ HOME }}/chatgpt-local-coder/dist/cli/main.js
 SERVICE=chatgpt-local-coder.service
 TUNNEL_UNIT=chatgpt-local-coder-tunnel.service

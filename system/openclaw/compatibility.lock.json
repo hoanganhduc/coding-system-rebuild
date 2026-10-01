@@ -12,16 +12,16 @@
   },
   "component": {
     "name": "openclaw-bot",
-    "commit": "c7c1a736898e3d4d85eee3fae53246d413b3facb",
+    "commit": "e5052b828dae971b9f6b2d8d1acdecd5909d1ebb",
     "config_template_sha256": "2eebadcbad1a1db0b69375516ff8e26165ff292337b5377496c374c124ca7355",
     "unit_template_sha256": {
       "openclaw-email-worker.service": "c21ba41e591d5130a01236b56739600f35b19cbaf60c8793e8d1ba073ddb6ac7",
-      "openclaw-googlechat-delivery-worker.service": "0c17887fe922c9fb32c05b4fbc310c61b0910a485280bd0918e991c526340d76",
+      "openclaw-googlechat-delivery-worker.service": "2ff8781c1e4dd733ea56e8d28ece520bee7a8f44baeca27c0672c1afd4437ce6",
       "openclaw-manim-worker.service": "c4d47c840e83397839e2af269f106ca79a8b40e5300a6841582c4d574cf1dc9f",
       "openclaw-sage-worker.service": "a7d8f514848322842185e0e35806c1cf534d4d99dae463e1f060d34e697a29eb",
-      "openclaw-whatsapp-delivery-worker.service": "8bad4cab45d996da72f13ee05893de369594e04946cb39fdcb3d39502afc7854",
-      "openclaw-zalo-delivery-worker.service": "13a0e8d425e668d30436093afe6ebd7fcff712182fa852a4e0bf1c3eb825b84f",
-      "openclaw-zulip-delivery-worker.service": "b803de7ffc1c9c1a0c627cd99c7a5d3c4a899b9dc2e1d4478e5f3f7cde4b52d7",
+      "openclaw-whatsapp-delivery-worker.service": "4899c481a9929f2d3f17986b2e8092aae467d9d9ea6fe02c94af903fa4340280",
+      "openclaw-zalo-delivery-worker.service": "abf9d60b1f55ecd0bf81448a20664cf67721cb5ccc422ab934b684a164fbcf99",
+      "openclaw-zulip-delivery-worker.service": "a5e2d58cc187fbd7929a4d9240367003405dc49d5883b4b457a3cddb0d842482",
       "send-queue-worker.service": "0289243cbaa592e870c7e4718009f38ae7414be9cab8cc8a876e8ff3a5c07a76"
     }
   },

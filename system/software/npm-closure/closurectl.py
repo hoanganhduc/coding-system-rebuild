@@ -283,12 +283,20 @@ def source_digest() -> str:
     return digest.hexdigest()
 
 
+# bin/lib/openclaw_closure.py names the published directory after this digest and
+# only then adds its manifest and completion marker at the root; they are not part
+# of the npm tree, so the digest of a published closure leaves them out.
+PUBLICATION_FILES = frozenset({".csr-tree-manifest.json", ".csr-tree-complete"})
+
+
 def tree_digest(root: Path) -> str:
     if root.is_symlink() or not root.is_dir():
         raise ClosureError(f"closure root is missing, a symlink, or not a directory: {root}")
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix()
+        if relative in PUBLICATION_FILES:
+            continue
         metadata = path.lstat()
         if stat.S_ISDIR(metadata.st_mode):
             record = f"D\0{relative}\0".encode()

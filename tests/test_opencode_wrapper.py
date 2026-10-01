@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import platform
 import stat
 import subprocess
 import tempfile
@@ -15,6 +16,18 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "system/bin/opencode"
+ARCH = "arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "amd64"
+OTHER_ARCH = "amd64" if ARCH == "arm64" else "arm64"
+PLATFORM_PACKAGE = {"amd64": "opencode-linux-x64-baseline", "arm64": "opencode-linux-arm64"}
+
+
+def closure_binary(home: Path, arch: str = ARCH) -> Path:
+    """Where the npm closure keeps the locked platform OpenCode binary."""
+    return home / (
+        f".local/share/coding-system/npm-closures/sha256-{arch}-"
+        + "a" * 64 + "-" + "b" * 64
+        + f"/node_modules/{PLATFORM_PACKAGE[arch]}/bin/opencode"
+    )
 
 
 class OpenCodeWrapperTests(unittest.TestCase):
@@ -30,12 +43,16 @@ class OpenCodeWrapperTests(unittest.TestCase):
         return wrapper
 
     @staticmethod
-    def write_target(home: Path) -> Path:
-        target = (
-            home
-            / ".npm-global/lib/node_modules/opencode-ai/bin/opencode.exe"
-        )
+    def link_target(home: Path, target: Path) -> None:
+        link = home / ".npm-global/bin/opencode"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+
+    @classmethod
+    def write_target(cls, home: Path) -> Path:
+        target = closure_binary(home)
         target.parent.mkdir(parents=True)
+        cls.link_target(home, target)
         target.write_text(
             """#!/usr/bin/bash -p
 set -eu
@@ -109,20 +126,30 @@ printf '%s\n' "$#" "$1" "$PATH"
             self.assertFalse(startup_marker.exists())
             self.assertNotIn("ambient-target-ran", result.stdout + result.stderr)
 
-    def test_launcher_rejects_missing_or_linked_package_target(self) -> None:
-        for case in ("missing", "symlink"):
+    def test_launcher_rejects_targets_outside_the_locked_closure(self) -> None:
+        # Missing link; a link to an arbitrary file; the opencode-ai placeholder
+        # that its postinstall would replace; another architecture's closure.
+        for case in ("missing", "outside", "placeholder", "other-arch"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 home = Path(temporary)
                 wrapper = self.render(home)
                 victim = home / "victim"
                 victim.write_text("must-not-run\n", encoding="utf-8")
-                if case == "symlink":
+                victim.chmod(0o755)
+                if case == "outside":
+                    self.link_target(home, victim)
+                elif case in ("placeholder", "other-arch"):
                     target = (
-                        home
-                        / ".npm-global/lib/node_modules/opencode-ai/bin/opencode.exe"
+                        home / ".npm-global/lib/node_modules/opencode-ai/bin/opencode.exe"
+                        if case == "placeholder"
+                        else closure_binary(home, OTHER_ARCH)
                     )
                     target.parent.mkdir(parents=True)
-                    target.symlink_to(victim)
+                    target.write_text(
+                        f"#!/bin/sh\necho ran > {victim}\n", encoding="utf-8"
+                    )
+                    target.chmod(0o755)
+                    self.link_target(home, target)
 
                 result = subprocess.run(
                     [os.fspath(wrapper), "--version"],
