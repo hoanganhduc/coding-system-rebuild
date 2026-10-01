@@ -1,0 +1,63 @@
+personality = "pragmatic"
+model = "gpt-6-astra"
+model_reasoning_effort = "xhigh"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+approvals_reviewer = "user"
+plan_mode_reasoning_effort = "xhigh"
+log_dir = "{{ HOME }}/.codex/log"
+
+[features]
+hooks = true
+multi_agent = true
+
+[shell_environment_policy]
+exclude = ["AAS_ALLOW_EXTERNAL_SECRETS_FILE", "AAS_SECRETS_FILE"]
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+
+[mcp_servers.sequentialThinking]
+command = "{{ HOME }}/.npm-global/bin/mcp-server-sequential-thinking"
+startup_timeout_sec = 20.0
+
+[mcp_servers.lean-explore]
+command = "{{ HOME }}/.local/bin/lean-explore-mcp-api"
+startup_timeout_sec = 20.0
+env = { LEANEXPLORE_SECRET_FILE = "{{ HOME }}/.config/ai-agents-skills/skill.env" }
+
+[notice]
+hide_rate_limit_model_nudge = true
+
+[notice.model_migrations]
+"gpt-5.2-codex" = "gpt-5.3-codex"
+"gpt-5.3-codex" = "gpt-5.4"
+
+[plugins."github@openai-curated"]
+enabled = true
+
+[tui]
+screen_reader_detection_done = true
+
+[tui.keymap.chat]
+interrupt_turn = "f12"
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4
+"gpt-5.6-sol" = 4
+gpt-6-astra = 4
+"gpt-6.1-sol" = 1
+
+[hooks.state]
+
+[hooks.state."{{ HOME }}/.codex/hooks.json:post_tool_use:0:0"]
+enabled = true
+trusted_hash = "sha256:ea399a66184069a4b5315617da698c510fe6ec063d9f0e04034644ae26a43ab6"
+
+[hooks.state."{{ HOME }}/.codex/hooks.json:pre_tool_use:0:0"]
+enabled = true
+trusted_hash = "sha256:8d3bbaffa8119245977c06e97ee1e16f90ae231d2d011726957cd502c4d1b62a"
+
+[hooks.state."{{ HOME }}/.codex/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:fc1a3b314c3dc932573255044c39517870179235292ce895f0281b3433c87e06"
+

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+runner="${CODEX_RUNTIME_RUNNER:-$HOME/.codex/runtime/run_skill.sh}"
+
+usage() {
+  printf 'Usage: %s skills/<skill>/<script> [args...]\n' "${0##*/}" >&2
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 2
+fi
+
+target="$1"
+
+if [[ "$target" != skills/* || "$target" == *..* ]]; then
+  printf 'error: target must be a relative Codex runtime skill path under skills/\n' >&2
+  usage
+  exit 2
+fi
+
+if [[ ! -f "$runner" ]]; then
+  printf 'error: Codex runtime runner not found at %s\n' "$runner" >&2
+  exit 1
+fi
+
+exec bash "$runner" "$@"

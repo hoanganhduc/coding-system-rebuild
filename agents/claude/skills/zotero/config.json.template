@@ -1,0 +1,13 @@
+{
+  "auto_catalog_threshold": 80,
+  "cache_max_age_hours": 24,
+  "default_collection": "",
+  "gdrive_credentials_file": "",
+  "gdrive_folder_id": "{{ GDRIVE_FOLDER_ID }}",
+  "gdrive_share_permission": "anyone_with_link",
+  "translation_server": "http://localhost:1969",
+  "webdav_url": "{{ WEBDAV_URL }}",
+  "webdav_user": "{{ WEBDAV_USER }}",
+  "zotero_user_id": "{{ ZOTERO_USER_ID }}",
+  "zotfile_pattern": "{%a_}{%y_}{%t} {[%T]}"
+}

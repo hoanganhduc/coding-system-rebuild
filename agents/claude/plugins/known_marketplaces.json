@@ -1,0 +1,19 @@
+{
+  "claude-plugins-official": {
+    "source": {
+      "source": "github",
+      "repo": "anthropics/claude-plugins-official"
+    },
+    "installLocation": "{{ HOME }}/.claude/plugins/marketplaces/claude-plugins-official",
+    "lastUpdated": "2026-09-29T11:30:44.749Z"
+  },
+  "lean4-skills": {
+    "source": {
+      "source": "github",
+      "repo": "cameronfreer/lean4-skills"
+    },
+    "installLocation": "{{ HOME }}/.claude/plugins/marketplaces/lean4-skills",
+    "lastUpdated": "2026-09-29T11:30:46.923Z",
+    "autoUpdate": true
+  }
+}

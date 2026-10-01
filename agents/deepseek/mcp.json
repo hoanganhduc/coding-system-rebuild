@@ -1,0 +1,25 @@
+{
+  "timeouts": {
+    "connect_timeout": 10,
+    "execute_timeout": 60,
+    "read_timeout": 120
+  },
+  "servers": {
+    "lean-explore": {
+      "command": "{{ HOME }}/.local/bin/lean-explore-mcp-api",
+      "args": [],
+      "env": {
+        "LEANEXPLORE_SECRET_FILE": "{{ HOME }}/.openclaw/workspace/.config/ai-agents-skills/lean-explore.env"
+      },
+      "url": null,
+      "connect_timeout": null,
+      "execute_timeout": null,
+      "read_timeout": null,
+      "disabled": false,
+      "enabled": true,
+      "required": false,
+      "enabled_tools": [],
+      "disabled_tools": []
+    }
+  }
+}

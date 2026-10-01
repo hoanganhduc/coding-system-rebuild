@@ -1,0 +1,12 @@
+{
+  "bindings": [
+    {
+      "context": "Chat",
+      "bindings": {
+        "Ctrl+K": "clearConversation",
+        "Ctrl+L": "compact"
+      }
+    }
+  ],
+  "$schema": "https://www.schemastore.org/claude-code-keybindings.json"
+}

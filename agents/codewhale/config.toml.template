@@ -1,0 +1,106 @@
+base_url = "https://api.deepseek.com"
+default_text_model = "deepseek-v4-pro"
+provider = "deepseek"
+auth_mode = "api_key"
+telemetry = false
+sandbox_mode = "workspace-write"
+harness_profiles = []
+allow_shell = true
+max_subagents = 5
+"mcp.server_definitions" = "[]"
+mcp_config_path = "{{ HOME }}/.deepseek/mcp.json"
+memory_path = "~/.deepseek/memory.md"
+notes_path = "~/.deepseek/notes.txt"
+reasoning_effort = "max"
+skills_dir = "~/.deepseek/skills"
+
+[providers.deepseek]
+auth_mode = "api_key"
+
+[network]
+default = "prompt"
+allow = [
+    "api.deepseek.com",
+    "github.com",
+    ".githubusercontent.com",
+]
+deny = []
+proxy = []
+proxy_fake_ip_cidrs = []
+audit = true
+
+[skills]
+
+[snapshots]
+enabled = true
+max_age_days = 7
+
+[lsp]
+enabled = true
+poll_after_edit_ms = 5000
+max_diagnostics_per_file = 20
+include_warnings = false
+
+[capacity]
+deepseek_v3_2_chat_prior = 3.9
+deepseek_v3_2_reasoner_prior = 4.1
+enabled = true
+fallback_default_prior = 3.8
+low_risk_max = 0.34
+max_replay_per_turn = 1
+medium_risk_max = 0.62
+min_turns_before_guardrail = 2
+profile_window = 8
+refresh_cooldown_turns = 2
+replan_cooldown_turns = 5
+severe_min_slack = -0.25
+severe_violation_ratio = 0.4
+
+[context]
+cycle_threshold = 768000
+enabled = true
+l1_threshold = 192000
+l2_threshold = 384000
+l3_threshold = 576000
+seam_model = "deepseek-v4-flash"
+verbatim_window_turns = 16
+
+[features]
+apply_patch = true
+exec_policy = true
+mcp = true
+shell_tool = true
+subagents = true
+web_search = true
+
+[notifications]
+include_summary = false
+method = "auto"
+threshold_secs = 30
+
+[retry]
+enabled = true
+exponential_base = 2.0
+initial_delay = 1.0
+max_delay = 60.0
+max_retries = 3
+
+[tui]
+alternate_screen = "auto"
+mouse_capture = true
+status_items = [
+    "mode",
+    "model",
+    "cost",
+    "balance",
+    "status",
+    "agents",
+    "reasoning_replay",
+    "prefix_stability",
+    "cache",
+    "context_percent",
+    "git_branch",
+    "last_tool_elapsed",
+    "rate_limit",
+    "tokens",
+]

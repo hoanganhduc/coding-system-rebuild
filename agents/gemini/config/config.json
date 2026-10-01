@@ -1,0 +1,10 @@
+{
+  "plugins": {
+    "ai-agents-skills": {
+      "enabled": true
+    }
+  },
+  "userSettings": {
+    "remoteControlHostname": "openclaw-mighty-jet"
+  }
+}
