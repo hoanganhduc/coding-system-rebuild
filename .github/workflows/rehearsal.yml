@@ -81,28 +81,50 @@ jobs:
       - name: Validate locked platform, npm, Python, and OCI declarations
         env:
           EXPECTED_ARCH: ${{ matrix.architecture }}
+        # Every check runs and every failure is reported in one pass.
         run: |
-          set -euo pipefail
-          python3 system/software/lockctl.py --arch "$EXPECTED_ARCH" validate
-          python3 system/software/npm-closure/closurectl.py validate
-          python3 bin/install-python-closure.py validate \
+          set -uo pipefail
+          failed=()
+          check() {
+            echo "::group::$*"
+            if "$@"; then echo "PASS: $*"; else failed+=("$*"); echo "::error title=check failed::$*"; fi
+            echo "::endgroup::"
+          }
+          check python3 system/software/lockctl.py --arch "$EXPECTED_ARCH" validate
+          check python3 system/software/npm-closure/closurectl.py validate
+          check python3 bin/install-python-closure.py validate \
             --lock "system/python-closure/ubuntu-24.04-${EXPECTED_ARCH}.lock.json"
-          python3 bin/verify-installed-software.py --repository . \
+          check python3 bin/verify-installed-software.py --repository . \
             --architecture "$EXPECTED_ARCH" --profile source
-          python3 -I -B bin/provision-grok-bootstrap.py --check-lock
-          python3 system/software/pull-locked-images.py \
+          check python3 -I -B bin/provision-grok-bootstrap.py --check-lock
+          check python3 system/software/pull-locked-images.py \
             --arch "$EXPECTED_ARCH" --dry-run
+          if ((${#failed[@]})); then
+            printf 'FAILED: %s\n' "${failed[@]}"
+            exit 1
+          fi
       - name: Architecture-sensitive focused tests and shell parse gate
+        # Every test file runs and every failure is reported in one pass.
         run: |
-          set -euo pipefail
-          python3 -B tests/test_bootstrap_software.py
-          python3 -B tests/test_python_closure.py
-          python3 -B tests/test_python_wheelhouse.py
-          python3 -B tests/test_installed_software_verifier.py
-          python3 -I -B tests/test_grok_bootstrap_provision.py
-          python3 -B tests/test_lean_explore_wrapper.py
-          python3 -B tests/test_lean_explore_handshake.py
-          git ls-files -z '*.sh' | xargs -0 -n1 bash -n
+          set -uo pipefail
+          failed=()
+          check() {
+            echo "::group::$*"
+            if "$@"; then echo "PASS: $*"; else failed+=("$*"); echo "::error title=check failed::$*"; fi
+            echo "::endgroup::"
+          }
+          check python3 -B tests/test_bootstrap_software.py
+          check python3 -B tests/test_python_closure.py
+          check python3 -B tests/test_python_wheelhouse.py
+          check python3 -B tests/test_installed_software_verifier.py
+          check python3 -I -B tests/test_grok_bootstrap_provision.py
+          check python3 -B tests/test_lean_explore_wrapper.py
+          check python3 -B tests/test_lean_explore_handshake.py
+          check bash -c "git ls-files -z '*.sh' | xargs -0 -n1 bash -n"
+          if ((${#failed[@]})); then
+            printf 'FAILED: %s\n' "${failed[@]}"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------- no secrets
   rehearsal-core:
@@ -654,6 +676,21 @@ jobs:
             exit "$installer_rc"
           fi
           exit "$capture_rc"
+      - name: Show where the installer stopped
+        if: always()
+        run: |
+          # The installer writes to install.log; surface its failure point here
+          # so a red run is diagnosable without downloading the artifact.
+          if [ -f install.exit ] && [ "$(cat install.exit)" != 0 ]; then
+            last_phase="$(grep -E '^#+ PHASE [0-9]+' install.log | tail -n 1 || true)"
+            last_step="$(grep -E '^=== prepare: ' install.log | tail -n 1 || true)"
+            echo "::error title=installer stopped::${last_phase:-no phase} ${last_step:+/ $last_step}"
+            grep -nE '(^|: )(FAIL|ERROR|error|die|prepare: |install: )' install.log | tail -n 20 \
+              | while IFS= read -r line; do echo "::error title=install.log::${line:0:300}"; done
+            echo "::group::last 80 lines of install.log"
+            tail -n 80 install.log
+            echo "::endgroup::"
+          fi
       - name: Assert key phases succeeded
         if: always()
         run: |

@@ -168,20 +168,15 @@ test: ## self-tests: canary scan + field-set guard + rotation units + grok-proxy
 	@python3 -B tests/test_opencode_wrapper.py
 	@python3 -B tests/test_openclaw_skill_inventory.py
 	@python3 -B tests/test_test_registration.py
+	@python3 -B tests/test_run_test_suite.py
 	@component=$$(python3 -I -B bin/lib/component_paths.py --repository "$(REPO)" --home "$(HOME)" --source-fallback --require openclaw-bot); \
 	  python3 -B "$$component/tests/test_runtime_contracts.py"
 	@python3 tests/test_stage_backup.py
 	@bash system/grok-proxy/tests/run.sh
 	@bash bin/test-roundtrip.sh
 
-ci: ## no-secrets rehearsal for CI/fresh VM: doctor + components + leak scans + all self-tests
-	@bash bin/doctor.sh
-	@python3 -I -B bin/lib/component_paths.py --repository "$(REPO)" --home "$(HOME)" --source-fallback --require openclaw-bot >/dev/null 2>&1 || $(MAKE) -s components
-	@bash bin/leak-scan.sh
-	@$(MAKE) -s leak-scan-history
-	@$(MAKE) -s public-export-check
-	@$(MAKE) -s test
-	@echo "ci: all no-secrets checks passed"
+ci: ## no-secrets rehearsal for CI/fresh VM: doctor + components + leak scans + all self-tests, reporting every failure
+	@bash bin/ci.sh
 
 roundtrip: ## /tmp-prefix capture/render/secrets cycle (no live mutation)
 	@bash bin/test-roundtrip.sh
