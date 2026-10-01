@@ -1,0 +1,505 @@
+name: Promote Grok bootstrap release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful protected-default-branch Grok bootstrap build run ID
+        required: true
+        type: string
+      release_tag:
+        description: Draft release with signed dispatcher and signed release authorization
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grok-bootstrap-promotion
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify lineage, attestations, and administrative authorization
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: grok-bootstrap-verify
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      package_version: ${{ steps.identity.outputs.version }}
+      source_commit: ${{ steps.identity.outputs.source_commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Authenticate exact protected default-branch workflow lineage
+        id: identity
+        env:
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          [[ "$GITHUB_REPOSITORY" == hoanganhduc/coding-system-rebuild ]]
+          [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+          [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^grok-bootstrap-v[0-9][0-9A-Za-z.+_-]{0,126}$ ]]
+          run_json="$RUNNER_TEMP/build-run.json"
+          jobs_json="$RUNNER_TEMP/build-jobs.json"
+          release_json="$RUNNER_TEMP/draft-release.json"
+          workflow_json="$RUNNER_TEMP/build-workflow.json"
+          branch_json="$RUNNER_TEMP/default-branch.json"
+          build_environment_json="$RUNNER_TEMP/build-environment.json"
+          verify_environment_json="$RUNNER_TEMP/verify-environment.json"
+          publish_environment_json="$RUNNER_TEMP/publish-environment.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID" > "$run_json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs?per_page=100" > "$jobs_json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/grok-bootstrap-build.yml" > "$workflow_json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$release_json"
+          gh api "repos/$GITHUB_REPOSITORY/branches/$DEFAULT_BRANCH" > "$branch_json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/grok-bootstrap-build" > "$build_environment_json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/grok-bootstrap-verify" > "$verify_environment_json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/grok-bootstrap-publish" > "$publish_environment_json"
+          mapfile -t identity < <(python3 -I -B - \
+            "$run_json" "$jobs_json" "$release_json" "$workflow_json" \
+            "$branch_json" "$build_environment_json" \
+            "$verify_environment_json" "$publish_environment_json" \
+            "$GITHUB_REPOSITORY" "$DEFAULT_BRANCH" \
+            "$RELEASE_TAG" "$GITHUB_SHA" <<'PY'
+          import json
+          import re
+          import sys
+
+          run, jobs, release, workflow, branch, build_env, verify_env, publish_env = (
+              json.load(open(path, encoding="utf-8")) for path in sys.argv[1:9]
+          )
+          repository, default_branch, tag, promotion_sha = sys.argv[9:13]
+          source = run.get("head_sha", "")
+          if (
+              run.get("status") != "completed"
+              or run.get("conclusion") != "success"
+              or run.get("event") != "workflow_dispatch"
+              or run.get("path") != ".github/workflows/grok-bootstrap-build.yml"
+              or run.get("head_branch") != default_branch
+              or run.get("head_repository", {}).get("full_name") != repository
+              or run.get("workflow_id") != workflow.get("id")
+              or workflow.get("path") != ".github/workflows/grok-bootstrap-build.yml"
+              or workflow.get("state") != "active"
+              or re.fullmatch(r"[0-9a-f]{40}", source) is None
+              or source != promotion_sha
+          ):
+              raise SystemExit("build run lacks exact protected default-branch lineage")
+          successful = sorted(
+              job.get("name", "")
+              for job in jobs.get("jobs", [])
+              if job.get("conclusion") == "success"
+          )
+          if successful != ["Build amd64 package", "Build arm64 package"]:
+              raise SystemExit("build run does not contain exactly both successful native jobs")
+          if (
+              branch.get("name") != default_branch
+              or branch.get("protected") is not True
+              or branch.get("commit", {}).get("sha") != source
+          ):
+              raise SystemExit("build commit is not the current protected default-branch head")
+          for name, environment in (
+              ("grok-bootstrap-build", build_env),
+              ("grok-bootstrap-verify", verify_env),
+              ("grok-bootstrap-publish", publish_env),
+          ):
+              policy = environment.get("deployment_branch_policy")
+              if (
+                  environment.get("name") != name
+                  or not isinstance(policy, dict)
+                  or policy.get("protected_branches") is not True
+                  or policy.get("custom_branch_policies") is not False
+              ):
+                  raise SystemExit(f"{name} is not restricted to protected branches")
+          publish_review = next(
+              (
+                  rule
+                  for rule in publish_env.get("protection_rules", [])
+                  if rule.get("type") == "required_reviewers"
+              ),
+              None,
+          )
+          if (
+              not isinstance(publish_review, dict)
+              or publish_review.get("prevent_self_review") is not True
+              or not publish_review.get("reviewers")
+          ):
+              raise SystemExit("publishing environment lacks independent required review")
+          if (
+              release.get("tag_name") != tag
+              or release.get("draft") is not True
+              or release.get("target_commitish") != source
+          ):
+              raise SystemExit("target release is not the exact-source draft")
+          names = sorted(asset.get("name", "") for asset in release.get("assets", []))
+          required = sorted([
+              "dispatcher.pyz",
+              "release-authorization.json",
+              "release-authorization.sig",
+              "release-manifest.sig",
+              "release-manifest.txt",
+          ])
+          if names != required:
+              raise SystemExit(
+                  "draft release must initially contain exactly the five signed authorization/dispatcher assets"
+              )
+          print(source)
+          PY
+          )
+          [[ ${#identity[@]} -eq 1 ]]
+          git cat-file -e "${identity[0]}^{commit}"
+          git merge-base --is-ancestor "${identity[0]}" "origin/$DEFAULT_BRANCH"
+          source_epoch="$(git show -s --format=%ct "${identity[0]}")"
+          [[ "$source_epoch" =~ ^[0-9]+$ ]]
+          source_day="$(date -u -d "@$source_epoch" +%Y%m%d)"
+          version="1.1.0+git${source_day}.${identity[0]:0:8}"
+          printf 'source_commit=%s\n' "${identity[0]}" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download both native build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          pattern: grok-bootstrap-*-${{ steps.identity.outputs.source_commit }}
+          path: ${{ runner.temp }}/native-downloads
+
+      - name: Verify exact workflow attestations and signed release authorization
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.identity.outputs.version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          assets="$RUNNER_TEMP/release-assets"
+          install -d -m 0700 "$assets"
+          python3 -I -B - "$RUNNER_TEMP/native-downloads" "$assets" "$PACKAGE_VERSION" <<'PY'
+          from pathlib import Path
+          import os
+          import shutil
+          import sys
+
+          source = Path(sys.argv[1])
+          target = Path(sys.argv[2])
+          version = sys.argv[3]
+          expected = {
+              f"grok-bootstrap_{version}_amd64.deb",
+              f"grok-bootstrap_{version}_arm64.deb",
+          }
+          found = [path for path in source.rglob("*.deb") if path.is_file() and not path.is_symlink()]
+          if {path.name for path in found} != expected or len(found) != 2:
+              raise SystemExit("native workflow artifacts do not contain exactly both packages")
+          for path in found:
+              descriptor = os.open(
+                  target / path.name,
+                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                  0o600,
+              )
+              try:
+                  with path.open("rb") as source_stream, os.fdopen(descriptor, "wb", closefd=False) as target_stream:
+                      shutil.copyfileobj(source_stream, target_stream)
+                      target_stream.flush()
+                      os.fsync(descriptor)
+              finally:
+                  os.close(descriptor)
+          PY
+          for arch in amd64 arm64; do
+            package="$assets/grok-bootstrap_${PACKAGE_VERSION}_${arch}.deb"
+            gh attestation verify "$package" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/grok-bootstrap-build.yml" \
+              --source-ref "refs/heads/$DEFAULT_BRANCH" \
+              --source-digest "$SOURCE_COMMIT" \
+              --signer-digest "$SOURCE_COMMIT" \
+              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/grok-bootstrap-build.yml@refs/heads/$DEFAULT_BRANCH" \
+              --deny-self-hosted-runners
+          done
+          gh release download "$RELEASE_TAG" --dir "$assets" \
+            --pattern dispatcher.pyz \
+            --pattern release-authorization.json \
+            --pattern release-authorization.sig \
+            --pattern release-manifest.sig \
+            --pattern release-manifest.txt
+          candidate="$RUNNER_TEMP/grok-bootstrap-release.lock.candidate.json"
+          python3 -I -B bin/promote-grok-bootstrap-release.py \
+            --artifact-dir "$assets" \
+            --tag "$RELEASE_TAG" \
+            --package-version "$PACKAGE_VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            --output "$candidate"
+          install -m 0600 "$candidate" "$assets/grok-bootstrap-release.lock.candidate.json"
+
+      - name: Seal verified promotion inputs for the publishing environment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: grok-bootstrap-verified-promotion-${{ steps.identity.outputs.source_commit }}
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Transactionally publish the remotely read-back release
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: grok-bootstrap-publish
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download verified promotion inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: grok-bootstrap-verified-promotion-${{ needs.verify.outputs.source_commit }}
+          path: ${{ runner.temp }}/verified-promotion
+
+      - name: Reverify, mutate draft transactionally, and publish
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ needs.verify.outputs.package_version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" == "$SOURCE_COMMIT" ]]
+          [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+          assets="$RUNNER_TEMP/verified-promotion"
+          expected_candidate="$assets/grok-bootstrap-release.lock.candidate.json"
+          test -f "$expected_candidate"
+          candidate_check="$RUNNER_TEMP/candidate-recheck.json"
+          validation="$RUNNER_TEMP/candidate-validation"
+          install -d -m 0700 "$validation"
+          for name in dispatcher.pyz release-authorization.json release-authorization.sig release-manifest.sig release-manifest.txt \
+            "grok-bootstrap_${PACKAGE_VERSION}_amd64.deb" \
+            "grok-bootstrap_${PACKAGE_VERSION}_arm64.deb"; do
+            install -m 0600 "$assets/$name" "$validation/$name"
+          done
+          python3 -I -B bin/promote-grok-bootstrap-release.py \
+            --artifact-dir "$validation" \
+            --tag "$RELEASE_TAG" \
+            --package-version "$PACKAGE_VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            --output "$candidate_check"
+          cmp -s "$expected_candidate" "$candidate_check"
+          for arch in amd64 arm64; do
+            gh attestation verify "$assets/grok-bootstrap_${PACKAGE_VERSION}_${arch}.deb" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/grok-bootstrap-build.yml" \
+              --source-ref "refs/heads/$DEFAULT_BRANCH" \
+              --source-digest "$SOURCE_COMMIT" \
+              --signer-digest "$SOURCE_COMMIT" \
+              --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/grok-bootstrap-build.yml@refs/heads/$DEFAULT_BRANCH" \
+              --deny-self-hosted-runners
+          done
+          branch_json="$RUNNER_TEMP/publish-branch.json"
+          publish_environment_json="$RUNNER_TEMP/publish-environment-recheck.json"
+          gh api "repos/$GITHUB_REPOSITORY/branches/$DEFAULT_BRANCH" > "$branch_json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/grok-bootstrap-publish" > "$publish_environment_json"
+          python3 -I -B - "$branch_json" "$publish_environment_json" \
+            "$DEFAULT_BRANCH" "$SOURCE_COMMIT" <<'PY'
+          import json
+          import sys
+
+          branch = json.load(open(sys.argv[1], encoding="utf-8"))
+          environment = json.load(open(sys.argv[2], encoding="utf-8"))
+          default_branch, source = sys.argv[3:5]
+          review = next(
+              (
+                  rule
+                  for rule in environment.get("protection_rules", [])
+                  if rule.get("type") == "required_reviewers"
+              ),
+              None,
+          )
+          policy = environment.get("deployment_branch_policy")
+          if (
+              branch.get("name") != default_branch
+              or branch.get("protected") is not True
+              or branch.get("commit", {}).get("sha") != source
+              or environment.get("name") != "grok-bootstrap-publish"
+              or not isinstance(policy, dict)
+              or policy.get("protected_branches") is not True
+              or policy.get("custom_branch_policies") is not False
+              or not isinstance(review, dict)
+              or review.get("prevent_self_review") is not True
+              or not review.get("reviewers")
+          ):
+              raise SystemExit("publishing trust policy changed after verification")
+          PY
+          release_json="$RUNNER_TEMP/pre-mutation-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$release_json"
+          python3 -I -B - "$release_json" "$SOURCE_COMMIT" <<'PY'
+          import json
+          import sys
+
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          expected = sorted([
+              "dispatcher.pyz",
+              "release-authorization.json",
+              "release-authorization.sig",
+              "release-manifest.sig",
+              "release-manifest.txt",
+          ])
+          if (
+              value.get("draft") is not True
+              or value.get("target_commitish") != sys.argv[2]
+              or sorted(asset.get("name", "") for asset in value.get("assets", [])) != expected
+          ):
+              raise SystemExit("draft changed after verification")
+          PY
+          uploaded_asset_ids=()
+          published=0
+          cleanup() {
+            status=$?
+            if (( status != 0 && published == 0 )); then
+              for asset_id in "${uploaded_asset_ids[@]}"; do
+                [[ "$asset_id" =~ ^[0-9]+$ ]] || continue
+                gh api --method DELETE \
+                  "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+                  >/dev/null 2>&1 || true
+              done
+            fi
+            exit "$status"
+          }
+          upload_and_record() {
+            local path="$1"
+            local name="${path##*/}"
+            local size
+            local inventory="$RUNNER_TEMP/upload-readback-${#uploaded_asset_ids[@]}.json"
+            local asset_id
+            size="$(stat --format=%s -- "$path")"
+            [[ "$size" =~ ^[1-9][0-9]*$ ]]
+            gh release upload "$RELEASE_TAG" "$path"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$inventory"
+            asset_id="$(python3 -I -B - "$inventory" "$name" "$size" <<'PY'
+          import json
+          import sys
+
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          name, size = sys.argv[2], int(sys.argv[3])
+          matches = [
+              asset
+              for asset in value.get("assets", [])
+              if asset.get("name") == name
+          ]
+          if (
+              len(matches) != 1
+              or not isinstance(matches[0].get("id"), int)
+              or matches[0]["id"] <= 0
+              or matches[0].get("state") != "uploaded"
+              or matches[0].get("size") != size
+          ):
+              raise SystemExit("uploaded release asset lacks exact API readback")
+          print(matches[0]["id"])
+          PY
+            )"
+            [[ "$asset_id" =~ ^[0-9]+$ ]]
+            uploaded_asset_ids+=("$asset_id")
+          }
+          trap cleanup EXIT
+          upload_and_record "$assets/grok-bootstrap_${PACKAGE_VERSION}_amd64.deb"
+          upload_and_record "$assets/grok-bootstrap_${PACKAGE_VERSION}_arm64.deb"
+          readback="$RUNNER_TEMP/release-readback"
+          install -d -m 0700 "$readback"
+          gh release download "$RELEASE_TAG" --dir "$readback" \
+            --pattern dispatcher.pyz \
+            --pattern release-authorization.json \
+            --pattern release-authorization.sig \
+            --pattern release-manifest.sig \
+            --pattern release-manifest.txt \
+            --pattern "grok-bootstrap_${PACKAGE_VERSION}_amd64.deb" \
+            --pattern "grok-bootstrap_${PACKAGE_VERSION}_arm64.deb"
+          readback_candidate="$RUNNER_TEMP/grok-bootstrap-release.lock.candidate.json"
+          python3 -I -B bin/promote-grok-bootstrap-release.py \
+            --artifact-dir "$readback" \
+            --tag "$RELEASE_TAG" \
+            --package-version "$PACKAGE_VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            --output "$readback_candidate"
+          cmp -s "$expected_candidate" "$readback_candidate"
+          upload_and_record "$readback_candidate"
+          final_readback="$RUNNER_TEMP/final-readback"
+          install -d -m 0700 "$final_readback"
+          gh release download "$RELEASE_TAG" --dir "$final_readback"
+          cmp -s "$readback_candidate" \
+            "$final_readback/grok-bootstrap-release.lock.candidate.json"
+          python3 -I -B - "$final_readback" "$PACKAGE_VERSION" <<'PY'
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          version = sys.argv[2]
+          expected = {
+              "dispatcher.pyz",
+              "release-authorization.json",
+              "release-authorization.sig",
+              "release-manifest.sig",
+              "release-manifest.txt",
+              "grok-bootstrap-release.lock.candidate.json",
+              f"grok-bootstrap_{version}_amd64.deb",
+              f"grok-bootstrap_{version}_arm64.deb",
+          }
+          if {path.name for path in root.iterdir()} != expected:
+              raise SystemExit("remote release readback inventory is not closed")
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false
+          published=1
+          published_json="$RUNNER_TEMP/published-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$published_json"
+          python3 -I -B - "$published_json" "$SOURCE_COMMIT" "$PACKAGE_VERSION" <<'PY'
+          import json
+          import sys
+
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          source, version = sys.argv[2:4]
+          expected = {
+              "dispatcher.pyz",
+              "release-authorization.json",
+              "release-authorization.sig",
+              "release-manifest.sig",
+              "release-manifest.txt",
+              "grok-bootstrap-release.lock.candidate.json",
+              f"grok-bootstrap_{version}_amd64.deb",
+              f"grok-bootstrap_{version}_arm64.deb",
+          }
+          if (
+              value.get("draft") is not False
+              or value.get("target_commitish") != source
+              or {asset.get("name", "") for asset in value.get("assets", [])} != expected
+              or len(value.get("assets", [])) != len(expected)
+          ):
+              raise SystemExit("published release readback identity is invalid")
+          PY
+          trap - EXIT
+
+      - name: Export qualified lock candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: grok-bootstrap-qualified-lock-${{ needs.verify.outputs.source_commit }}
+          path: ${{ runner.temp }}/verified-promotion/grok-bootstrap-release.lock.candidate.json
+          if-no-files-found: error
+          retention-days: 30

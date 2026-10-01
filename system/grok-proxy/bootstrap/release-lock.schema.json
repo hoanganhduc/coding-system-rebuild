@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hoanganhduc/coding-system-rebuild/system/grok-proxy/bootstrap/release-lock.schema.json",
+  "title": "Grok bootstrap immutable release lock",
+  "oneOf": [
+    {"$ref": "#/$defs/pending"},
+    {"$ref": "#/$defs/qualified"}
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "trustAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_id", "public_key_hex"],
+      "properties": {
+        "key_id": {"const": "grok-dispatch-prod-2026-07-v1"},
+        "public_key_hex": {"const": "b8b25772f3f7a192d7ee7cd20b3f6c00f93d2e580ee518feb6a91c7e21aa2b81"}
+      }
+    },
+    "authorizationAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "namespace", "public_key"],
+      "properties": {
+        "identity": {"const": "coding-system-rebuild"},
+        "namespace": {"const": "grok-bootstrap-release-authorization"},
+        "public_key": {"const": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMhRCwEen79Czp0YyfreBiMsG1WUk4G0NbuefxH6BQaH"}
+      }
+    },
+    "artifactBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256", "size", "url"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 255},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"type": "integer", "minimum": 1, "maximum": 134217728},
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/hoanganhduc/coding-system-rebuild/releases/download/grok-bootstrap-v[0-9][0-9A-Za-z.+_-]{0,126}/(?:dispatcher\\.pyz|release-authorization\\.(?:json|sig)|release-manifest\\.(?:sig|txt)|grok-bootstrap_[0-9][0-9A-Za-z.+~_-]{0,127}_(?:amd64|arm64)\\.deb)$"
+        }
+      }
+    },
+    "dispatcherArtifact": {
+      "allOf": [
+        {"$ref": "#/$defs/artifactBase"},
+        {
+          "properties": {
+            "name": {"const": "dispatcher.pyz"},
+            "url": {"pattern": "/dispatcher\\.pyz$"}
+          }
+        }
+      ]
+    },
+    "authorizationJsonArtifact": {
+      "allOf": [
+        {"$ref": "#/$defs/artifactBase"},
+        {
+          "properties": {
+            "name": {"const": "release-authorization.json"},
+            "url": {"pattern": "/release-authorization\\.json$"}
+          }
+        }
+      ]
+    },
+    "authorizationSignatureArtifact": {
+      "allOf": [
+        {"$ref": "#/$defs/artifactBase"},
+        {
+          "properties": {
+            "name": {"const": "release-authorization.sig"},
+            "url": {"pattern": "/release-authorization\\.sig$"}
+          }
+        }
+      ]
+    },
+    "manifestSignatureArtifact": {
+      "allOf": [
+        {"$ref": "#/$defs/artifactBase"},
+        {
+          "properties": {
+            "name": {"const": "release-manifest.sig"},
+            "url": {"pattern": "/release-manifest\\.sig$"}
+          }
+        }
+      ]
+    },
+    "manifestTextArtifact": {
+      "allOf": [
+        {"$ref": "#/$defs/artifactBase"},
+        {
+          "properties": {
+            "name": {"const": "release-manifest.txt"},
+            "url": {"pattern": "/release-manifest\\.txt$"}
+          }
+        }
+      ]
+    },
+    "amd64PackageArtifact": {
+      "allOf": [
+        {"$ref": "#/$defs/artifactBase"},
+        {
+          "properties": {
+            "name": {"pattern": "^grok-bootstrap_[0-9][0-9A-Za-z.+~_-]{0,127}_amd64\\.deb$"},
+            "url": {"pattern": "/grok-bootstrap_[0-9][0-9A-Za-z.+~_-]{0,127}_amd64\\.deb$"}
+          }
+        }
+      ]
+    },
+    "arm64PackageArtifact": {
+      "allOf": [
+        {"$ref": "#/$defs/artifactBase"},
+        {
+          "properties": {
+            "name": {"pattern": "^grok-bootstrap_[0-9][0-9A-Za-z.+~_-]{0,127}_arm64\\.deb$"},
+            "url": {"pattern": "/grok-bootstrap_[0-9][0-9A-Za-z.+~_-]{0,127}_arm64\\.deb$"}
+          }
+        }
+      ]
+    },
+    "pendingIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorization_schema",
+        "minimum_package_version",
+        "operation",
+        "required_architectures",
+        "signed_application_id",
+        "workflow_ref"
+      ],
+      "properties": {
+        "authorization_schema": {"const": "grok-bootstrap-release-authorization-v1"},
+        "minimum_package_version": {"type": "string", "pattern": "^[0-9][0-9A-Za-z.+~_-]{0,127}$"},
+        "operation": {"const": "initial-qualification"},
+        "required_architectures": {"const": ["amd64", "arm64"]},
+        "signed_application_id": {"$ref": "#/$defs/sha256"},
+        "workflow_ref": {"const": "refs/heads/main"}
+      }
+    },
+    "pending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "$schema",
+        "schema_version",
+        "state",
+        "release_authorization_anchor",
+        "trust_anchor",
+        "pending_intent",
+        "pending_reason"
+      ],
+      "properties": {
+        "$schema": {"const": "release-lock.schema.json"},
+        "schema_version": {"const": "grok-bootstrap-release-lock.v1"},
+        "state": {"const": "pending-publication"},
+        "release_authorization_anchor": {"$ref": "#/$defs/authorizationAnchor"},
+        "trust_anchor": {"$ref": "#/$defs/trustAnchor"},
+        "pending_intent": {"$ref": "#/$defs/pendingIntent"},
+        "pending_reason": {"type": "string", "minLength": 1, "maxLength": 2048}
+      }
+    },
+    "qualified": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "state", "release_authorization_anchor", "trust_anchor", "release"],
+      "properties": {
+        "$schema": {"const": "release-lock.schema.json"},
+        "schema_version": {"const": "grok-bootstrap-release-lock.v1"},
+        "state": {"const": "qualified"},
+        "release_authorization_anchor": {"$ref": "#/$defs/authorizationAnchor"},
+        "trust_anchor": {"$ref": "#/$defs/trustAnchor"},
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifacts",
+            "authorization_id",
+            "package_version",
+            "signed_application_id",
+            "source_commit",
+            "tag"
+          ],
+          "properties": {
+            "artifacts": {
+              "type": "object",
+              "minProperties": 7,
+              "maxProperties": 7,
+              "required": [
+                "dispatcher.pyz",
+                "release-authorization.json",
+                "release-authorization.sig",
+                "release-manifest.sig",
+                "release-manifest.txt"
+              ],
+              "allOf": [
+                {
+                  "not": {
+                    "propertyNames": {
+                      "not": {"pattern": "^grok-bootstrap_[0-9][0-9A-Za-z.+~_-]{0,127}_amd64\\.deb$"}
+                    }
+                  }
+                },
+                {
+                  "not": {
+                    "propertyNames": {
+                      "not": {"pattern": "^grok-bootstrap_[0-9][0-9A-Za-z.+~_-]{0,127}_arm64\\.deb$"}
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "dispatcher.pyz": {"$ref": "#/$defs/dispatcherArtifact"},
+                "release-authorization.json": {"$ref": "#/$defs/authorizationJsonArtifact"},
+                "release-authorization.sig": {"$ref": "#/$defs/authorizationSignatureArtifact"},
+                "release-manifest.sig": {"$ref": "#/$defs/manifestSignatureArtifact"},
+                "release-manifest.txt": {"$ref": "#/$defs/manifestTextArtifact"}
+              },
+              "patternProperties": {
+                "^grok-bootstrap_[0-9][0-9A-Za-z.+~_-]{0,127}_amd64\\.deb$": {"$ref": "#/$defs/amd64PackageArtifact"},
+                "^grok-bootstrap_[0-9][0-9A-Za-z.+~_-]{0,127}_arm64\\.deb$": {"$ref": "#/$defs/arm64PackageArtifact"}
+              },
+              "additionalProperties": false
+            },
+            "authorization_id": {"$ref": "#/$defs/sha256"},
+            "package_version": {"type": "string", "pattern": "^[0-9][0-9A-Za-z.+~_-]{0,127}$"},
+            "signed_application_id": {"$ref": "#/$defs/sha256"},
+            "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "tag": {"type": "string", "pattern": "^grok-bootstrap-v[0-9][0-9A-Za-z.+_-]{0,126}$"}
+          }
+        }
+      }
+    }
+  }
+}

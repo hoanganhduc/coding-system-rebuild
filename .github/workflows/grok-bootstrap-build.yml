@@ -1,0 +1,189 @@
+name: Grok bootstrap native packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+
+concurrency:
+  group: grok-bootstrap-build-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.architecture }} package
+    environment: grok-bootstrap-build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Require the exact protected default-branch lineage
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          [[ "$GITHUB_REPOSITORY" == hoanganhduc/coding-system-rebuild ]]
+          [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+
+      - name: Require default-branch protection
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="$RUNNER_TEMP/default-branch.json"
+          gh api "repos/$GITHUB_REPOSITORY/branches/$DEFAULT_BRANCH" > "$branch"
+          python3 -I -B - "$branch" "$DEFAULT_BRANCH" "$GITHUB_SHA" <<'PY'
+          import json
+          import sys
+
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          if (
+              value.get("name") != sys.argv[2]
+              or value.get("protected") is not True
+              or value.get("commit", {}).get("sha") != sys.argv[3]
+          ):
+              raise SystemExit("build is not the current protected default-branch head")
+          PY
+
+      - name: Install closed native build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential binutils dpkg-dev libssl-dev make pkg-config python3
+
+      - name: Derive reproducible package identity
+        id: identity
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          source_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          [[ "$source_epoch" =~ ^[0-9]+$ ]]
+          source_day="$(date -u -d "@$source_epoch" +%Y%m%d)"
+          version="1.1.0+git${source_day}.${GITHUB_SHA:0:8}"
+          printf 'source_epoch=%s\n' "$source_epoch" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build production-key native verifier and closed package
+        env:
+          PACKAGE_VERSION: ${{ steps.identity.outputs.version }}
+          SOURCE_EPOCH: ${{ steps.identity.outputs.source_epoch }}
+          TARGET_ARCH: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          lock=system/grok-proxy/bootstrap/release.lock.json
+          mapfile -t anchor < <(python3 -I -B - "$lock" <<'PY'
+          import json
+          import re
+          import sys
+
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          anchor = value.get("trust_anchor", {})
+          key_id = anchor.get("key_id", "")
+          public_key = anchor.get("public_key_hex", "")
+          if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", key_id) is None:
+              raise SystemExit("invalid production key id")
+          if re.fullmatch(r"[0-9a-f]{64}", public_key) is None:
+              raise SystemExit("invalid production public key")
+          print(key_id)
+          print(public_key)
+          PY
+          )
+          [[ ${#anchor[@]} -eq 2 ]]
+          build=system/grok-proxy/bootstrap/build
+          test ! -e "$build"
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            /usr/bin/make -C system/grok-proxy/bootstrap all \
+              "KEY_ID=${anchor[0]}" "PUBLIC_KEY_HEX=${anchor[1]}"
+          output="$RUNNER_TEMP/grok-bootstrap-output"
+          raw_output="$RUNNER_TEMP/grok-bootstrap-raw"
+          install -d -m 0700 "$output"
+          install -d -m 0700 "$raw_output"
+          package="$output/grok-bootstrap_${PACKAGE_VERSION}_${TARGET_ARCH}.deb"
+          raw_package="$raw_output/grok-bootstrap_${PACKAGE_VERSION}_${TARGET_ARCH}.deb"
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            /usr/bin/python3 -I -B \
+              system/grok-proxy/bootstrap/build_debian_package.py \
+              --build-root "$GITHUB_WORKSPACE/$build" \
+              --output "$raw_package" \
+              --version "$PACKAGE_VERSION" \
+              --source-commit "$GITHUB_SHA" \
+              --architecture "$TARGET_ARCH" \
+              --source-date-epoch "$SOURCE_EPOCH"
+          stage="$RUNNER_TEMP/grok-bootstrap-script-free-$TARGET_ARCH"
+          test ! -e "$stage"
+          /usr/bin/dpkg-deb --raw-extract "$raw_package" "$stage"
+          /usr/bin/python3 -I -B - "$stage" <<'PY'
+          from pathlib import Path
+          import sys
+
+          control = Path(sys.argv[1]) / "DEBIAN"
+          if {path.name for path in control.iterdir()} != {"control", "postinst"}:
+              raise SystemExit("builder control inventory drifted before script removal")
+          postinst = control / "postinst"
+          if not postinst.is_file() or postinst.is_symlink():
+              raise SystemExit("builder postinst is unsafe")
+          postinst.unlink()
+          if {path.name for path in control.iterdir()} != {"control"}:
+              raise SystemExit("script-free control inventory is not closed")
+          PY
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            SOURCE_DATE_EPOCH="$SOURCE_EPOCH" \
+            /usr/bin/dpkg-deb --build --root-owner-group \
+              --uniform-compression --threads-max=1 -Zgzip -z9 -Snone \
+              "$stage" "$package"
+          /usr/bin/python3 -I -B - \
+            "$package" "$PACKAGE_VERSION" "$TARGET_ARCH" "$GITHUB_SHA" \
+            "${anchor[0]}" "${anchor[1]}" <<'PY'
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "bin")
+          from lib.grok_bootstrap_release import validate_debian_package
+
+          validate_debian_package(
+              Path(sys.argv[1]),
+              version=sys.argv[2],
+              architecture=sys.argv[3],
+              source_commit=sys.argv[4],
+              key_id=sys.argv[5],
+              public_key_hex=sys.argv[6],
+          )
+          PY
+          /usr/bin/dpkg-deb --field "$package" \
+            Package Version Architecture X-Grok-Source-Commit
+          sha256sum "$package"
+          printf '%s\n' "$package" > "$RUNNER_TEMP/package-path"
+
+      - name: Attest exact architecture package
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        with:
+          subject-path: ${{ runner.temp }}/grok-bootstrap-output/*.deb
+
+      - name: Upload exact architecture package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: grok-bootstrap-${{ matrix.architecture }}-${{ github.sha }}
+          path: ${{ runner.temp }}/grok-bootstrap-output/*.deb
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
