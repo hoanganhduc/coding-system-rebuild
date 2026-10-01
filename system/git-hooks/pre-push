@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""Private pre-push gate for public repositories (restore plan, step 2.2).
+
+Git runs this hook with the remote name and URL as arguments and one line per
+pushed ref on stdin: "<local ref> <local sha> <remote ref> <remote sha>".
+For every commit that is new to the remote it checks:
+  - author and committer emails: only GitHub noreply addresses (and the GitHub
+    and Anthropic noreply senders) may be published;
+  - the message: no private denylist entry, tailnet host name, personal email
+    address or Claude-Session trailer;
+  - every added line, and every added binary blob: no private denylist entry,
+    tailnet host name, personal email address, private key block or token.
+Lines containing LEAKSCAN-EXEMPT are skipped.  Only commits that the remote
+does not have are checked, so content that is already public never blocks.
+When the pushed tree is coding-system-rebuild it also checks the signing-key
+pin in restore-ubuntu.sh against the owner's public key and runs the
+repository's own bin/leak-scan.sh on the pushed tree.
+
+The hook prints the category and file:line only, never the matched value.
+`git push --no-verify` bypasses it, so `make push` runs the same checks.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+ZERO = "0" * 40
+EXEMPT = b"LEAKSCAN-EXEMPT"
+ALLOWED_EMAILS = {"noreply@github.com", "noreply@anthropic.com"}
+MAX_BLOB = 20 * 1024 * 1024
+DENYLIST = Path(os.environ.get("PREPUSH_DENYLIST")
+                or Path.home() / ".config/coding-system/leak-denylist.txt")
+OWNER_PUBKEY = Path(os.environ.get("PREPUSH_SIGNING_PUBKEY")
+                    or Path.home() / ".config/coding-system/recovery-signing.pub")
+TAILNET = re.compile(rb"\b[a-z0-9-]+\.[a-z0-9-]+\.ts\.net\b", re.IGNORECASE)
+PERSONAL_EMAIL = re.compile(rb"[A-Za-z0-9._%+-]+@(?:gmail|googlemail)\.com\b", re.IGNORECASE)
+CLAUDE_SESSION = re.compile(rb"^Claude-Session:", re.MULTILINE)
+PIN = re.compile(rb'SIGNING_KEY_SHA256="?([0-9a-f]{64})"?')
+PATTERNS = [
+    ("openai/deepseek-style key", re.compile(rb"\bsk-[A-Za-z0-9_-]{16,}")),
+    ("groq key", re.compile(rb"\bgsk_[A-Za-z0-9_-]{16,}")),
+    ("perplexity key", re.compile(rb"\bpplx-[A-Za-z0-9_-]{16,}")),
+    ("opaque key (hex.suffix)", re.compile(rb"\b[0-9a-f]{16,}\.[0-9A-Za-z]{8,}\b")),
+    ("github token", re.compile(rb"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
+    ("aws access key", re.compile(rb"\bAKIA[0-9A-Z]{16}\b")),
+    ("slack token", re.compile(rb"\bxox[bpas]-[A-Za-z0-9-]{10,}")),
+    ("jwt", re.compile(rb"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+    ("private key block", re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("telegram bot token", re.compile(rb"\b[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}")),
+    ("google api key", re.compile(rb"\bAIza[0-9A-Za-z_-]{35}")),
+    ("gcp oauth client", re.compile(rb"[0-9]+-[0-9a-z]{32}\.apps\.googleusercontent\.com")),
+    ("tailscale auth key", re.compile(rb"\btskey-(?:auth|client|api)-[A-Za-z0-9]{6,}-[A-Za-z0-9]{10,}")),
+    ("tailscale stable node id", re.compile(rb"\bn[A-Za-z0-9]{8,}CNTRL\b")),
+]
+
+
+class Blocked(Exception):
+    """Raised when the hook cannot run its checks; the push is refused."""
+
+
+def git(*args: str, check: bool = True) -> bytes:
+    result = subprocess.run(["git", *args], capture_output=True)
+    if check and result.returncode != 0:
+        raise Blocked(f"git {args[0]} failed")
+    return result.stdout
+
+
+def load_denylist() -> list[bytes]:
+    if not DENYLIST.is_file():
+        raise Blocked("private denylist missing; restore it before pushing")
+    entries = [line.strip().encode() for line in DENYLIST.read_text().splitlines()
+               if line.strip() and not line.lstrip().startswith("#")]
+    if not entries:
+        raise Blocked("private denylist is empty")
+    return entries
+
+
+def line_findings(data: bytes, denylist: list[bytes]) -> list[str]:
+    if EXEMPT in data:
+        return []
+    found = [label for label, pattern in PATTERNS if pattern.search(data)]
+    if any(entry in data for entry in denylist):
+        found.append("private denylist entry")
+    if TAILNET.search(data):
+        found.append("tailnet host name")
+    if PERSONAL_EMAIL.search(data):
+        found.append("personal email address")
+    return found
+
+
+def email_allowed(address: str) -> bool:
+    address = address.strip().lower()
+    extra = {a.strip().lower() for a in os.environ.get("PREPUSH_ALLOW_EMAILS", "").split(",") if a.strip()}
+    return address.endswith("@users.noreply.github.com") or address in ALLOWED_EMAILS | extra
+
+
+def known_remote_commits(remote: str, url: str, stdin_remote_shas: list[str]) -> list[str]:
+    shas = set(s for s in stdin_remote_shas if s != ZERO)
+    # Only branches and tags count as published; GitHub pull refs keep rewritten-away history.
+    listing = subprocess.run(["git", "ls-remote", "--heads", "--tags", url or remote], capture_output=True)
+    if listing.returncode == 0:
+        shas.update(line.split()[0].decode() for line in listing.stdout.splitlines() if line.strip())
+    else:
+        shas.update(git("for-each-ref", "--format=%(objectname)", f"refs/remotes/{remote}").decode().split())
+    return [s for s in shas
+            if subprocess.run(["git", "cat-file", "-e", s + "^{commit}"], capture_output=True).returncode == 0]
+
+
+def empty_tree() -> str:
+    return subprocess.run(["git", "hash-object", "-t", "tree", "--stdin"], input=b"",
+                          capture_output=True, check=True).stdout.decode().strip()
+
+
+def diff_findings(commit: str, denylist: list[bytes]) -> list[str]:
+    parents = git("rev-list", "--parents", "-n", "1", commit).decode().split()[1:]
+    base = parents[0] if parents else empty_tree()
+    findings, path, line_no = [], "?", 0
+    for raw in git("diff", "--no-color", "--no-ext-diff", "--no-renames", "-U0", base, commit).splitlines():
+        if raw.startswith(b"+++ "):
+            path = raw[4:].decode(errors="replace").strip('"')
+            path = path[2:] if path.startswith("b/") else path
+        elif raw.startswith(b"@@"):
+            match = re.search(rb"\+(\d+)", raw)
+            line_no = int(match.group(1)) if match else 0
+        elif raw.startswith(b"+"):
+            for label in line_findings(raw[1:], denylist):
+                findings.append(f"{path}:{line_no}: {label}")
+            line_no += 1
+    for entry in git("diff", "--numstat", "-z", "--no-renames", base, commit).split(b"\0"):
+        fields = entry.split(b"\t")
+        if len(fields) == 3 and fields[0] == b"-" and fields[1] == b"-":
+            blob_path = fields[2].decode(errors="replace")
+            size = git("cat-file", "-s", f"{commit}:{blob_path}", check=False).strip()
+            if size and int(size) <= MAX_BLOB:
+                blob = git("cat-file", "blob", f"{commit}:{blob_path}")
+                checks = {
+                    "private denylist entry": any(e in blob for e in denylist),
+                    "tailnet host name": bool(TAILNET.search(blob)),
+                    "private key block": bool(dict(PATTERNS)["private key block"].search(blob)),
+                }
+                findings += [f"{blob_path}: {label} (binary)" for label, hit in checks.items() if hit]
+    return findings
+
+
+def commit_findings(commit: str, denylist: list[bytes]) -> list[str]:
+    fields = git("show", "-s", "--format=%ae%x00%ce%x00%B", commit).split(b"\0", 2)
+    findings = []
+    if not email_allowed(fields[0].decode(errors="replace")):
+        findings.append("author email is not a GitHub noreply address")
+    if not email_allowed(fields[1].decode(errors="replace")):
+        findings.append("committer email is not a GitHub noreply address")
+    message = fields[2] if len(fields) > 2 else b""
+    if CLAUDE_SESSION.search(message):
+        findings.append("message: Claude-Session trailer")
+    for line in message.splitlines():
+        for label in line_findings(line, denylist):
+            if label in ("private denylist entry", "tailnet host name", "personal email address"):
+                findings.append(f"message: {label}")
+    return findings + diff_findings(commit, denylist)
+
+
+def blob_at(tip: str, path: str) -> bytes | None:
+    result = subprocess.run(["git", "cat-file", "blob", f"{tip}:{path}"], capture_output=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def signing_findings(tip: str, remote_sha: str) -> list[str]:
+    script = blob_at(tip, "restore-ubuntu.sh")
+    pubkey = blob_at(tip, "system/recovery/recovery-signing-public-key.pub")
+    if script is None or pubkey is None or os.environ.get("CSR_ALLOW_SIGNING_KEY_CHANGE") == "1":
+        return []
+    match = PIN.search(script)
+    findings = []
+    if not match or match.group(1).decode() != hashlib.sha256(pubkey).hexdigest():
+        findings.append("restore-ubuntu.sh: SIGNING_KEY_SHA256 pin does not match the tracked public key")
+    if not OWNER_PUBKEY.is_file():
+        findings.append("owner signing public key missing; cannot verify the signing public key")
+    elif pubkey.split()[1:2] != OWNER_PUBKEY.read_bytes().split()[1:2]:
+        findings.append("system/recovery/recovery-signing-public-key.pub: signing public key differs from the owner's key")
+    old = blob_at(remote_sha, "restore-ubuntu.sh") if remote_sha != ZERO else None
+    old_pin = PIN.search(old) if old else None
+    if old_pin and match and old_pin.group(1) != match.group(1):
+        findings.append("restore-ubuntu.sh: SIGNING_KEY_SHA256 changed (set CSR_ALLOW_SIGNING_KEY_CHANGE=1 only with owner approval)")
+    return findings
+
+
+def leak_scan_findings(tip: str, denylist_path: Path) -> list[str]:
+    if blob_at(tip, "bin/leak-scan.sh") is None:
+        return []
+    with tempfile.TemporaryDirectory(prefix="prepush-tree-") as tree:
+        archive = subprocess.run(["git", "archive", tip], capture_output=True, check=True).stdout
+        subprocess.run(["tar", "-x", "-C", tree], input=archive, check=True)
+        env = dict(os.environ, CSR_DENYLIST=str(denylist_path), CSR_REQUIRE_DENYLIST="1")
+        result = subprocess.run(["bash", f"{tree}/bin/leak-scan.sh", tree], capture_output=True, env=env)
+    if result.returncode == 0:
+        return []
+    labels = sorted({line.decode(errors="replace").strip() for line in result.stdout.splitlines()
+                     if line.startswith(b"FINDING [")})
+    return ["bin/leak-scan.sh reported findings on the pushed tree"
+            + (": " + ", ".join(labels) if labels else "")
+            + " (run it locally for details)"]
+
+
+def main() -> int:
+    remote = sys.argv[1] if len(sys.argv) > 1 else "origin"
+    url = sys.argv[2] if len(sys.argv) > 2 else ""
+    updates = [line.split() for line in sys.stdin.read().splitlines() if line.strip()]
+    try:
+        denylist = load_denylist()
+        pushed = [(u[1], u[3]) for u in updates if len(u) == 4 and u[1] != ZERO]
+        if not pushed:
+            return 0
+        known = known_remote_commits(remote, url, [u[3] for u in updates if len(u) == 4])
+        report: list[str] = []
+        seen: set[str] = set()
+        for local_sha, remote_sha in pushed:
+            new = git("rev-list", local_sha, "--not", *known).decode().split() if known \
+                else git("rev-list", local_sha).decode().split()
+            for commit in new:
+                if commit in seen:
+                    continue
+                seen.add(commit)
+                report += [f"{commit[:12]} {item}" for item in commit_findings(commit, denylist)]
+            tip = git("rev-parse", local_sha + "^{commit}").decode().strip()
+            report += [f"{tip[:12]} {item}" for item in signing_findings(tip, remote_sha)]
+            report += [f"{tip[:12]} {item}" for item in leak_scan_findings(tip, DENYLIST)]
+    except Blocked as error:
+        print(f"pre-push: BLOCKED — {error}", file=sys.stderr)
+        return 1
+    if report:
+        print(f"pre-push: BLOCKED — {len(report)} finding(s); values are not shown:", file=sys.stderr)
+        for item in report:
+            print(f"  {item}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
