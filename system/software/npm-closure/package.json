@@ -1,0 +1,92 @@
+{
+  "name": "coding-system-npm-cli-closure",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Immutable direct and transitive npm CLI closure for coding-system-rebuild",
+  "packageManager": "npm@10.9.8",
+  "engines": {
+    "node": "22.23.2",
+    "npm": "10.9.8"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.286",
+    "@github/copilot": "1.0.68",
+    "@google/gemini-cli": "0.49.0",
+    "@openai/codex": "0.159.2",
+    "clawhub": "0.7.0",
+    "codewhale": "0.10.0",
+    "openclaw": "2026.7.1-2",
+    "opencode-ai": "1.18.33",
+    "pnpm": "10.32.1"
+  },
+  "csrCliBins": {
+    "claude": {
+      "package": "@anthropic-ai/claude-code",
+      "path": "bin/claude.exe",
+      "platformExecutables": {
+        "linux/amd64": {
+          "package": "@anthropic-ai/claude-code-linux-x64",
+          "path": "claude"
+        },
+        "linux/arm64": {
+          "package": "@anthropic-ai/claude-code-linux-arm64",
+          "path": "claude"
+        }
+      }
+    },
+    "clawdhub": {
+      "package": "clawhub",
+      "path": "bin/clawdhub.js"
+    },
+    "clawhub": {
+      "package": "clawhub",
+      "path": "bin/clawdhub.js"
+    },
+    "codew": {
+      "package": "codewhale",
+      "path": "bin/codew.js"
+    },
+    "codewhale": {
+      "package": "codewhale",
+      "path": "bin/codewhale.js"
+    },
+    "codex": {
+      "package": "@openai/codex",
+      "path": "bin/codex.js"
+    },
+    "copilot": {
+      "package": "@github/copilot",
+      "path": "npm-loader.js"
+    },
+    "gemini": {
+      "package": "@google/gemini-cli",
+      "path": "bundle/gemini.js"
+    },
+    "openclaw": {
+      "package": "openclaw",
+      "path": "openclaw.mjs"
+    },
+    "opencode": {
+      "package": "opencode-ai",
+      "path": "bin/opencode.exe",
+      "platformExecutables": {
+        "linux/amd64": {
+          "package": "opencode-linux-x64-baseline",
+          "path": "bin/opencode"
+        },
+        "linux/arm64": {
+          "package": "opencode-linux-arm64",
+          "path": "bin/opencode"
+        }
+      }
+    },
+    "pnpm": {
+      "package": "pnpm",
+      "path": "bin/pnpm.cjs"
+    },
+    "pnpx": {
+      "package": "pnpm",
+      "path": "bin/pnpx.cjs"
+    }
+  }
+}

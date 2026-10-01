@@ -1,0 +1,23 @@
+{
+  "$schema": "release-lock.schema.json",
+  "schema_version": "grok-bootstrap-release-lock.v1",
+  "state": "pending-publication",
+  "release_authorization_anchor": {
+    "identity": "coding-system-rebuild",
+    "namespace": "grok-bootstrap-release-authorization",
+    "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMhRCwEen79Czp0YyfreBiMsG1WUk4G0NbuefxH6BQaH"
+  },
+  "trust_anchor": {
+    "key_id": "grok-dispatch-prod-2026-07-v1",
+    "public_key_hex": "b8b25772f3f7a192d7ee7cd20b3f6c00f93d2e580ee518feb6a91c7e21aa2b81"
+  },
+  "pending_intent": {
+    "authorization_schema": "grok-bootstrap-release-authorization-v1",
+    "minimum_package_version": "1.1.0",
+    "operation": "initial-qualification",
+    "required_architectures": ["amd64", "arm64"],
+    "signed_application_id": "bc6c611f32a1420558cf3ff4e01a813f13dfcb526800dd8d3cf211be8275a08e",
+    "workflow_ref": "refs/heads/main"
+  },
+  "pending_reason": "A protected-default-branch native build, exact artifact attestations, the retained production-signed dispatcher bc6c611f32a1420558cf3ff4e01a813f13dfcb526800dd8d3cf211be8275a08e, and an offline administrative signature over the exact five core assets must all pass remote readback before initial qualification."
+}

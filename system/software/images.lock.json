@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "supported_platforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "resolved_at": "2026-08-04T02:31:00Z",
+  "resolution_method": "docker buildx imagetools inspect against the named registry; no image layers were pulled",
+  "images": [
+    {
+      "id": "openclaw-sandbox",
+      "roles": ["openclaw-sandbox"],
+      "repository": "ghcr.io/hoanganhduc/coding-system-rebuild-openclaw-sandbox",
+      "reference": "ghcr.io/hoanganhduc/coding-system-rebuild-openclaw-sandbox@sha256:f868c49205a1bad3edfbb6a92e1b184f0ab9f7bfe66d11a939d611f081a1f030",
+      "index_digest": "sha256:f868c49205a1bad3edfbb6a92e1b184f0ab9f7bfe66d11a939d611f081a1f030",
+      "platforms": {
+        "linux/amd64": "sha256:e4c4d8e87f2b11be1cf7811acc5943e6841da5dec66396f3bb801fe2feb1a1d8",
+        "linux/arm64": "sha256:4a91f89348046a589018fc66c1b5905956d9e13130981fc82bf94026ec277b2a"
+      },
+      "evidence": "system/openclaw/compatibility.lock.json"
+    },
+    {
+      "id": "sagemath-amd64",
+      "roles": ["sagemath"],
+      "repository": "sagemath/sagemath",
+      "reference": "sagemath/sagemath@sha256:e2e4747b0e1ea8753a9cb5a399314a8b2c25fcefaf69ba85b22ee075829d09ea",
+      "index_digest": "sha256:e2e4747b0e1ea8753a9cb5a399314a8b2c25fcefaf69ba85b22ee075829d09ea",
+      "platforms": {
+        "linux/amd64": "sha256:fb96c7fb10d672f3be0d088399db3aeac52650416d1bb71f74f26429ea35778f"
+      },
+      "evidence": "registry manifest resolved from the SageMath 10.8 release image"
+    },
+    {
+      "id": "sagemath-arm64",
+      "roles": ["sagemath"],
+      "repository": "ghcr.io/hoanganhduc/sagemath",
+      "reference": "ghcr.io/hoanganhduc/sagemath@sha256:6f443fe57534e419c2420d413588e98143429ae9d6cefce7bf026d8d5ff1d793",
+      "index_digest": "sha256:6f443fe57534e419c2420d413588e98143429ae9d6cefce7bf026d8d5ff1d793",
+      "platforms": {
+        "linux/arm64": "sha256:c3848b724246a4ff15bec1c8def774f4e22c8d971b25ddf8cbbdf8851e8f7167"
+      },
+      "evidence": "registry manifest resolved from the owner-built SageMath 10.8 image"
+    },
+    {
+      "id": "zotero-translation-server-arm64",
+      "roles": ["zotero-translation-server"],
+      "repository": "zotero/translation-server",
+      "reference": "zotero/translation-server@sha256:a80abfaaab0d84c8cc4b0ef79e4fde94b391420ee3a1e69d680fc89a18bff115",
+      "index_digest": "sha256:a80abfaaab0d84c8cc4b0ef79e4fde94b391420ee3a1e69d680fc89a18bff115",
+      "platforms": {
+        "linux/arm64": "sha256:a80abfaaab0d84c8cc4b0ef79e4fde94b391420ee3a1e69d680fc89a18bff115"
+      },
+      "evidence": "single-platform manifest resolved from the official Zotero registry image"
+    },
+    {
+      "id": "zotero-translation-server-amd64",
+      "roles": ["zotero-translation-server"],
+      "repository": "ghcr.io/hoanganhduc/translation-server",
+      "reference": "ghcr.io/hoanganhduc/translation-server@sha256:6bb209778e0403d81285404fc9ca5bd142f91e090d14a5541ac33018531c1329",
+      "index_digest": "sha256:6bb209778e0403d81285404fc9ca5bd142f91e090d14a5541ac33018531c1329",
+      "platforms": {
+        "linux/amd64": "sha256:6f565f25ad29f509a1184777426edb21a6291a4030243581a23dbeb55f1d28a4"
+      },
+      "evidence": "registry manifest resolved from the owner-built Translation Server image"
+    }
+  ]
+}

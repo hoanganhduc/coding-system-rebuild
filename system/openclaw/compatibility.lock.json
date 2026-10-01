@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "supported_hosts": [
+    "ubuntu-24.04/linux-amd64",
+    "ubuntu-24.04/linux-arm64"
+  ],
+  "openclaw": {
+    "version": "2026.7.1-2",
+    "npm_integrity": "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==",
+    "config_contract": "openclaw-2026.7.1",
+    "config_schema_sha256": "aee8189ff1156a1a9b7b9c884c5960c2d033276a0ef2e938c6109204d3e35cef"
+  },
+  "component": {
+    "name": "openclaw-bot",
+    "commit": "c7c1a736898e3d4d85eee3fae53246d413b3facb",
+    "config_template_sha256": "2eebadcbad1a1db0b69375516ff8e26165ff292337b5377496c374c124ca7355",
+    "unit_template_sha256": {
+      "openclaw-email-worker.service": "c21ba41e591d5130a01236b56739600f35b19cbaf60c8793e8d1ba073ddb6ac7",
+      "openclaw-googlechat-delivery-worker.service": "0c17887fe922c9fb32c05b4fbc310c61b0910a485280bd0918e991c526340d76",
+      "openclaw-manim-worker.service": "c4d47c840e83397839e2af269f106ca79a8b40e5300a6841582c4d574cf1dc9f",
+      "openclaw-sage-worker.service": "a7d8f514848322842185e0e35806c1cf534d4d99dae463e1f060d34e697a29eb",
+      "openclaw-whatsapp-delivery-worker.service": "8bad4cab45d996da72f13ee05893de369594e04946cb39fdcb3d39502afc7854",
+      "openclaw-zalo-delivery-worker.service": "13a0e8d425e668d30436093afe6ebd7fcff712182fa852a4e0bf1c3eb825b84f",
+      "openclaw-zulip-delivery-worker.service": "b803de7ffc1c9c1a0c627cd99c7a5d3c4a899b9dc2e1d4478e5f3f7cde4b52d7",
+      "send-queue-worker.service": "0289243cbaa592e870c7e4718009f38ae7414be9cab8cc8a876e8ff3a5c07a76"
+    }
+  },
+  "skill_closure_sha256": "33b8cddbe70a252936e2f6f6fdb17259e99f5083944f6914a4fb00422e1af5e1",
+  "sandbox": {
+    "contract": 1,
+    "image": "ghcr.io/hoanganhduc/coding-system-rebuild-openclaw-sandbox@sha256:f868c49205a1bad3edfbb6a92e1b184f0ab9f7bfe66d11a939d611f081a1f030",
+    "index_digest": "sha256:f868c49205a1bad3edfbb6a92e1b184f0ab9f7bfe66d11a939d611f081a1f030",
+    "platform_digests": {
+      "linux/amd64": "sha256:e4c4d8e87f2b11be1cf7811acc5943e6841da5dec66396f3bb801fe2feb1a1d8",
+      "linux/arm64": "sha256:4a91f89348046a589018fc66c1b5905956d9e13130981fc82bf94026ec277b2a"
+    }
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "$schema": "python-closure.schema.json",
+  "schema": "coding-system.python-closure/v2",
+  "platform": "ubuntu-24.04-arm64",
+  "python": {
+    "implementation": "cpython",
+    "version": "3.12"
+  },
+  "qualification": {
+    "state": "pending-artifacts",
+    "blockers": [
+      "No reviewed complete arm64 canonical wheelhouse inventory/digest has been promoted for all eight environments.",
+      "Clean-host installation, idempotence, and import probes have not been run from these locks."
+    ]
+  },
+  "wheelhouseManifestSha256": null,
+  "environments": {
+    "workspace": {
+      "installPath": ".openclaw/workspace/.python-closure/workspace",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {
+        "state": "pending-artifacts",
+        "blockers": ["The captured workspace freeze is top-level evidence, not a qualified canonical wheel manifest."]
+      },
+      "artifacts": []
+    },
+    "shared": {
+      "installPath": ".local/share/coding-system/python-closure/shared",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {
+        "state": "pending-artifacts",
+        "blockers": ["The reviewed arm64 shared-environment manifest and OCI digest are not yet promoted."]
+      },
+      "artifacts": []
+    },
+    "docling-cpu": {
+      "installPath": ".local/share/coding-system/python-closure/docling-cpu",
+      "profile": "cpu-only",
+      "manifestSha256": null,
+      "qualification": {
+        "state": "pending-artifacts",
+        "blockers": ["The prior freeze includes CUDA packages; a reviewed CPU-only arm64 canonical manifest is required."]
+      },
+      "artifacts": []
+    },
+    "lean-explore": {
+      "installPath": ".local/share/coding-system/python-closure/lean-explore",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {
+        "state": "pending-artifacts",
+        "blockers": ["The reviewed arm64 LeanExplore manifest and OCI digest are not yet promoted."]
+      },
+      "artifacts": []
+    },
+    "getscipapers": {
+      "installPath": ".local/share/coding-system/python-closure/getscipapers",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {
+        "state": "pending-artifacts",
+        "blockers": ["Git sources and sdist-only dependencies must be represented by reviewed arm64 wheels in the canonical manifest."]
+      },
+      "artifacts": []
+    },
+    "aider": {
+      "installPath": ".local/share/coding-system/python-closure/aider",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {
+        "state": "pending-artifacts",
+        "blockers": ["Only the direct Aider version was captured; its reviewed arm64 canonical manifest is missing."]
+      },
+      "artifacts": []
+    },
+    "modal": {
+      "installPath": ".local/share/coding-system/python-closure/modal",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {
+        "state": "pending-artifacts",
+        "blockers": ["Only top-level Modal state was captured; its reviewed arm64 canonical manifest is missing."]
+      },
+      "artifacts": []
+    },
+    "course-management": {
+      "installPath": ".course_venv",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {
+        "state": "pending-artifacts",
+        "blockers": ["The exact course-hoanganhduc 0.4.0 wheel and complete dependency inventory built from component commit 5e402db40db6c4a50d9c9292a5b352e62447ab04 have not been promoted for arm64."]
+      },
+      "artifacts": []
+    }
+  }
+}

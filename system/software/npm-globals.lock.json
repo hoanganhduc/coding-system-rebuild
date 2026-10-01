@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "source": "https://registry.npmjs.org/",
+  "resolved_at": "2026-10-01T00:00:00Z",
+  "packages": [
+    {
+      "name": "@anthropic-ai/claude-code",
+      "version": "2.1.286",
+      "integrity": "sha512-5UNEDKy2znv81PWqNqgPJO4qPqH5NRenh52XTtx2tT5Q6xIxjI1q0RyucY+AUHMABImzDOlh6ztuj4qNiAaRvA=="
+    },
+    {
+      "name": "@github/copilot",
+      "version": "1.0.68",
+      "integrity": "sha512-2VPcTlW0RAEsfeS0Ma2ICCkfXgpxy3NL7+SReR8gzvEEPiokSRf0k5JBPlgMbBEFvocSRcJ01S8KvBm84Dw+Fw=="
+    },
+    {
+      "name": "@google/gemini-cli",
+      "version": "0.49.0",
+      "integrity": "sha512-S0b6nfAf+lHbSPMKRuQziU1/710a7f/Jag2mZ7N1J1b48qxoCmjwNCJJ7XPEv/ropvDqkCjJupE32qcw+ym3jQ=="
+    },
+    {
+      "name": "@openai/codex",
+      "version": "0.159.2",
+      "integrity": "sha512-SE13C3nZCYoVL569BdegoOl6vwjb7o2sXOo7ivwVzaVoY0cswwi0/6pIE0TyO/C0vIkQh3jslExitET7PBTfIg=="
+    },
+    {
+      "name": "clawhub",
+      "version": "0.7.0",
+      "integrity": "sha512-volW6SbX8PawlnRxxCoUTKv5Pi+N3MrBi3hlO5/m9bVaO43UFciEeYti9+01c2U5n/SKhUkw7ASvnleyNmcoSA=="
+    },
+    {
+      "name": "codewhale",
+      "version": "0.10.0",
+      "integrity": "sha512-19zVJ73YeD3IskBD82XtgmwxMH6Ju/QHrLbj1u66FeQffNG8UrWDgOZVN6AIAoWzaoSyi/oso6GpEfAOVPRfnw=="
+    },
+    {
+      "name": "openclaw",
+      "version": "2026.7.1-2",
+      "integrity": "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g=="
+    },
+    {
+      "name": "opencode-ai",
+      "version": "1.18.33",
+      "integrity": "sha512-58P1ffLRXiAY4QeoABqUjqf6DEzm1ihpovvn9Ad+oOLbLiwK/rf88wruT9IATJ7AtNjmi8iA7pC8tN4o5y799Q=="
+    },
+    {
+      "name": "pnpm",
+      "version": "10.32.1",
+      "integrity": "sha512-pwaTjw6JrBRWtlY+q07fHR+vM2jRGR/FxZeQ6W3JGORFarLmfWE94QQ9LoyB+HMD5rQNT/7KnfFe8a1Wc0jyvg=="
+    }
+  ]
+}
