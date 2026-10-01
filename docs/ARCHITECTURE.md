@@ -102,8 +102,11 @@ with `--skip-docker --skip-services` so there is exactly one writer per surface.
 `system/symlinks.tsv` is the canonical list (verification + recreation):
 `.claude/.local → .openclaw/workspace/.local` (shared python env),
 `.claude/data/{research,runs,job-queue} → workspace data`,
-plugin-skills → npm-global openclaw dist, `agents/sandbox → agents/main`,
-`zot → workspace zotero/zot.py`, research-skills-venv → `~/.venvs`.
+plugin-skills → npm-global openclaw dist, `zot → workspace zotero/zot.py`,
+research-skills-venv → `~/.venvs`. The old `agents/sandbox → agents/main`
+alias is not recreated: no agent is named `sandbox`, and the pinned
+openclaw-bot refuses links in `~/.openclaw/agents` (its auth migration
+removes a relative alias of that kind).
 `/usr/local/bin` links (sudo) live in `system/bin/usr-local-bin.tsv`.
 
 ## Python environments (rebuilt, never archived)

@@ -9,7 +9,6 @@
 {{ HOME }}/.local/bin/zot	{{ HOME }}/.openclaw/workspace/skills/zotero/zot.py
 {{ HOME }}/.openclaw/plugin-skills/prose	{{ HOME }}/.npm-global/lib/node_modules/openclaw/dist/extensions/open-prose/skills/prose
 {{ HOME }}/.openclaw/plugin-skills/browser-automation	{{ HOME }}/.npm-global/lib/node_modules/openclaw/dist/extensions/browser/skills/browser-automation
-{{ HOME }}/.openclaw/agents/sandbox	{{ HOME }}/.openclaw/agents/main
 {{ HOME }}/.openclaw/workspace/.research-skills-venv	{{ HOME }}/.venvs
 {{ HOME }}/.codex/runtime/workspace/.research-skills-venv	{{ HOME }}/.venvs
 # verification-only (recreated by Python closure phase 9):
