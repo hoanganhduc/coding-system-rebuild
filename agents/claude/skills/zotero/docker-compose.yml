@@ -1,0 +1,8 @@
+services:
+  translation-server:
+    image: ${ZOTERO_TS_IMAGE:?ZOTERO_TS_IMAGE must be set}
+    container_name: zotero-translation-server
+    ports:
+      - "1969:1969"
+    restart: unless-stopped
+    mem_limit: 1g

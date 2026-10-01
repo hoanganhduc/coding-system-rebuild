@@ -1,0 +1,23 @@
+#!/usr/bin/bash -p
+# Execute only the descriptor-attested OpenClaw Node entrypoint.
+set -euo pipefail
+
+if [[ $- != *p* ]]; then
+  exec /usr/bin/bash -p "$0" "$@"
+fi
+
+unset BASH_ENV ENV CDPATH GLOBIGNORE NODE_OPTIONS NODE_PATH \
+  PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT PYTHONWARNINGS \
+  LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD
+export PATH=/usr/bin:/bin
+
+readonly RESTORE_HOME="{{ HOME }}"
+readonly LOADER="$RESTORE_HOME/.local/share/coding-system/openclaw-launchers/loader.py"
+
+[[ -f "$LOADER" && ! -L "$LOADER" ]] || {
+  printf '%s\n' 'openclaw launcher: executable selector is unavailable' >&2
+  exit 127
+}
+
+exec /usr/bin/python3 -I -B -X pycache_prefix=/dev/null "$LOADER" \
+  --home "$RESTORE_HOME" --exec -- "$@"
