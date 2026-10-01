@@ -1435,6 +1435,8 @@ class BootstrapTests(unittest.TestCase):
             "github.event_name == 'schedule'",
             header,
         )
+        # Until a qualified Grok release exists the drill restores without it.
+        self.assertIn("\n      SKIP_GROK: '1'", header)
         step_marker = (
             "      - name: Provision ephemeral signed Grok bootstrap trust fixture\n"
         )
@@ -1547,6 +1549,7 @@ class BootstrapTests(unittest.TestCase):
             '--setenv=SKIP_DOCKER_IMAGES="$SKIP_DOCKER_IMAGES"',
             '--setenv=AAS_PYTHON="$AAS_PYTHON"',
             '--setenv=PYTHONPATH="$PYTHONPATH"',
+            '--setenv=SKIP_GROK="$SKIP_GROK"',
             "/usr/bin/python3 -I -B",
             '"$GITHUB_WORKSPACE/system/grok-proxy/tests/'
             'ci_delegated_install.py"',
@@ -1555,7 +1558,7 @@ class BootstrapTests(unittest.TestCase):
             "--output install.log --limit 4194304",
         ):
             self.assertIn(required, install_step)
-        self.assertEqual(install_step.count("--setenv="), 4)
+        self.assertEqual(install_step.count("--setenv="), 5)
         self.assertIn('installer_rc="${pipeline_status[0]:-125}"', install_step)
         self.assertIn('capture_rc="${pipeline_status[1]:-125}"', install_step)
         self.assertIn("--output install.exit --limit 16", install_step)

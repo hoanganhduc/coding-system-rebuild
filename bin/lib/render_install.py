@@ -1352,11 +1352,17 @@ def main():
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
         )
         if migration.returncode != 0:
+            # The migration prints only fixed, redaction-safe reasons.
+            reasons = migration.stderr.strip().splitlines()
+            reason = reasons[-1][:300] if reasons else "no reason given"
             print(
-                "ERROR: shell settings or rollback files could not be sanitized",
+                "ERROR: shell settings or rollback files could not be sanitized"
+                f" ({reason})",
                 file=sys.stderr,
             )
             return 2

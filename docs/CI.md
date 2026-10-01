@@ -5,10 +5,10 @@ runners. Its core jobs are:
 
 | Job | Secrets used | When | Proves |
 |---|---|---|---|
-| `rehearsal-core` | none | every push/PR + weekly | doctor, leak-scan (tree + full history), canary + field-set guards, rotation unit tests, full roundtrip — on a clean machine |
+| `rehearsal-core` | none | every push/PR + manual | doctor, leak-scan (tree + full history), canary + field-set guards, rotation unit tests, full roundtrip — on a clean machine |
 | `platform-contracts` | none | every push/PR | native amd64 + arm64 platform, npm, Python-wheelhouse, OCI, shell, and focused contract validation |
 | `verify-keys` | individual repo secrets | push + manual (not fork PRs) | each configured key actually works (live API call) |
-| `install-degraded` | none | manual + weekly | the whole degraded `make install` machinery on a fresh VM: prepare, render, Python envs, unit render, verify |
+| `install-degraded` | none | manual only, amd64 + arm64 | the whole degraded `make install` machinery on a fresh VM: prepare, render, Python envs, unit render, verify |
 
 ## Native Python wheelhouse workflow
 
@@ -54,7 +54,14 @@ base64 blob, or legacy ZIP is accepted by a workflow.
 `install-degraded` runs the **entire `make install` in degraded mode (no recovery set)** on a
 fresh runner and asserts the key phases complete: software install (`prepare`), config
 render, Python env rebuild, systemd unit render, and `verify`. It proves the install
-*machinery* works end-to-end on a clean Ubuntu box.
+*machinery* works end-to-end on a clean Ubuntu box. Until a qualified Grok bootstrap
+release is published, the job sets `SKIP_GROK=1`, which a real restore also needs
+today: the fixture below still builds and checks the signed bootstrap, while phase 6
+installs no Grok release and must report that it skipped the Grok gates.
+The job first moves the runner image's own Node out of `/usr/local/bin`: a fresh
+Ubuntu has none, and it would shadow the locked Node in `~/.npm-global/bin`. If the
+installer fails, the job resumes it once after each failing phase, so the same run
+also reports later failures; those probe logs are diagnostics only.
 
 It does **not** verify the live OpenClaw gateway starting, channel round-trips, or full
 secret restore — those need the complete encrypted archive and production-like host and

@@ -25,6 +25,7 @@ FORWARDED_ENVIRONMENT = {
     "SKIP_DOCKER_IMAGES": "1",
     "AAS_PYTHON": "/bin/false",
     "PYTHONPATH": "/tmp/csr-hostile-aas-pythonpath",
+    "SKIP_GROK": "1",
 }
 READ_LIMIT = 16_384
 INSTALLER_SOURCE_LIMIT = 4 * 1024 * 1024

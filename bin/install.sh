@@ -783,7 +783,8 @@ if (( START <= 7 )); then
     for p in "$HOME/.openclaw/npm/projects"/*/; do
       [[ -f "$p/package.json" && -f "$p/package-lock.json" ]] \
         || { echo "FAIL: required npm project has no package.json/package-lock.json: $p"; exit 2; }
-      (cd "$p" && npm ci --ignore-scripts --omit=dev --silent)
+      # Errors only: a quiet success, but a failure says why.
+      (cd "$p" && npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=error)
     done
     while IFS= read -r plugin_spec; do
       [[ -n "$plugin_spec" ]] || continue

@@ -313,16 +313,43 @@ jobs:
           - runner: ubuntu-24.04-arm
             architecture: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # The install is capped at 45 minutes and the failure probe at 20.
+    timeout-minutes: 75
+    env:
+      # No qualified Grok bootstrap release is published yet (DECISIONS.md,
+      # 2026-10-01), so the drill restores everything else, as any restore must today.
+      SKIP_GROK: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with: { fetch-depth: 0, persist-credentials: false }
       - name: Reclaim disk
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          # Deleting the preinstalled SDKs takes about six minutes on amd64, so
+          # do it only when the runner is short of space.
+          free_kib="$(df --output=avail -k / | tail -n 1)"
+          if [ "$free_kib" -lt $((40 * 1024 * 1024)) ]; then
+            sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          fi
           df -h / | tail -1
       - name: Bootstrap deps
         run: sudo apt-get update -qq && sudo apt-get install -y -qq make 7zip python3-yaml build-essential dbus-user-session libssl-dev openssl pkg-config
+      - name: Hide the runner's own Node, as on a fresh Ubuntu
+        run: |
+          # The runner image puts Node in /usr/local/bin, ahead of the locked
+          # Node that the restore links into ~/.npm-global/bin.  A fresh
+          # Ubuntu has none, so move it out of the installer's PATH.
+          for name in node npm npx corepack; do
+            for directory in /usr/local/bin /usr/bin; do
+              if [ -e "$directory/$name" ] || [ -L "$directory/$name" ]; then
+                sudo mv -- "$directory/$name" "$directory/.$name.runner-image"
+                echo "moved aside $directory/$name"
+              fi
+            done
+          done
+          if PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin command -v node; then
+            echo "::error::a Node runtime is still on the installer's system PATH"
+            exit 1
+          fi
       - name: Prepare user bus for the Grok installer
         run: |
           uid="$(id -u)"
@@ -655,6 +682,7 @@ jobs:
             --setenv=SKIP_DOCKER_IMAGES="$SKIP_DOCKER_IMAGES" \
             --setenv=AAS_PYTHON="$AAS_PYTHON" \
             --setenv=PYTHONPATH="$PYTHONPATH" \
+            --setenv=SKIP_GROK="$SKIP_GROK" \
             /usr/bin/python3 -I -B \
               "$GITHUB_WORKSPACE/system/grok-proxy/tests/ci_delegated_install.py" \
             2>&1 | /usr/bin/python3 -I -B \
@@ -676,6 +704,52 @@ jobs:
             exit "$installer_rc"
           fi
           exit "$capture_rc"
+      - name: Probe later phases after a failure (diagnostic only)
+        if: always()
+        timeout-minutes: 20
+        run: |
+          # The installer stops at its first failure, so a red run would show
+          # one problem per run.  Resume after each failing phase, so the same
+          # run also reports later failures that do not depend on it.  These
+          # logs are diagnostics only: the job is already failing, and nothing
+          # below reads them as evidence.
+          set -uo pipefail
+          [ -f install.exit ] && [ "$(cat install.exit)" != 0 ] || exit 0
+          last_phase() {
+            grep -oE '^#+ PHASE [0-9]+' "$1" | tail -n 1 | grep -oE '[0-9]+$' || true
+          }
+          failed="$(last_phase install.log)"
+          while [ -n "$failed" ] && [ "$failed" -lt 12 ]; do
+            start=$((failed + 1))
+            log="probe-from-phase-$start.log"
+            /usr/bin/env -i \
+              PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+              HOME="$HOME" USER="$USER" LOGNAME="$USER" SHELL=/bin/bash \
+              XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+              DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+              SKIP_LATEX=1 SKIP_DOCKER_IMAGES=1 SKIP_GROK="$SKIP_GROK" \
+              AAS_PYTHON=/bin/false PYTHONPATH=/tmp/csr-hostile-aas-pythonpath \
+              PHASE="$start" \
+              /usr/bin/timeout --signal=TERM --kill-after=30s 15m \
+              /usr/bin/bash bin/install.sh </dev/null 2>&1 \
+              | /usr/bin/python3 -I -B bin/lib/ci_bounded_tee.py \
+                  --output "$log" --limit 4194304 >/dev/null
+            rc="${PIPESTATUS[0]}"
+            if [ "$rc" = 0 ]; then
+              echo "probe from phase $start: completed"
+              break
+            fi
+            stopped="$(last_phase "$log")"
+            reason="$(grep -E '(^|: )(FAIL|ERROR)|^prepare: ' "$log" | tail -n 1)"
+            echo "::error title=probe from phase $start::stopped in phase ${stopped:-?} (rc=$rc): ${reason:0:240}"
+            echo "::group::last 40 lines of $log"
+            tail -n 40 "$log"
+            echo "::endgroup::"
+            # A failure before any later phase header is shared setup; resuming
+            # further would only repeat it.
+            [ -n "$stopped" ] && [ "$stopped" -ge "$start" ] || break
+            failed="$stopped"
+          done
       - name: Show where the installer stopped
         if: always()
         run: |
@@ -734,17 +808,25 @@ jobs:
                   continue
               records[case_id] = value
 
+          # With SKIP_GROK=1 phase 6 installs no Grok release and emits no Grok
+          # gates; it must report the skip instead.
+          skip_grok = os.environ.get("SKIP_GROK") == "1"
           expected = {
               "install.bootstrap.preflight",
               "install.delegated-cgroup.preflight",
-              "install.phase6.grok-bootstrap-status",
-              "install.phase6.grok-install",
-              "install.phase6.grok-status",
               "install.phase8.aas-pin",
               "install.phase8.aas-install",
               "install.phase8.codex-runtime",
               "install.phase8.aas-verify",
           }
+          if not skip_grok:
+              expected |= {
+                  "install.phase6.grok-bootstrap-status",
+                  "install.phase6.grok-install",
+                  "install.phase6.grok-status",
+              }
+          elif "(Grok bootstrap, release and gates skipped via SKIP_GROK)" not in text:
+              errors.append("phase 6 did not report that SKIP_GROK skipped Grok")
           missing = sorted(expected - set(records))
           extra = sorted(set(records) - expected)
           if missing:
@@ -756,29 +838,30 @@ jobs:
               if value.get("schema_version") != 1 or value.get("status") != "passed":
                   errors.append(f"structured gate did not pass: {case_id}")
 
-          install = records.get("install.phase6.grok-install", {})
-          release_id = install.get("release_id")
-          if install.get("install_result_valid") is not True or not (
-              isinstance(release_id, str) and re.fullmatch(r"[0-9a-f]{64}", release_id)
-          ):
-              errors.append("structured Grok install result is invalid")
-          status = records.get("install.phase6.grok-status", {})
-          if release_id is not None:
-              expected_status = {
-                  "active_release_id": release_id,
-                  "active_release_valid": True,
-                  "active_root_release_id": release_id,
-                  "active_user_release_id": release_id,
-                  "exposed_user_releases": [release_id],
-                  "release_access_policy_valid": True,
-                  "rollback_denied": False,
-                  "rollback_eligibility_complete": True,
-              }
-              if any(status.get(name) != value for name, value in expected_status.items()):
-                  errors.append("structured Grok status result is incoherent")
-              eligible = status.get("rollback_eligible_releases")
-              if not isinstance(eligible, list) or release_id not in eligible:
-                  errors.append("structured Grok rollback eligibility is incomplete")
+          if not skip_grok:
+              install = records.get("install.phase6.grok-install", {})
+              release_id = install.get("release_id")
+              if install.get("install_result_valid") is not True or not (
+                  isinstance(release_id, str) and re.fullmatch(r"[0-9a-f]{64}", release_id)
+              ):
+                  errors.append("structured Grok install result is invalid")
+              status = records.get("install.phase6.grok-status", {})
+              if release_id is not None:
+                  expected_status = {
+                      "active_release_id": release_id,
+                      "active_release_valid": True,
+                      "active_root_release_id": release_id,
+                      "active_user_release_id": release_id,
+                      "exposed_user_releases": [release_id],
+                      "release_access_policy_valid": True,
+                      "rollback_denied": False,
+                      "rollback_eligibility_complete": True,
+                  }
+                  if any(status.get(name) != value for name, value in expected_status.items()):
+                      errors.append("structured Grok status result is incoherent")
+                  eligible = status.get("rollback_eligible_releases")
+                  if not isinstance(eligible, list) or release_id not in eligible:
+                      errors.append("structured Grok rollback eligibility is incomplete")
           preflight = records.get("install.bootstrap.preflight", {})
           bootstrap_release_id = preflight.get("bootstrap_release_id")
           if not (
@@ -805,15 +888,16 @@ jobs:
           )
           if re.search(r"capture_output\s*=\s*True", workflow_source):
               errors.append("workflow contains unbounded in-memory subprocess capture")
-          bootstrap_status = records.get("install.phase6.grok-bootstrap-status", {})
-          if not (
-              bootstrap_status.get("bootstrap_release_id") == bootstrap_release_id
-              and bootstrap_status.get("active_release_id") == release_id
-              and bootstrap_status.get("signed_dispatcher_status_valid") is True
-              and isinstance(bootstrap_status.get("rollback_eligible_releases"), list)
-              and release_id in bootstrap_status.get("rollback_eligible_releases", [])
-          ):
-              errors.append("structured signed-bootstrap phase-6 status is incoherent")
+          if not skip_grok:
+              bootstrap_status = records.get("install.phase6.grok-bootstrap-status", {})
+              if not (
+                  bootstrap_status.get("bootstrap_release_id") == bootstrap_release_id
+                  and bootstrap_status.get("active_release_id") == release_id
+                  and bootstrap_status.get("signed_dispatcher_status_valid") is True
+                  and isinstance(bootstrap_status.get("rollback_eligible_releases"), list)
+                  and release_id in bootstrap_status.get("rollback_eligible_releases", [])
+              ):
+                  errors.append("structured signed-bootstrap phase-6 status is incoherent")
           lock_matches = re.findall(
               r"^ai-agents-skills=.*@([0-9a-f]{40})$",
               Path("components.lock").read_text(encoding="ascii"),
@@ -966,6 +1050,18 @@ jobs:
               raise SystemExit(1)
           print("full-install machinery (degraded) and structured gates OK")
           PY
+      - name: Collect verification reports
+        if: always()
+        run: |
+          # The verifiers print one line per check and keep their detail in
+          # JSON reports; ship those with the log so a failure is diagnosable.
+          reports="$HOME/.local/state/coding-system/restore"
+          mkdir -p restore-reports
+          if [ -d "$reports" ]; then
+            find "$reports" -maxdepth 1 -type f -name '*.json' -size -4M \
+              -exec cp -- {} restore-reports/ \;
+          fi
+          ls -la restore-reports
       - name: Summary
         if: always()
         run: |
@@ -978,3 +1074,5 @@ jobs:
             install.log
             install.exit
             bootstrap-preflight.log
+            probe-from-phase-*.log
+            restore-reports/
