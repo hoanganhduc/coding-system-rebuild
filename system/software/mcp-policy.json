@@ -1,0 +1,41 @@
+{
+  "$schema": "coding-system.mcp-policy.v1",
+  "schema": "coding-system.mcp-policy.v1",
+  "targets": {
+    "claude": {
+      "format": "claude-json",
+      "sourceConfig": "agents/claude/.mcp.json",
+      "installedConfig": ".claude/.mcp.json",
+      "expectedEnabled": ["docling", "github", "scrapling", "sequential-thinking"],
+      "expectedDisabled": [],
+      "intentionallyOmitted": {},
+      "floatingAllowed": {
+        "github": "Kept by owner decision (2026-10-01) so a restore reproduces the live server; its launcher fetches the latest package at run time.",
+        "scrapling": "Kept by owner decision (2026-10-01) so a restore reproduces the live server; its launcher fetches the latest package at run time.",
+        "sequential-thinking": "Kept by owner decision (2026-10-01) so a restore reproduces the live server; its launcher fetches the latest package at run time."
+      }
+    },
+    "codex": {
+      "format": "codex-toml",
+      "sourceConfig": "agents/codex/config.toml.template",
+      "installedConfig": ".codex/config.toml",
+      "expectedEnabled": ["lean-explore", "openaiDeveloperDocs", "sequentialThinking"],
+      "expectedDisabled": [],
+      "intentionallyOmitted": {},
+      "floatingAllowed": {
+        "sequentialThinking": "Kept by owner decision (2026-10-01) so a restore reproduces the live server; its launcher fetches the latest package at run time."
+      }
+    },
+    "deepseek": {
+      "format": "deepseek-json",
+      "sourceConfig": "agents/deepseek/mcp.json",
+      "installedConfig": ".deepseek/mcp.json",
+      "expectedEnabled": ["lean-explore"],
+      "expectedDisabled": [],
+      "intentionallyOmitted": {
+        "codewhale": "The optional self-server does not return a standard MCP initialize result and is not enabled as a false-positive integration.",
+        "deepseek": "The missing legacy deepseek-tui self-server is not part of the locked CodeWhale CLI compatibility surface."
+      }
+    }
+  }
+}

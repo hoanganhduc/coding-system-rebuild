@@ -1,0 +1,81 @@
+{
+  "schema": "coding-system.python-wheelhouse-build/v1",
+  "python": "3.12",
+  "pureSdistWheels": [
+    "antlr4-python3-runtime==4.9.3",
+    "bibtexparser==1.4.4",
+    "pyaes==1.6.1",
+    "pylatexenc==2.10",
+    "sgmllib3k==1.0.0",
+    "unpywall==0.2.3"
+  ],
+  "gitWheels": [
+    {
+      "requirement": "git+https://github.com/hoanganhduc/getscipapers.git@59a3da24bfbf7c5a5c59d19b0a6d4beeea22daef",
+      "name": "getscipapers-hoanganhduc",
+      "version": "0.1.4"
+    },
+    {
+      "requirement": "git+https://github.com/fabiobatalha/crossrefapi.git@bce414d32fb8ccc394fd859381d64bed544dc332",
+      "name": "crossrefapi",
+      "version": "1.6.1"
+    },
+    {
+      "requirement": "git+https://github.com/hoanganhduc/course_management_toolkit.git@5e402db40db6c4a50d9c9292a5b352e62447ab04",
+      "name": "course-hoanganhduc",
+      "version": "0.4.0"
+    }
+  ],
+  "environments": {
+    "workspace": {
+      "strategy": "resolve",
+      "requirements": "system/packages/requirements/workspace-local.txt"
+    },
+    "shared": {
+      "strategy": "resolve",
+      "requirements": "system/packages/requirements/venvs.txt"
+    },
+    "docling-cpu": {
+      "strategy": "resolve",
+      "requirements": [
+        "docling==2.88.0",
+        "docling-mcp==1.3.4",
+        "torch==2.11.0+cpu",
+        "torchvision==0.26.0+cpu"
+      ],
+      "cpuPyTorch": [
+        "torch==2.11.0+cpu",
+        "torchvision==0.26.0+cpu"
+      ],
+      "cpuIndex": "https://download.pytorch.org/whl/cpu"
+    },
+    "lean-explore": {
+      "strategy": "resolve",
+      "requirements": "system/packages/requirements/lean-explore.txt"
+    },
+    "getscipapers": {
+      "strategy": "frozen-no-deps",
+      "requirements": "system/packages/requirements/getscipapers-runtime.txt",
+      "supplementalRequirements": ["Pygments==2.20.0"],
+      "requiredGitWheels": [
+        "getscipapers-hoanganhduc",
+        "crossrefapi"
+      ]
+    },
+    "aider": {
+      "strategy": "resolve",
+      "requirements": ["aider-chat==0.86.2"]
+    },
+    "modal": {
+      "strategy": "resolve",
+      "requirements": ["modal==1.5.3"]
+    },
+    "course-management": {
+      "strategy": "resolve",
+      "requirements": ["course-hoanganhduc==0.4.0"],
+      "requiredGitWheels": [
+        "course-hoanganhduc"
+      ]
+    }
+  }
+}

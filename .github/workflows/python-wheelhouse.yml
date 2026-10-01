@@ -1,0 +1,203 @@
+name: python-wheelhouse
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'system/docker/python-wheelhouse/**'
+      - 'system/packages/requirements/**'
+      - 'bin/extract-python-wheelhouse.py'
+      - '.github/workflows/python-wheelhouse.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'system/docker/python-wheelhouse/**'
+      - 'system/packages/requirements/**'
+      - 'bin/extract-python-wheelhouse.py'
+      - '.github/workflows/python-wheelhouse.yml'
+  workflow_dispatch:
+
+# A newer push to the same pull request supersedes the older run; runs on
+# main queue instead, so a manual drill is never cancelled by a later push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/coding-system-rebuild-python-wheelhouse
+
+jobs:
+  native-validation:
+    if: github.event_name != 'workflow_dispatch'
+    permissions:
+      contents: read
+    name: validate-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - name: Build and verify native artifact without publishing
+        env:
+          CANDIDATE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(dpkg --print-architecture)" = "${{ matrix.arch }}"
+          docker buildx build \
+            --file system/docker/python-wheelhouse/Dockerfile \
+            --platform "linux/${{ matrix.arch }}" \
+            --load \
+            --tag "$CANDIDATE" \
+            .
+          container="python-wheelhouse-${GITHUB_RUN_ID}-${{ matrix.arch }}"
+          cleanup() { docker rm "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker create \
+            --name "$container" \
+            "$CANDIDATE" \
+            /__coding_system_artifact_image_never_runs__ >/dev/null
+          mkdir -p extracted
+          docker cp "$container:/wheelhouse/." extracted/
+          python3 bin/extract-python-wheelhouse.py verify-directory \
+            --directory extracted \
+            --platform "linux/${{ matrix.arch }}"
+          python3 system/docker/python-wheelhouse/verify-offline.py \
+            --wheelhouse extracted \
+            --platform "linux/${{ matrix.arch }}"
+
+  native-candidate:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      packages: write
+    name: native-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - name: Build native artifact image locally
+        env:
+          CANDIDATE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(dpkg --print-architecture)" = "${{ matrix.arch }}"
+          docker buildx build \
+            --file system/docker/python-wheelhouse/Dockerfile \
+            --platform "linux/${{ matrix.arch }}" \
+            --load \
+            --tag "$CANDIDATE" \
+            .
+
+      - name: Extract without running and verify offline
+        env:
+          CANDIDATE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          container="python-wheelhouse-${GITHUB_RUN_ID}-${{ matrix.arch }}"
+          cleanup() { docker rm "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker create \
+            --name "$container" \
+            "$CANDIDATE" \
+            /__coding_system_artifact_image_never_runs__ >/dev/null
+          mkdir -p extracted
+          docker cp "$container:/wheelhouse/." extracted/
+          python3 bin/extract-python-wheelhouse.py verify-directory \
+            --directory extracted \
+            --platform "linux/${{ matrix.arch }}"
+          python3 system/docker/python-wheelhouse/verify-offline.py \
+            --wheelhouse extracted \
+            --platform "linux/${{ matrix.arch }}"
+
+      - name: Log in to GHCR after validation
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish architecture candidate
+        id: publish
+        env:
+          CANDIDATE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker push "$CANDIDATE"
+          manifest_json="$(docker buildx imagetools inspect "$CANDIDATE" --format '{{json .Manifest}}')"
+          digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$manifest_json")"
+          printf '%s@%s\n' "${CANDIDATE%:*}" "$digest" > "digest-${{ matrix.arch }}.txt"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          cat "digest-${{ matrix.arch }}.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-wheelhouse-digest-${{ matrix.arch }}
+          path: digest-${{ matrix.arch }}.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-manual-multiarch-candidate:
+    if: github.event_name == 'workflow_dispatch'
+    needs: native-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: python-wheelhouse-digest-*
+          merge-multiple: true
+      - name: Publish reviewed-run multiarch candidate only
+        env:
+          MULTIARCH: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t sources < <(cat digest-amd64.txt digest-arm64.txt)
+          test "${#sources[@]}" -eq 2
+          docker buildx imagetools create --tag "$MULTIARCH" "${sources[@]}"
+          manifest_json="$(docker buildx imagetools inspect "$MULTIARCH" --format '{{json .Manifest}}')"
+          digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$manifest_json")"
+          {
+            echo '## Python wheelhouse multiarch candidate'
+            echo
+            echo "\`$MULTIARCH@$digest\`"
+            echo
+            echo 'This workflow does not edit `images.lock.json` or qualification state.'
+          } >> "$GITHUB_STEP_SUMMARY"

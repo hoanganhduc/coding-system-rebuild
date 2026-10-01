@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "cloudflare-skills",
+      "repository": "https://github.com/cloudflare/skills.git",
+      "commit": "30553f89ae1ef1e3c2917cd09d72dac992bb4e9a",
+      "license": "Apache-2.0",
+      "source_dir": "skills",
+      "skills": [
+        "agents-sdk",
+        "cloudflare",
+        "cloudflare-email-service",
+        "cloudflare-one",
+        "cloudflare-one-migrations",
+        "durable-objects",
+        "sandbox-sdk",
+        "turnstile-spin",
+        "web-perf",
+        "workers-best-practices",
+        "wrangler"
+      ],
+      "targets": [
+        ".claude/skills",
+        ".codex/skills",
+        ".copilot/skills",
+        ".config/opencode/skills",
+        ".openclaw/skills"
+      ]
+    }
+  ]
+}

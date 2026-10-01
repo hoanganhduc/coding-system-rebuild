@@ -1,0 +1,3 @@
+# Maintainer fork pinned to an inspected Git commit; transitive wheel locking is
+# tracked by the OpenClaw closure plan.
+git+https://github.com/hoanganhduc/getscipapers.git@8a4f60e712cf1f20859e784c10ec68c37e899880

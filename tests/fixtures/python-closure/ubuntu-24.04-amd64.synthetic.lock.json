@@ -1,0 +1,77 @@
+{
+  "$schema": "../../../system/python-closure/python-closure.schema.json",
+  "schema": "coding-system.python-closure/v2",
+  "platform": "ubuntu-24.04-amd64",
+  "python": {"implementation": "cpython", "version": "3.12"},
+  "qualification": {
+    "state": "partial",
+    "blockers": ["Synthetic fixture qualifies only the workspace environment."]
+  },
+  "wheelhouseManifestSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "environments": {
+    "workspace": {
+      "installPath": ".openclaw/workspace/.python-closure/workspace",
+      "profile": "default",
+      "manifestSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "qualification": {"state": "qualified", "blockers": []},
+      "artifacts": [
+        {
+          "name": "closure-demo",
+          "version": "1.0.0",
+          "filename": "closure_demo-1.0.0-py3-none-any.whl",
+          "tags": ["py3-none-any"],
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    "shared": {
+      "installPath": ".local/share/coding-system/python-closure/shared",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {"state": "pending-artifacts", "blockers": ["Synthetic fixture."]},
+      "artifacts": []
+    },
+    "docling-cpu": {
+      "installPath": ".local/share/coding-system/python-closure/docling-cpu",
+      "profile": "cpu-only",
+      "manifestSha256": null,
+      "qualification": {"state": "pending-artifacts", "blockers": ["Synthetic fixture."]},
+      "artifacts": []
+    },
+    "lean-explore": {
+      "installPath": ".local/share/coding-system/python-closure/lean-explore",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {"state": "pending-artifacts", "blockers": ["Synthetic fixture."]},
+      "artifacts": []
+    },
+    "getscipapers": {
+      "installPath": ".local/share/coding-system/python-closure/getscipapers",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {"state": "pending-artifacts", "blockers": ["Synthetic fixture."]},
+      "artifacts": []
+    },
+    "aider": {
+      "installPath": ".local/share/coding-system/python-closure/aider",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {"state": "pending-artifacts", "blockers": ["Synthetic fixture."]},
+      "artifacts": []
+    },
+    "modal": {
+      "installPath": ".local/share/coding-system/python-closure/modal",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {"state": "pending-artifacts", "blockers": ["Synthetic fixture."]},
+      "artifacts": []
+    },
+    "course-management": {
+      "installPath": ".course_venv",
+      "profile": "default",
+      "manifestSha256": null,
+      "qualification": {"state": "pending-artifacts", "blockers": ["Synthetic fixture."]},
+      "artifacts": []
+    }
+  }
+}
