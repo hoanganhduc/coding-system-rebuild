@@ -158,11 +158,13 @@ import json, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 print(manifest.get("version", "") if manifest.get("name") == "codewhale" else "")
 ' "$codewhale_manifest" 2>/dev/null || true)
+  locked_codewhale=$(python3 "$REPO/system/software/lockctl.py" --arch "$LOCK_ARCH" \
+    artifact codewhale-cli version 2>/dev/null || true)
   if [[ -d "$codewhale_root" && ! -L "$codewhale_root" \
       && -f "$codewhale_manifest" && ! -L "$codewhale_manifest" \
       && -d "$codewhale_downloads" && ! -L "$codewhale_downloads" \
-      && "$codewhale_version" == "0.9.2" ]]; then
-    ok "CodeWhale npm wrapper identity/version 0.9.2"
+      && -n "$locked_codewhale" && "$codewhale_version" == "$locked_codewhale" ]]; then
+    ok "CodeWhale npm wrapper identity/version $codewhale_version"
   else
     bad "CodeWhale npm wrapper identity/version or native-download directory"
   fi

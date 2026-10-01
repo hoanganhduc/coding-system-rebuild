@@ -376,13 +376,16 @@ class OpenClawExecutableContractTests(unittest.TestCase):
 
     def test_builder_has_exact_platform_inputs_for_both_architectures(self) -> None:
         observed: dict[str, str] = {}
+        wrapper_version = json.loads(
+            (ROOT / "system/software/npm-closure/package-lock.json").read_text(encoding="utf-8")
+        )["packages"]["node_modules/codewhale"]["version"]
         for arch in ("amd64", "arm64"):
             _profile, artifacts = closure_module._platform_lock(ROOT, arch)
             observed[arch] = artifacts["node"]["sha256"]
             self.assertIn(f"linux-{'x64' if arch == 'amd64' else 'arm64'}", artifacts["node"]["url"])
             for identifier in closure_module.ARTIFACT_IDS:
                 self.assertRegex(artifacts[identifier]["sha256"], r"^[0-9a-f]{64}$")
-                self.assertEqual(artifacts[identifier]["version"], "0.9.2")
+                self.assertEqual(artifacts[identifier]["version"], wrapper_version)
         self.assertNotEqual(observed["amd64"], observed["arm64"])
 
     def run_helper(self, home: Path, contract: Path) -> subprocess.CompletedProcess[str]:

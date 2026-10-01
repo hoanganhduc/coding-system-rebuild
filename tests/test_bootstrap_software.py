@@ -332,51 +332,33 @@ class SoftwareLockTests(unittest.TestCase):
             self.assertNotIn(forbidden, builder)
 
     def test_codewhale_native_release_assets_are_exactly_locked_per_arch(self) -> None:
-        expected = {
-            "arm64": {
-                "codewhale-codew": (
-                    "codew-linux-arm64",
-                    "c3b0ab8d9f24c01397173692dd2b2e8aae4e21003d4f0d8ee6d7ca50960604c2",
-                ),
-                "codewhale-cli": (
-                    "codewhale-linux-arm64",
-                    "caedb1a28ca232d584431958313785f3fd5e0472e2512778114d29554ec239ff",
-                ),
-                "codewhale-tui": (
-                    "codewhale-tui-linux-arm64",
-                    "636230b73983726e80656514387be087760aad60a3635e596b2c5f0c1761e622",
-                ),
-            },
-            "amd64": {
-                "codewhale-codew": (
-                    "codew-linux-x64",
-                    "98bb0c504aacfe391f1dbf45b28ca15398413ee94ab44641f46dc0d530b8a204",
-                ),
-                "codewhale-cli": (
-                    "codewhale-linux-x64",
-                    "43ca1ceb477f8208b3a45698258e227879f546855269fef946aeeb356ccc6b26",
-                ),
-                "codewhale-tui": (
-                    "codewhale-tui-linux-x64",
-                    "e498c4f7dc8040c2d8bde84e92528e771fc70e88ce38ef157963d5c1b197f573",
-                ),
-            },
+        # Since v0.9.5 CodeWhale ships one binary per platform under three asset
+        # names; the official codewhale-artifacts-sha256.txt lists one digest.
+        digests = {
+            "arm64": ("linux-arm64", "f3e2d82257cac33ef033f033a9638cb00189a3334deb58fbff7b89aed218273a"),
+            "amd64": ("linux-x64", "c443c2c32c743dd80ff56397b1e7bbfe55b1ca6306ff55065b977bc655d50ed1"),
         }
-        base_url = "https://github.com/Hmbown/CodeWhale/releases/download/v0.9.2/"
-        for arch, wanted in expected.items():
+        assets = {"codewhale-codew": "codew", "codewhale-cli": "codewhale", "codewhale-tui": "codewhale-tui"}
+        base_url = "https://github.com/Hmbown/CodeWhale/releases/download/v0.10.0/"
+        wrapper = json.loads(
+            (ROOT / "system/software/npm-closure/package-lock.json").read_text(encoding="utf-8")
+        )["packages"]["node_modules/codewhale"]["version"]
+        for arch, (platform_suffix, digest) in digests.items():
             artifacts = {
                 item["id"]: item for item in self.lockctl.load_profile(arch)["artifacts"]
             }
             with self.subTest(arch=arch):
-                for identifier, (asset_name, digest) in wanted.items():
+                for identifier, asset in assets.items():
                     artifact = artifacts[identifier]
-                    self.assertEqual(artifact["version"], "0.9.2")
-                    self.assertEqual(artifact["url"], base_url + asset_name)
+                    self.assertEqual(artifact["version"], "0.10.0")
+                    self.assertEqual(artifact["version"], wrapper)
+                    self.assertEqual(artifact["url"], f"{base_url}{asset}-{platform_suffix}")
                     self.assertEqual(artifact["sha256"], digest)
                     self.assertEqual(artifact["format"], "binary")
-                    self.assertEqual(
-                        artifact["evidence"],
-                        "CodeWhale v0.9.2 official codewhale-artifacts-sha256.txt",
+                    self.assertTrue(
+                        artifact["evidence"].startswith(
+                            "CodeWhale v0.10.0 official codewhale-artifacts-sha256.txt"
+                        )
                     )
 
     def test_codewhale_native_assets_are_injected_before_tree_digest(self) -> None:
@@ -403,11 +385,12 @@ class SoftwareLockTests(unittest.TestCase):
         self.assertIn(
             'ARTIFACT_TARGETS = ("codew", "codewhale", "codewhale-tui")', builder
         )
-        self.assertIn('manifest.get("version") != "0.9.2"', builder)
         self.assertIn(
-            '_write_owned_file(downloads / f"{target_name}.version", b"0.9.2", 0o644)',
+            'native_versions = {artifacts[identifier]["version"] for identifier in ARTIFACT_IDS}',
             builder,
         )
+        self.assertIn('manifest.get("version") != codewhale_version', builder)
+        self.assertIn('codewhale_version.encode("ascii")', builder)
         self.assertLess(
             builder.index("_write_owned_file(downloads / target_name"),
             builder.index('"tree-digest"'),

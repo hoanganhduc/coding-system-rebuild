@@ -200,6 +200,14 @@ class NpmPromotionTests(unittest.TestCase):
                     self.lockctl.promote_npm(name, version, integrity_of=integrity_of, today="2026-10-01")
         self.assertEqual(self.files(), before)
 
+    def test_codewhale_moves_only_with_its_native_artifacts(self) -> None:
+        before = self.files()
+        with self.assertRaisesRegex(self.lockctl.LockError, "native artifacts"):
+            self.lockctl.promote_npm(
+                "codewhale", "99.0.0", integrity_of=lambda *_: "sha512-fixture", today="2026-10-01"
+            )
+        self.assertEqual(self.files(), before)
+
     def test_backup_promotes_only_newer_npm_globals_outside_the_openclaw_tuple(self) -> None:
         promoter = load("csr_promote_installed_npm", ROOT / "bin/promote-installed-clis.py")
         lock = json.loads((self.root / "system/software/npm-globals.lock.json").read_text(encoding="utf-8"))

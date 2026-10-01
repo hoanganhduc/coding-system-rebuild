@@ -107,17 +107,21 @@ An older unowned global package tree is moved once to
 
 Claude Code and OpenCode normally use postinstall scripts to copy a platform
 binary. Restore instead exposes the corresponding Linux arm64 or amd64 binary
-from its integrity-locked optional npm package directly. CodeWhale 0.9.2 is a
-different case: its npm wrapper normally downloads three native release files
-on first use, outside npm's package-lock. Restore keeps lifecycle scripts
-disabled and obtains `codew`, `codewhale`, and `codewhale-tui` through
-`lockctl.py` from the exact v0.9.2 GitHub release URLs. Their per-architecture
-SHA-256 values are grounded in CodeWhale's official
-[`codewhale-artifacts-sha256.txt`](https://github.com/Hmbown/CodeWhale/releases/download/v0.9.2/codewhale-artifacts-sha256.txt).
-The verified files and exact `0.9.2` version markers are injected into the
-wrapper's `bin/downloads/` directory before the installed npm tree is hashed and
-made read-only. Verification rehashes all three native files against the active
-arm64 or amd64 platform lock; it never invokes CodeWhale's downloader.
+from its integrity-locked optional npm package directly. CodeWhale is a
+different case: its npm wrapper normally downloads its native release files on
+first use, outside npm's package-lock. Restore keeps lifecycle scripts disabled
+and obtains `codew`, `codewhale`, and `codewhale-tui` through `lockctl.py` from
+the exact GitHub release URLs of the version the npm closure locks (0.10.0,
+where all three are one binary). Their per-architecture SHA-256 values are
+grounded in CodeWhale's official
+[`codewhale-artifacts-sha256.txt`](https://github.com/Hmbown/CodeWhale/releases/download/v0.10.0/codewhale-artifacts-sha256.txt).
+The builder takes the version from the platform lock, refuses a wrapper of any
+other version, and injects the verified files and their version markers into
+the wrapper's `bin/downloads/` directory before the installed npm tree is
+hashed and made read-only. Verification rehashes all three native files against
+the active arm64 or amd64 platform lock; it never invokes CodeWhale's
+downloader. The wrapper and these artifacts move together: a backup never
+promotes the codewhale npm package on its own.
 
 The host's system layer is declared too. `system/host/services.v1.json` names
 the system services a restore enables (Caddy, earlyoom, monit, Ollama, the forms

@@ -686,17 +686,24 @@ def build_closure(repository: Path, arch: str, node_root: Path, stream: BinaryIO
             env=environment,
             timeout=1800,
         )
+        # The npm wrapper and its native artifacts are one release: the version
+        # comes from the platform lock and the wrapper must match it.
+        native_versions = {artifacts[identifier]["version"] for identifier in ARTIFACT_IDS}
+        if len(native_versions) != 1:
+            raise ClosureError("locked CodeWhale artifacts disagree on their version")
+        codewhale_version = native_versions.pop()
         codewhale = stage / "node_modules/codewhale"
         manifest = json.loads((codewhale / "package.json").read_bytes())
-        if not isinstance(manifest, dict) or manifest.get("name") != "codewhale" or manifest.get("version") != "0.9.2":
+        if not isinstance(manifest, dict) or manifest.get("name") != "codewhale" \
+                or manifest.get("version") != codewhale_version:
             raise ClosureError("locked CodeWhale package identity is invalid")
         downloads = codewhale / "bin/downloads"
         downloads.mkdir(mode=0o755, exist_ok=True)
         for identifier, target_name in zip(ARTIFACT_IDS, ARTIFACT_TARGETS, strict=True):
-            if artifacts[identifier]["version"] != "0.9.2":
-                raise ClosureError("CodeWhale artifact version differs from its npm wrapper")
             _write_owned_file(downloads / target_name, injected[identifier], 0o755)
-            _write_owned_file(downloads / f"{target_name}.version", b"0.9.2", 0o644)
+            _write_owned_file(
+                downloads / f"{target_name}.version", codewhale_version.encode("ascii"), 0o644
+            )
         _run_checked(
             [
                 "/usr/bin/python3",

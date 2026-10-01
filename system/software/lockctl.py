@@ -501,6 +501,9 @@ def promote_artifact(identifier: str, version: str, *, sha256_of=None, today: st
 
 # openclaw moves only with the OpenClaw compatibility tuple, never on its own.
 NPM_TUPLE_MANAGED = frozenset({"openclaw"})
+# codewhale's npm wrapper runs native artifacts locked in the platform locks
+# (codewhale-*); the two move together, never the wrapper alone.
+NPM_NATIVE_COUPLED = frozenset({"codewhale"})
 
 
 def npm_registry_integrity(name: str, version: str) -> str:
@@ -539,6 +542,8 @@ def promote_npm(name: str, version: str, *, integrity_of=None, today: str | None
     today = today or datetime.date.today().isoformat()
     if name in NPM_TUPLE_MANAGED:
         raise LockError(f"{name} moves only with its compatibility tuple")
+    if name in NPM_NATIVE_COUPLED:
+        raise LockError(f"{name} moves only together with its locked native artifacts")
     lock_path = SOFTWARE / "npm-globals.lock.json"
     requested_path = ROOT / "system/packages/npm-globals.txt"
     lock_text = lock_path.read_text(encoding="utf-8")
