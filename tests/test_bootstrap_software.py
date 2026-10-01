@@ -21,6 +21,29 @@ import zlib
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _pinned_openclaw_bot() -> Path:
+    """The pinned openclaw-bot checkout: the installed component, else external/.
+
+    bin/components.sh installs it under ~/.local/share/coding-system/components;
+    a development layout may provide it as external/openclaw-bot instead.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "component_paths_for_tests", ROOT / "bin/lib/component_paths.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.resolve_component_path(
+            ROOT, Path.home(), "openclaw-bot", source_fallback=True
+        )
+    except module.ComponentPathError:
+        return ROOT / "external/openclaw-bot"
+
+
+OPENCLAW_BOT = _pinned_openclaw_bot()
 LOCKCTL_PATH = ROOT / "system/software/lockctl.py"
 PULL_IMAGES = ROOT / "system/software/pull-locked-images.py"
 BOOTSTRAP = ROOT / "restore-ubuntu.sh"
@@ -62,9 +85,10 @@ class SoftwareLockTests(unittest.TestCase):
             if line and not line.startswith("#")
         }
         self.assertTrue({"cron", "rclone"}.issubset(apt_packages))
-        gateway = (
-            ROOT / "external/openclaw-bot/systemd/user/openclaw-gateway.service"
-        ).read_text()
+        gateway_unit = OPENCLAW_BOT / "systemd/user/openclaw-gateway.service"
+        if not gateway_unit.exists():
+            self.skipTest("the openclaw-bot component is not fetched in this job")
+        gateway = gateway_unit.read_text()
         self.assertIn(
             "{{ OPENCLAW_LIBEXEC }}/host_exec.py --generation "
             "{{ OPENCLAW_LIBEXEC }} --artifact openclaw_host_cli.py -- gateway",
@@ -474,8 +498,12 @@ class BootstrapTests(unittest.TestCase):
     def remove_group_world_write(self, path: Path) -> None:
         path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o022)
         for member in path.rglob("*"):
-            if not member.is_symlink():
-                member.chmod(stat.S_IMODE(member.stat().st_mode) & ~0o022)
+            try:
+                if not member.is_symlink():
+                    member.chmod(stat.S_IMODE(member.stat().st_mode) & ~0o022)
+            except FileNotFoundError:
+                # Git's background maintenance removes its lock files mid-walk.
+                continue
 
     def write_recovery_set(self, directory: Path, commit: str = "a" * 40) -> None:
         directory.mkdir(parents=True)

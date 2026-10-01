@@ -17,6 +17,35 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The compatibility checkout sits beside the repository on the reference host
+# and in $HOME on a fresh one (bin/components.sh).
+AAS_CHECKOUT = next(
+    (path for path in (ROOT.parent / "ai-agents-skills", Path.home() / "ai-agents-skills") if path.is_dir()),
+    ROOT.parent / "ai-agents-skills",
+)
+
+
+def _pinned_openclaw_bot() -> Path:
+    """The pinned openclaw-bot checkout: the installed component, else external/.
+
+    bin/components.sh installs it under ~/.local/share/coding-system/components;
+    a development layout may provide it as external/openclaw-bot instead.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "component_paths_for_tests", ROOT / "bin/lib/component_paths.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.resolve_component_path(
+            ROOT, Path.home(), "openclaw-bot", source_fallback=True
+        )
+    except module.ComponentPathError:
+        return ROOT / "external/openclaw-bot"
+
+
+OPENCLAW_BOT = _pinned_openclaw_bot()
 SCRIPT = ROOT / "bin/verify-skill-credentials.py"
 MODULE_SPEC = importlib.util.spec_from_file_location(
     "coding_system_skill_credential_verifier",
@@ -82,8 +111,8 @@ def copy_contract_repository(destination: Path) -> None:
 
     source_roots = {
         "repository": ROOT,
-        "openclaw": ROOT / "external/openclaw-bot",
-        "aas": ROOT.parent / "ai-agents-skills",
+        "openclaw": OPENCLAW_BOT,
+        "aas": AAS_CHECKOUT,
     }
     destination_roots = {
         "repository": destination,
@@ -329,7 +358,7 @@ class SkillCredentialVerifierTests(unittest.TestCase):
         )
 
     def install_projection_probes(self, home: Path) -> None:
-        aas_runtime = ROOT.parent / "ai-agents-skills/canonical/runtime"
+        aas_runtime = AAS_CHECKOUT / "canonical/runtime"
         aas_runners = aas_runtime / "runners"
         runtime = home / ".local/share/ai-agents-skills/runtime"
         runners = runtime / "runners"

@@ -8,7 +8,13 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-AAS_ROOT = ROOT.parent / "ai-agents-skills"
+# The compatibility checkout sits beside the repository on the reference host
+# and in $HOME on a fresh one (bin/components.sh).
+AAS_CHECKOUT = next(
+    (path for path in (ROOT.parent / "ai-agents-skills", Path.home() / "ai-agents-skills") if path.is_dir()),
+    ROOT.parent / "ai-agents-skills",
+)
+AAS_ROOT = AAS_CHECKOUT
 HELPER = ROOT / "bin/openclaw-skill-inventory.py"
 SPEC = importlib.util.spec_from_file_location("openclaw_skill_inventory", HELPER)
 assert SPEC is not None and SPEC.loader is not None

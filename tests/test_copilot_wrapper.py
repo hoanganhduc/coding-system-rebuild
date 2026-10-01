@@ -14,6 +14,12 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The compatibility checkout sits beside the repository on the reference host
+# and in $HOME on a fresh one (bin/components.sh).
+AAS_CHECKOUT = next(
+    (path for path in (ROOT.parent / "ai-agents-skills", Path.home() / "ai-agents-skills") if path.is_dir()),
+    ROOT.parent / "ai-agents-skills",
+)
 TEMPLATE = ROOT / "system/bin/copilot"
 MATERIALIZER = ROOT / "bin/materialize-secret-projections.py"
 
@@ -76,7 +82,7 @@ class CopilotWrapperTests(unittest.TestCase):
         return wrapper
 
     def add_secret_loader(self, home: Path) -> None:
-        source = ROOT.parent / "ai-agents-skills/canonical/runtime/runners"
+        source = AAS_CHECKOUT / "canonical/runtime/runners"
         runtime = home / ".local/share/ai-agents-skills/runtime"
         runners = runtime / "runners"
         runners.mkdir(parents=True)

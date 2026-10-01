@@ -14,6 +14,35 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The compatibility checkout sits beside the repository on the reference host
+# and in $HOME on a fresh one (bin/components.sh).
+AAS_CHECKOUT = next(
+    (path for path in (ROOT.parent / "ai-agents-skills", Path.home() / "ai-agents-skills") if path.is_dir()),
+    ROOT.parent / "ai-agents-skills",
+)
+
+
+def _pinned_openclaw_bot() -> Path:
+    """The pinned openclaw-bot checkout: the installed component, else external/.
+
+    bin/components.sh installs it under ~/.local/share/coding-system/components;
+    a development layout may provide it as external/openclaw-bot instead.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "component_paths_for_tests", ROOT / "bin/lib/component_paths.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.resolve_component_path(
+            ROOT, Path.home(), "openclaw-bot", source_fallback=True
+        )
+    except module.ComponentPathError:
+        return ROOT / "external/openclaw-bot"
+
+
+OPENCLAW_BOT = _pinned_openclaw_bot()
 MIGRATION_SCRIPT = ROOT / "bin/migrate-openclaw-config.py"
 MIGRATION_SPEC = importlib.util.spec_from_file_location(
     "migrate_openclaw_config", MIGRATION_SCRIPT
@@ -148,7 +177,7 @@ class InstallClosureTests(unittest.TestCase):
         ]
         self.assertEqual(len(pins), 1)
         self.assertRegex(pins[0], r"^[0-9a-f]{40}$")
-        aas_root = ROOT.parent / "ai-agents-skills"
+        aas_root = AAS_CHECKOUT
         self.assertTrue(aas_root.is_dir())
         completed = subprocess.run(
             ["git", "show", f"{pins[0]}:manifest/target-state.yaml"],
@@ -587,7 +616,7 @@ class InstallClosureTests(unittest.TestCase):
         }
         for unit, queue_kind in queue_kinds.items():
             with self.subTest(unit=unit):
-                service = (ROOT / "external/openclaw-bot/systemd/user" / unit).read_text(
+                service = (OPENCLAW_BOT / "systemd/user" / unit).read_text(
                     encoding="utf-8"
                 )
                 self.assertIn("{{ OPENCLAW_LIBEXEC }}/host_exec.py", service)
@@ -598,7 +627,7 @@ class InstallClosureTests(unittest.TestCase):
                 self.assertNotIn("ExecStart={{ OPENCLAW_WORKSPACE }}", service)
 
     def test_component_units_are_exact_and_phase_eleven_installs_them_transactionally(self) -> None:
-        component_root = ROOT / "external/openclaw-bot/systemd/user"
+        component_root = OPENCLAW_BOT / "systemd/user"
         managed = sorted(
             path.relative_to(component_root)
             for path in component_root.rglob("*")
@@ -893,7 +922,7 @@ class InstallClosureTests(unittest.TestCase):
 
     def test_degraded_migration_removes_placeholders_and_disables_channels(self) -> None:
         lock = ROOT / "system/openclaw/compatibility.lock.json"
-        template = ROOT / "external/openclaw-bot/config/openclaw.json.template"
+        template = OPENCLAW_BOT / "config/openclaw.json.template"
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             config = home / ".openclaw/openclaw.json"
